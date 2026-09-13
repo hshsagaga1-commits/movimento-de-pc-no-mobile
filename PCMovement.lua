@@ -3,9 +3,9 @@ local RunService = game:GetService("RunService")
 local Workspace = game:GetService("Workspace")
 
 local player = Players.LocalPlayer
-local bindName = "__JoaoPCMovementLock"
+local bindName = "__JoaoPCMovementCenterLock"
 
--- Reexecutar o script substitui a instancia anterior sem empilhar conexoes.
+-- Reexecutar substitui a versao anterior sem empilhar nada.
 if getgenv().__JoaoPCMovementCleanup then
     pcall(getgenv().__JoaoPCMovementCleanup)
 end
@@ -14,31 +14,84 @@ pcall(function()
     RunService:UnbindFromRenderStep(bindName)
 end)
 
-local currentCharacter
+local gui
+local dot
+local character
 local humanoid
 local rootPart
 local oldAutoRotate
-local charConnection
+local attachment
+local alignOrientation
+local characterAddedConnection
+
+local function destroyOrientation()
+    if alignOrientation then
+        pcall(function()
+            alignOrientation:Destroy()
+        end)
+        alignOrientation = nil
+    end
+
+    if attachment then
+        pcall(function()
+            attachment:Destroy()
+        end)
+        attachment = nil
+    end
+end
 
 local function clearCharacter()
+    destroyOrientation()
+
     if humanoid and humanoid.Parent and oldAutoRotate ~= nil then
         pcall(function()
             humanoid.AutoRotate = oldAutoRotate
         end)
     end
 
-    currentCharacter = nil
+    character = nil
     humanoid = nil
     rootPart = nil
     oldAutoRotate = nil
 end
 
-local function attachCharacter(character)
+local function makeCenterDot()
+    local playerGui = player:WaitForChild("PlayerGui")
+
+    local old = playerGui:FindFirstChild("PCMovementCenterDot")
+    if old then
+        old:Destroy()
+    end
+
+    gui = Instance.new("ScreenGui")
+    gui.Name = "PCMovementCenterDot"
+    gui.IgnoreGuiInset = true
+    gui.ResetOnSpawn = false
+    gui.DisplayOrder = 2147483647
+    gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+    gui.Parent = playerGui
+
+    dot = Instance.new("Frame")
+    dot.Name = "CenterDot"
+    dot.AnchorPoint = Vector2.new(0.5, 0.5)
+    dot.Position = UDim2.fromScale(0.5, 0.5)
+    dot.Size = UDim2.fromOffset(2, 2)
+    dot.BorderSizePixel = 0
+    dot.BackgroundColor3 = Color3.new(1, 1, 1)
+    dot.ZIndex = 1000000
+    dot.Parent = gui
+
+    local corner = Instance.new("UICorner")
+    corner.CornerRadius = UDim.new(1, 0)
+    corner.Parent = dot
+end
+
+local function attachCharacter(newCharacter)
     clearCharacter()
 
-    currentCharacter = character
-    humanoid = character:WaitForChild("Humanoid", 10)
-    rootPart = character:WaitForChild("HumanoidRootPart", 10)
+    character = newCharacter
+    humanoid = newCharacter:WaitForChild("Humanoid", 10)
+    rootPart = newCharacter:WaitForChild("HumanoidRootPart", 10)
 
     if not humanoid or not rootPart then
         clearCharacter()
@@ -47,72 +100,118 @@ local function attachCharacter(character)
 
     oldAutoRotate = humanoid.AutoRotate
     humanoid.AutoRotate = false
+
+    attachment = Instance.new("Attachment")
+    attachment.Name = "__PCMovementCenterAttachment"
+    attachment.Parent = rootPart
+
+    alignOrientation = Instance.new("AlignOrientation")
+    alignOrientation.Name = "__PCMovementCenterOrientation"
+    alignOrientation.Mode = Enum.OrientationAlignmentMode.OneAttachment
+    alignOrientation.Attachment0 = attachment
+    alignOrientation.RigidityEnabled = true
+    alignOrientation.Responsiveness = 200
+    alignOrientation.MaxTorque = math.huge
+    alignOrientation.Parent = rootPart
 end
+
+local function getCenterDirection(camera)
+    -- O PONTO e a referencia principal: pegamos um raio que sai EXATAMENTE
+    -- do pixel central da tela, igual a mira do Minecraft / mouse-lock do PC.
+    local viewport = camera.ViewportSize
+    local centerX = viewport.X * 0.5
+    local centerY = viewport.Y * 0.5
+    local ray = camera:ViewportPointToRay(centerX, centerY)
+
+    local direction = ray.Direction
+    local flat = Vector3.new(direction.X, 0, direction.Z)
+
+    if flat.Magnitude < 0.0001 then
+        return nil
+    end
+
+    return flat.Unit
+end
+
+local function shouldLock()
+    if getgenv().PCMovementEnabled == false then
+        return false
+    end
+
+    if not character or not character.Parent or not humanoid or not rootPart then
+        return false
+    end
+
+    if humanoid.Health <= 0 or rootPart.Anchored or humanoid.Sit then
+        return false
+    end
+
+    local state = humanoid:GetState()
+    if state == Enum.HumanoidStateType.Dead
+        or state == Enum.HumanoidStateType.Seated
+        or state == Enum.HumanoidStateType.Physics then
+        return false
+    end
+
+    return true
+end
+
+makeCenterDot()
 
 if player.Character then
     task.spawn(attachCharacter, player.Character)
 end
 
-charConnection = player.CharacterAdded:Connect(function(character)
-    task.spawn(attachCharacter, character)
+characterAddedConnection = player.CharacterAdded:Connect(function(newCharacter)
+    task.spawn(attachCharacter, newCharacter)
 end)
 
-RunService:BindToRenderStep(bindName, Enum.RenderPriority.Camera.Value + 1, function()
-    if getgenv().PCMovementEnabled == false then
+-- Roda depois da camera e do controlador padrao de personagem.
+-- Assim o centro da tela ganha a ultima palavra na orientacao visual.
+RunService:BindToRenderStep(bindName, Enum.RenderPriority.Last.Value - 1, function()
+    if gui then
+        gui.Enabled = getgenv().PCMovementEnabled ~= false
+    end
+
+    if not shouldLock() then
+        if alignOrientation then
+            alignOrientation.Enabled = false
+        end
         if humanoid and humanoid.Parent and oldAutoRotate ~= nil then
             humanoid.AutoRotate = oldAutoRotate
         end
         return
     end
 
-    if not currentCharacter or not currentCharacter.Parent or not humanoid or not rootPart then
-        return
-    end
-
-    if humanoid.Health <= 0 or rootPart.Anchored then
-        return
-    end
-
-    local state = humanoid:GetState()
-    if state == Enum.HumanoidStateType.Dead
-        or state == Enum.HumanoidStateType.Seated
-        or state == Enum.HumanoidStateType.Ragdoll
-        or state == Enum.HumanoidStateType.Physics then
-        return
-    end
-
     humanoid.AutoRotate = false
+
+    if alignOrientation then
+        alignOrientation.Enabled = true
+    end
 
     local camera = Workspace.CurrentCamera
     if not camera then
         return
     end
 
-    -- O centro da camera funciona como o "crosshair virtual" do PC.
-    -- A camera continua sendo controlada normalmente pelo dedo; o corpo segue
-    -- exatamente o yaw desse ponto central, sem o atraso do AutoRotate mobile.
-    local look = camera.CFrame.LookVector
-    local flatLook = Vector3.new(look.X, 0, look.Z)
-
-    if flatLook.Magnitude < 0.0001 then
+    local direction = getCenterDirection(camera)
+    if not direction then
         return
     end
 
-    flatLook = flatLook.Unit
+    -- O avatar fica cravado na direcao apontada pelo ponto central.
+    local targetRotation = CFrame.lookAt(Vector3.zero, direction, Vector3.yAxis)
 
-    local position = rootPart.Position
-    local target = CFrame.lookAt(position, position + flatLook, Vector3.yAxis)
-
-    local responsiveness = tonumber(getgenv().PCMovementResponsiveness)
-    if responsiveness == nil then
-        responsiveness = 1
+    if alignOrientation then
+        alignOrientation.CFrame = targetRotation
     end
-    responsiveness = math.clamp(responsiveness, 0.01, 1)
 
-    if responsiveness >= 0.999 then
-        rootPart.CFrame = target
-    else
-        rootPart.CFrame = rootPart.CFrame:Lerp(target, responsiveness)
+    -- Hard-lock visual no fim do frame. O AlignOrientation segura essa mesma
+    -- orientacao na fisica, enquanto este snap impede scripts de camera/movimento
+    -- do jogo de deixarem o personagem 'preguicoso' ou atrasado.
+    if getgenv().PCMovementHardLock ~= false then
+        local position = rootPart.Position
+        rootPart.CFrame = CFrame.lookAt(position, position + direction, Vector3.yAxis)
     end
 end)
 
@@ -121,21 +220,30 @@ getgenv().__JoaoPCMovementCleanup = function()
         RunService:UnbindFromRenderStep(bindName)
     end)
 
-    if charConnection then
+    if characterAddedConnection then
         pcall(function()
-            charConnection:Disconnect()
+            characterAddedConnection:Disconnect()
         end)
-        charConnection = nil
+        characterAddedConnection = nil
+    end
+
+    if gui then
+        pcall(function()
+            gui:Destroy()
+        end)
+        gui = nil
+        dot = nil
     end
 
     clearCharacter()
     getgenv().__JoaoPCMovementCleanup = nil
 end
 
--- Defaults: resposta imediata, estilo mouse-lock/shift-lock de PC.
 if getgenv().PCMovementEnabled == nil then
     getgenv().PCMovementEnabled = true
 end
-if getgenv().PCMovementResponsiveness == nil then
-    getgenv().PCMovementResponsiveness = 1
+
+-- true = ponto central manda na orientacao sem atraso.
+if getgenv().PCMovementHardLock == nil then
+    getgenv().PCMovementHardLock = true
 end

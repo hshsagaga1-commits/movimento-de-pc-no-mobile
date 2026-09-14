@@ -19,10 +19,18 @@ local function keys(t)
     return table.concat(a,", ")
 end
 
-add("=== CAMERA X9 REPORT V3 ===",os.date("%Y-%m-%d %H:%M:%S"))
+add("=== CAMERA X9 REPORT V4 ===",os.date("%Y-%m-%d %H:%M:%S"))
 add("PCMovementVersion",getgenv().PCMovementVersion)
 add("PCInputBridgeMode",getgenv().PCInputBridgeMode)
 add("PCInputBridgeDiscovery",getgenv().PCInputBridgeDiscovery)
+add("PCRelativeCenterEnabled",getgenv().PCRelativeCenterEnabled)
+add("PCRelativeCenterControllerFound",getgenv().PCRelativeCenterControllerFound)
+add("PCRelativeCenterPanBypassed",getgenv().PCRelativeCenterPanBypassed)
+add("PCRelativeCenterInjectedEvents",getgenv().PCRelativeCenterInjectedEvents)
+add("PCRelativeMouseGain",getgenv().PCRelativeMouseGain)
+add("PCRelativeMouseVerticalScale",getgenv().PCRelativeMouseVerticalScale)
+add("PCRelativeMouseCoeffX",getgenv().PCRelativeMouseCoeffX)
+add("PCRelativeMouseCoeffY",getgenv().PCRelativeMouseCoeffY)
 add("cap.getconnections",type(getconnections))
 add("cap.hookfunction",type(hookfunction))
 add("cap.getgc",type(getgc))
@@ -61,6 +69,9 @@ pcall(function()
     elseif type(playerModule)=="table" then cameras=rawget(playerModule,"cameras") end
 end)
 local controller=type(cameras)=="table" and rawget(cameras,"activeCameraController") or nil
+if not controller and type(cameras)=="table" and type(cameras.GetActiveCameraController)=="function" then
+    pcall(function() controller=cameras:GetActiveCameraController() end)
+end
 
 add("PlayerModule.keys",keys(playerModule))
 add("Cameras.keys",keys(cameras))
@@ -70,13 +81,15 @@ if controller then
     safe("Controller.inMouseLockedMode",function() return controller.inMouseLockedMode end)
     safe("Controller.mouseLockOffset",function() return controller.mouseLockOffset end)
     safe("Controller.rotateInput",function() return controller.rotateInput end)
-    safe("Controller.ySensitivity",function() return controller.ySensitivity end)
     safe("Controller.panEnabled",function() return controller.panEnabled end)
     safe("Controller.numUnsunkTouches",function() return controller.numUnsunkTouches end)
-    safe("Controller.isDynamicThumbstickEnabled",function() return controller.isDynamicThumbstickEnabled end)
+    safe("Controller.fingerTouches.count",function()
+        local n=0
+        if type(controller.fingerTouches)=="table" then for _ in pairs(controller.fingerTouches) do n+=1 end end
+        return n
+    end)
     safe("Controller.cameraMovementMode",function() return controller.cameraMovementMode end)
     safe("Controller.currentSubjectDistance",function() return controller.currentSubjectDistance end)
-    safe("Controller.currentSpeed",function() return controller.currentSpeed end)
 end
 
 if type(getconnections)=="function" then
@@ -84,49 +97,77 @@ if type(getconnections)=="function" then
     safe("UIS.InputBegan.connectionCount",function() return #getconnections(UIS.InputBegan) end)
 end
 
-local pg=player:FindFirstChildOfClass("PlayerGui")
-local function thumbFrame()
-    local tg=pg and pg:FindFirstChild("TouchGui")
-    local tcf=tg and tg:FindFirstChild("TouchControlFrame")
-    return tcf and tcf:FindFirstChild("DynamicThumbstickFrame")
-end
-local function inThumb(pos)
-    local f=thumbFrame()
-    if not f then return false end
-    local a=f.AbsolutePosition
-    local b=a+f.AbsoluteSize
-    return pos.X>=a.X and pos.Y>=a.Y and pos.X<=b.X and pos.Y<=b.Y
+if type(getgenv().PCRelativeCenterDiagnostics)=="function" then
+    local ok,d=pcall(getgenv().PCRelativeCenterDiagnostics)
+    if ok and type(d)=="table" then
+        add("V25Diag.panEnabled",d.panEnabled)
+        add("V25Diag.panBypassed",d.panBypassed)
+        add("V25Diag.mouseLocked",d.inMouseLockedMode)
+        add("V25Diag.mouseLockOffset",d.mouseLockOffset)
+        add("V25Diag.gain",d.gain)
+        add("V25Diag.verticalScale",d.verticalScale)
+        add("V25Diag.mouseCoeff",d.mouseCoeff)
+        add("V25Diag.targetRadPerTouchPx",d.targetRadPerTouchPx)
+        add("V25Diag.targetYX",d.targetYX)
+        add("V25Diag.x9NativeRadPerTouchPx",d.x9NativeRadPerTouchPx)
+        add("V25Diag.injectedEvents",d.injectedEvents)
+    else
+        add("V25Diag","ERROR")
+    end
 end
 
-add("--- 5 SECOND LEGACY ROTATEINPUT PROBE ---","")
+local pg=player:FindFirstChildOfClass("PlayerGui")
+local function inThumb(pos)
+    local tg=pg and pg:FindFirstChild("TouchGui")
+    local tcf=tg and tg:FindFirstChild("TouchControlFrame")
+    if not tcf then return false end
+    for _,name in ipairs({"DynamicThumbstickFrame","ThumbstickFrame","TouchThumbstick"}) do
+        local f=tcf:FindFirstChild(name,true)
+        if f and f:IsA("GuiObject") and f.Visible then
+            local a=f.AbsolutePosition
+            local b=a+f.AbsoluteSize
+            if pos.X>=a.X and pos.Y>=a.Y and pos.X<=b.X and pos.Y<=b.Y then return true end
+        end
+    end
+    return false
+end
+
+add("--- 5 SECOND V25 RELATIVE-CENTER PROBE ---","")
 add("Probe.instructions","swipe camera normally; joystick may stay held")
 
 local touches={}
-local dtInput=nil
 local rawFrame=Vector2.zero
 local touchEvents=0
 local samples=0
 local sx2,sxy,sy2,syy=0,0,0,0
-local touchErrSum=0
-local touchErrN=0
 local sampleLines={}
-
+local panTrueFrames=0
+local panFalseFrames=0
 local conns={}
+
 table.insert(conns,UIS.InputBegan:Connect(function(input,gpe)
     if input.UserInputType~=Enum.UserInputType.Touch then return end
-    if dtInput==nil and not gpe and inThumb(input.Position) then
-        dtInput=input
-        return
-    end
-    touches[input]=gpe and true or false
+    touches[input]=(not gpe) and (not inThumb(input.Position))
 end))
 
 table.insert(conns,UIS.InputChanged:Connect(function(input,gpe)
-    if input.UserInputType~=Enum.UserInputType.Touch or input==dtInput then return end
-    if touches[input]==nil then touches[input]=gpe and true or false end
-    local unsunk=0
-    for _,sunk in pairs(touches) do if sunk==false then unsunk+=1 end end
-    if unsunk==1 and touches[input]==false then
+    if input.UserInputType~=Enum.UserInputType.Touch then return end
+    if touches[input]==nil then touches[input]=(not gpe) and (not inThumb(input.Position)) end
+
+    local cameraTouch=touches[input]==true
+    if controller and type(controller.fingerTouches)=="table" then
+        local native=controller.fingerTouches[input]
+        if native~=nil then cameraTouch=(native==false) end
+    end
+
+    local unsunk=nil
+    if controller and type(controller.numUnsunkTouches)=="number" then unsunk=controller.numUnsunkTouches end
+    if unsunk==nil then
+        unsunk=0
+        for _,v in pairs(touches) do if v==true then unsunk+=1 end end
+    end
+
+    if cameraTouch and unsunk==1 then
         local d=input.Delta
         rawFrame+=Vector2.new(d.X,d.Y)
         touchEvents+=1
@@ -134,14 +175,16 @@ table.insert(conns,UIS.InputChanged:Connect(function(input,gpe)
 end))
 
 table.insert(conns,UIS.InputEnded:Connect(function(input)
-    if input.UserInputType~=Enum.UserInputType.Touch then return end
-    if input==dtInput then dtInput=nil end
-    touches[input]=nil
+    if input.UserInputType==Enum.UserInputType.Touch then touches[input]=nil end
 end))
 
-local bindName="__CameraX9V3Probe"
+local bindName="__CameraX9V4Probe"
 pcall(function() RunService:UnbindFromRenderStep(bindName) end)
 RunService:BindToRenderStep(bindName,Enum.RenderPriority.Camera.Value-1,function()
+    if controller then
+        if controller.panEnabled==false then panFalseFrames+=1 else panTrueFrames+=1 end
+    end
+
     local raw=rawFrame
     rawFrame=Vector2.zero
     if not controller or typeof(controller.rotateInput)~="Vector2" or raw.Magnitude<0.001 then return end
@@ -153,19 +196,17 @@ RunService:BindToRenderStep(bindName,Enum.RenderPriority.Camera.Value-1,function
     sy2+=raw.Y*raw.Y
     syy+=raw.Y*rot.Y
 
-    local vc=Workspace.CurrentCamera
-    local vp=vc and vc.ViewportSize or Vector2.new(800,414)
-    local predictedTouch=Vector2.new(
-        raw.X/vp.X*(math.pi*2.25),
-        raw.Y/vp.Y*(math.pi*2)*invertY
-    )
-    if predictedTouch.Magnitude>0.00001 then
-        touchErrSum+=(rot-predictedTouch).Magnitude/predictedTouch.Magnitude
-        touchErrN+=1
-    end
+    local gain=tonumber(getgenv().PCRelativeMouseGain) or 0
+    local yScale=tonumber(getgenv().PCRelativeMouseVerticalScale) or 1
+    local coeffX=tonumber(getgenv().PCRelativeMouseCoeffX) or ((math.pi*4)/1920)
+    local coeffY=tonumber(getgenv().PCRelativeMouseCoeffY) or ((math.pi*1.9)/1200)
+    local expected=Vector2.new(raw.X*coeffX*gain,raw.Y*coeffY*gain*yScale*invertY)
 
-    if #sampleLines<12 then
-        table.insert(sampleLines,string.format("raw=(%.1f,%.1f) rotate=(%.5f,%.5f) touchPred=(%.5f,%.5f)",raw.X,raw.Y,rot.X,rot.Y,predictedTouch.X,predictedTouch.Y))
+    if #sampleLines<14 then
+        table.insert(sampleLines,string.format(
+            "raw=(%.1f,%.1f) rotate=(%.5f,%.5f) expected=(%.5f,%.5f)",
+            raw.X,raw.Y,rot.X,rot.Y,expected.X,expected.Y
+        ))
     end
 end)
 
@@ -173,35 +214,32 @@ task.wait(5.1)
 pcall(function() RunService:UnbindFromRenderStep(bindName) end)
 for _,c in ipairs(conns) do pcall(function() c:Disconnect() end) end
 
-local vp=(Workspace.CurrentCamera and Workspace.CurrentCamera.ViewportSize) or Vector2.new(800,414)
 local observedX=sx2>0 and sxy/sx2 or 0
 local observedY=sy2>0 and syy/sy2 or 0
-local oldTouchX=(math.pi*2.25)/vp.X
-local oldTouchY=(math.pi*2)/vp.Y*invertY
-local oldMouseX=(math.pi*4)/1920
-local oldMouseY=(math.pi*1.9)/1200*invertY
+local gain=tonumber(getgenv().PCRelativeMouseGain) or 0
+local yScale=tonumber(getgenv().PCRelativeMouseVerticalScale) or 1
+local coeffX=tonumber(getgenv().PCRelativeMouseCoeffX) or ((math.pi*4)/1920)
+local coeffY=tonumber(getgenv().PCRelativeMouseCoeffY) or ((math.pi*1.9)/1200)
+local expectedX=coeffX*gain
+local expectedY=coeffY*gain*yScale*invertY
 
 add("Probe.touchEvents",touchEvents)
 add("Probe.samples",samples)
-add("Probe.observedRadPerPx.X",observedX)
-add("Probe.observedRadPerPx.Y",observedY)
-add("Probe.observedDegPerPx.X",math.deg(observedX))
-add("Probe.observedDegPerPx.Y",math.deg(observedY))
-add("Probe.oldTouchExpectedRadPerPx.X",oldTouchX)
-add("Probe.oldTouchExpectedRadPerPx.Y",oldTouchY)
-add("Probe.oldMouseExpectedRadPerCount.X",oldMouseX)
-add("Probe.oldMouseExpectedRadPerCount.Y",oldMouseY)
-add("Probe.observedVsOldTouch.X",oldTouchX~=0 and observedX/oldTouchX or 0)
-add("Probe.observedVsOldTouch.Y",oldTouchY~=0 and observedY/oldTouchY or 0)
-add("Probe.meanRelativeErrorVsOldTouch",touchErrN>0 and touchErrSum/touchErrN or -1)
-add("Probe.mouseYXRatio",oldMouseX~=0 and oldMouseY/oldMouseX or 0)
-add("Probe.touchYXRatio",oldTouchX~=0 and oldTouchY/oldTouchX or 0)
+add("Probe.panFalseFrames",panFalseFrames)
+add("Probe.panTrueFrames",panTrueFrames)
+add("Probe.observedRadPerTouchPx.X",observedX)
+add("Probe.observedRadPerTouchPx.Y",observedY)
+add("Probe.expectedV25RadPerTouchPx.X",expectedX)
+add("Probe.expectedV25RadPerTouchPx.Y",expectedY)
+add("Probe.observedVsExpected.X",expectedX~=0 and observedX/expectedX or 0)
+add("Probe.observedVsExpected.Y",expectedY~=0 and observedY/expectedY or 0)
 add("Probe.observedYXRatio",observedX~=0 and observedY/observedX or 0)
+add("Probe.expectedYXRatio",expectedX~=0 and expectedY/expectedX or 0)
 add("Probe.firstSamples",table.concat(sampleLines," | "))
 
 local report=table.concat(lines,"\n")
 print(report)
 if setclipboard then pcall(setclipboard,report) end
 getgenv().CameraX9Report=report
-warn("[Camera X9 V3] pronto. Cola o relatório aqui.")
+warn("[Camera X9 V4] pronto. V25 verificado; cola o relatório aqui se precisar.")
 return report

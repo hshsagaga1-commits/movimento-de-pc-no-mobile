@@ -3,20 +3,26 @@ local StarterPlayer = game:GetService("StarterPlayer")
 local RunService = game:GetService("RunService")
 local Workspace = game:GetService("Workspace")
 local CoreGui = game:GetService("CoreGui")
+local UserInputService = game:GetService("UserInputService")
 
 local player = Players.LocalPlayer
-local bindName = "__PCMovementPersistentLock"
+local cameraBindName = "__PCMovementPersistentLock"
+local movementBindName = "__PCMovementDigitalWASD"
 
 -- Limpa qualquer versao anterior antes de aplicar esta.
 if getgenv().__PCMobileAimCleanup then
     pcall(getgenv().__PCMobileAimCleanup)
 end
 pcall(function()
-    RunService:UnbindFromRenderStep(bindName)
+    RunService:UnbindFromRenderStep(cameraBindName)
+    RunService:UnbindFromRenderStep(movementBindName)
 end)
 
 if getgenv().PCMovementEnabled == nil then
     getgenv().PCMovementEnabled = true
+end
+if getgenv().PCMovementDigitalInput == nil then
+    getgenv().PCMovementDigitalInput = true
 end
 
 local connections = {}
@@ -112,24 +118,57 @@ local function trySetProperty(object, property, value)
     return worked
 end
 
+local playerModule
 local cameras
-local function getCameras()
-    if cameras then
-        return cameras
+local controls
+
+local function getPlayerModule()
+    if playerModule then
+        return playerModule
     end
 
     pcall(function()
         local playerScripts = player:FindFirstChild("PlayerScripts")
         local moduleScript = playerScripts and playerScripts:FindFirstChild("PlayerModule")
-        if not moduleScript then return end
+        if moduleScript then
+            local required = require(moduleScript)
+            if type(required) == "table" then
+                playerModule = required
+            end
+        end
+    end)
 
-        local playerModule = require(moduleScript)
-        if type(playerModule) == "table" and type(playerModule.GetCameras) == "function" then
-            cameras = playerModule:GetCameras()
+    return playerModule
+end
+
+local function getCameras()
+    if cameras then
+        return cameras
+    end
+
+    local module = getPlayerModule()
+    pcall(function()
+        if module and type(module.GetCameras) == "function" then
+            cameras = module:GetCameras()
         end
     end)
 
     return cameras
+end
+
+local function getControls()
+    if controls then
+        return controls
+    end
+
+    local module = getPlayerModule()
+    pcall(function()
+        if module and type(module.GetControls) == "function" then
+            controls = module:GetControls()
+        end
+    end)
+
+    return controls
 end
 
 local function getActiveCameraController()
@@ -279,12 +318,32 @@ local function applyPCLock(locked, force)
     setControllerLock(locked)
 
     if locked then
-        -- WASD/joystick move o personagem, mas a ORIENTACAO fica presa na camera,
-        -- exatamente como o constant shift-lock do PC.
         setRotationType(Enum.RotationType.CameraRelative)
     else
         setRotationType(Enum.RotationType.MovementRelative)
     end
+end
+
+-- Converte o thumbstick analogico em exatamente as 8 combinacoes que um teclado pode gerar:
+-- W, WA, A, AS, S, SD, D, DW. NAO toca em WalkSpeed nem em velocidade fisica.
+local function quantizeToWASD(moveVector)
+    local x = moveVector.X
+    local z = moveVector.Z
+    local magnitude = math.sqrt(x * x + z * z)
+
+    if magnitude < 0.18 then
+        return Vector3.zero
+    end
+
+    local angle = math.atan2(x, -z)
+    local step = math.pi / 4
+    local snapped = math.floor((angle / step) + 0.5) * step
+
+    return Vector3.new(
+        math.sin(snapped),
+        0,
+        -math.cos(snapped)
+    )
 end
 
 local function attachCharacter(newCharacter)
@@ -324,10 +383,38 @@ pcall(function()
     end))
 end)
 
--- V7: NAO existe mais "emote = unlock".
--- O pivô continua preso no eixo da camera. Se a animacao mexer nos Motor6D/root joints,
--- o corpo VISUAL pode virar/separar do pontinho sem soltar a posicao real do personagem.
-RunService:BindToRenderStep(bindName, Enum.RenderPriority.Camera.Value + 2, function()
+-- V8: roda logo DEPOIS do ControlModule padrao e troca somente a DIRECAO do input.
+-- Assim o joystick vira um teclado digital, mas o jogo continua decidindo sua velocidade/physics.
+RunService:BindToRenderStep(movementBindName, Enum.RenderPriority.Input.Value + 2, function()
+    if getgenv().PCMovementEnabled == false
+        or getgenv().PCMovementDigitalInput == false
+        or not UserInputService.TouchEnabled
+        or not humanoid
+        or shouldReleaseLock() then
+        return
+    end
+
+    local controlModule = getControls()
+    if not controlModule or type(controlModule.GetMoveVector) ~= "function" then
+        return
+    end
+
+    local rawMove
+    local ok = pcall(function()
+        rawMove = controlModule:GetMoveVector()
+    end)
+    if not ok or typeof(rawMove) ~= "Vector3" then
+        return
+    end
+
+    local digitalMove = quantizeToWASD(rawMove)
+    pcall(function()
+        player:Move(digitalMove, true)
+    end)
+end)
+
+-- Camera/rotacao permanecem iguais a V7.
+RunService:BindToRenderStep(cameraBindName, Enum.RenderPriority.Camera.Value + 2, function()
     local enabled = getgenv().PCMovementEnabled ~= false
     screenGui.Enabled = enabled
 
@@ -343,8 +430,6 @@ RunService:BindToRenderStep(bindName, Enum.RenderPriority.Camera.Value + 2, func
     local release = shouldReleaseLock()
     applyPCLock(not release, false)
 
-    -- Alguns jogos trocam o CameraController internamente. Reafirma o mesmo lock
-    -- sem tocar no CFrame da camera nem no HumanoidRootPart.
     if not release then
         local controller = getActiveCameraController()
         if controller then
@@ -361,7 +446,6 @@ RunService:BindToRenderStep(bindName, Enum.RenderPriority.Camera.Value + 2, func
             end
         end
 
-        -- Reafirma CameraRelative caso o jogo tente voltar para MovementRelative.
         pcall(function()
             if userGameSettings and userGameSettings.RotationType ~= Enum.RotationType.CameraRelative then
                 setRotationType(Enum.RotationType.CameraRelative)
@@ -372,7 +456,8 @@ end)
 
 getgenv().__PCMobileAimCleanup = function()
     pcall(function()
-        RunService:UnbindFromRenderStep(bindName)
+        RunService:UnbindFromRenderStep(cameraBindName)
+        RunService:UnbindFromRenderStep(movementBindName)
     end)
 
     for _, connection in ipairs(connections) do

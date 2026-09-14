@@ -1,61 +1,39 @@
 local Players = game:GetService("Players")
-local RunService = game:GetService("RunService")
-local UserInputService = game:GetService("UserInputService")
+local StarterPlayer = game:GetService("StarterPlayer")
 local Workspace = game:GetService("Workspace")
 local CoreGui = game:GetService("CoreGui")
 
 local player = Players.LocalPlayer
-local bindName = "__PCMobileRawCamera"
 
--- Limpa qualquer versao anterior sem empilhar conexoes/cameras.
+-- Limpa qualquer versao anterior (inclusive as V1/V2 que prendiam a rotacao do corpo).
 if getgenv().__PCMobileAimCleanup then
     pcall(getgenv().__PCMobileAimCleanup)
 end
-pcall(function()
-    RunService:UnbindFromRenderStep(bindName)
-end)
-
-local camera = Workspace.CurrentCamera
-local oldCameraType = camera and camera.CameraType or nil
-local oldCameraSubject = camera and camera.CameraSubject or nil
 
 local connections = {}
-local character
-local humanoid
-local rootPart
-local activeLookTouch
-local lastTouchPosition
-local yaw = 0
-local pitch = 0
-local distance = 8
-local focusOffset = Vector3.new(0, 1.5, 0)
-local suspended = false
+local oldPlayerCameraMode
+local oldDevTouchCameraMode
+local oldStarterTouchMode
+local oldUserTouchMode
 
--- Ajustes globais opcionais:
--- getgenv().PCMovementSensitivity = 0.005
--- getgenv().PCMovementDistance = 8
--- getgenv().PCMovementFocusOffset = Vector3.new(0, 1.5, 0)
--- getgenv().PCMovementTouchStartX = 0.42
--- getgenv().PCMovementCameraCollision = true
+pcall(function()
+    oldPlayerCameraMode = player.CameraMode
+end)
+pcall(function()
+    oldDevTouchCameraMode = player.DevTouchCameraMode
+end)
+pcall(function()
+    oldStarterTouchMode = StarterPlayer.DevTouchCameraMovementMode
+end)
 
-if getgenv().PCMovementEnabled == nil then
-    getgenv().PCMovementEnabled = true
-end
-if getgenv().PCMovementSensitivity == nil then
-    getgenv().PCMovementSensitivity = 0.005
-end
-if getgenv().PCMovementTouchStartX == nil then
-    getgenv().PCMovementTouchStartX = 0.42
-end
-if getgenv().PCMovementCameraCollision == nil then
-    getgenv().PCMovementCameraCollision = true
-end
+local userGameSettings
+pcall(function()
+    userGameSettings = UserSettings():GetService("UserGameSettings")
+    oldUserTouchMode = userGameSettings.TouchCameraMovementMode
+end)
 
-local function enabled()
-    return getgenv().PCMovementEnabled ~= false
-end
-
--- PONTO FIXO: equivale ao cursor travado no centro no PC.
+-- O pontinho e apenas a referencia visual do centro da camera.
+-- ELE NAO gira o personagem. O joystick continua sendo exclusivamente do personagem.
 local guiParent = CoreGui
 pcall(function()
     if gethui then
@@ -73,7 +51,6 @@ screenGui.Name = "PCMobileAim"
 screenGui.IgnoreGuiInset = true
 screenGui.ResetOnSpawn = false
 screenGui.DisplayOrder = 1000000
-screenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
 screenGui.Parent = guiParent
 
 local dot = Instance.new("Frame")
@@ -83,240 +60,123 @@ dot.Position = UDim2.fromScale(0.5, 0.5)
 dot.Size = UDim2.fromOffset(2, 2)
 dot.BorderSizePixel = 0
 dot.BackgroundColor3 = Color3.new(1, 1, 1)
-dot.ZIndex = 1000000
+dot.ZIndex = 10
 dot.Parent = screenGui
 
 local corner = Instance.new("UICorner")
 corner.CornerRadius = UDim.new(1, 0)
 corner.Parent = dot
 
-local raycastParams = RaycastParams.new()
-raycastParams.FilterType = Enum.RaycastFilterType.Exclude
-raycastParams.IgnoreWater = true
+local function trySetProperty(object, property, value)
+    local worked = false
 
-local function getCamera()
-    camera = Workspace.CurrentCamera
-    return camera
+    if object then
+        local ok = pcall(function()
+            object[property] = value
+        end)
+        worked = worked or ok
+
+        if sethiddenproperty then
+            local okHidden = pcall(function()
+                sethiddenproperty(object, property, value)
+            end)
+            worked = worked or okHidden
+        end
+
+        if setscriptable then
+            pcall(function()
+                setscriptable(object, property, true)
+            end)
+            local okScriptable = pcall(function()
+                object[property] = value
+            end)
+            worked = worked or okScriptable
+        end
+    end
+
+    return worked
 end
 
-local function setAnglesFromLookVector(look)
-    if not look or look.Magnitude < 0.001 then
-        return
-    end
-
-    local unit = look.Unit
-    pitch = math.asin(math.clamp(unit.Y, -1, 1))
-    yaw = math.atan2(-unit.X, -unit.Z)
-end
-
-local function getLookVector()
-    local rotation = CFrame.Angles(pitch, yaw, 0)
-    return rotation.LookVector
-end
-
-local function currentSensitivity()
-    local value = tonumber(getgenv().PCMovementSensitivity)
-    if not value then
-        return 0.005
-    end
-    return math.clamp(value, 0.0005, 0.03)
-end
-
-local function currentDistance()
-    local override = tonumber(getgenv().PCMovementDistance)
-    if override then
-        return math.clamp(override, 2, 30)
-    end
-    return math.clamp(distance, 2, 30)
-end
-
-local function currentFocusOffset()
-    local override = getgenv().PCMovementFocusOffset
-    if typeof(override) == "Vector3" then
-        return override
-    end
-    return focusOffset
-end
-
-local function releaseLookTouch(input)
-    if activeLookTouch == input then
-        activeLookTouch = nil
-        lastTouchPosition = nil
-    end
-end
-
-local function attachCharacter(newCharacter)
-    character = newCharacter
-    humanoid = newCharacter:WaitForChild("Humanoid", 10)
-    rootPart = newCharacter:WaitForChild("HumanoidRootPart", 10)
-    suspended = false
-    activeLookTouch = nil
-    lastTouchPosition = nil
-
-    if not humanoid or not rootPart then
-        return
-    end
-
-    local cam = getCamera()
-    if not cam then return end
-
-    -- Comeca exatamente do enquadramento em que o jogo ja estava.
-    setAnglesFromLookVector(cam.CFrame.LookVector)
-
-    local initialFocus = cam.Focus.Position
-    local candidateOffset = initialFocus - rootPart.Position
-    if candidateOffset.Magnitude <= 6 then
-        focusOffset = candidateOffset
-    else
-        focusOffset = Vector3.new(0, 1.5, 0)
-        initialFocus = rootPart.Position + focusOffset
-    end
-
-    local candidateDistance = (cam.CFrame.Position - initialFocus).Magnitude
-    if candidateDistance >= 2 and candidateDistance <= 30 then
-        distance = candidateDistance
-    else
-        distance = 8
-    end
-
+local function forceClassicCamera()
+    -- Terceira pessoa normal. Nao ativa shift-lock e nao prende o corpo na camera.
     pcall(function()
-        cam.CameraType = Enum.CameraType.Scriptable
+        player.CameraMode = Enum.CameraMode.Classic
     end)
 
-    table.insert(connections, humanoid.Died:Connect(function()
-        suspended = true
-        activeLookTouch = nil
-        lastTouchPosition = nil
+    -- Esse e o ponto principal: no touch, Classic acompanha a POSICAO do jogador,
+    -- mas nao gira a camera automaticamente quando o personagem anda para os lados.
+    trySetProperty(player, "DevTouchCameraMode", Enum.DevTouchCameraMovementMode.Classic)
+    trySetProperty(StarterPlayer, "DevTouchCameraMovementMode", Enum.DevTouchCameraMovementMode.Classic)
 
-        local current = getCamera()
-        if current then
-            pcall(function()
-                current.CameraType = Enum.CameraType.Custom
-                current.CameraSubject = humanoid
-            end)
+    if userGameSettings then
+        trySetProperty(userGameSettings, "TouchCameraMovementMode", Enum.TouchCameraMovementMode.Classic)
+    end
+
+    -- Se a API atual do PlayerModule estiver exposta, manda o controlador ativo
+    -- usar Classic imediatamente. Em clientes onde a API e fechada, simplesmente ignora.
+    pcall(function()
+        local playerScripts = player:FindFirstChild("PlayerScripts")
+        local moduleScript = playerScripts and playerScripts:FindFirstChild("PlayerModule")
+        if not moduleScript then return end
+
+        local playerModule = require(moduleScript)
+        if type(playerModule) ~= "table" or type(playerModule.GetCameras) ~= "function" then
+            return
         end
-    end))
-end
 
-if player.Character then
-    task.spawn(attachCharacter, player.Character)
-end
+        local cameras = playerModule:GetCameras()
+        if type(cameras) ~= "table" then return end
 
-table.insert(connections, player.CharacterAdded:Connect(function(newCharacter)
-    task.spawn(attachCharacter, newCharacter)
-end))
+        if type(cameras.ActivateCameraController) == "function" then
+            cameras:ActivateCameraController(Enum.ComputerCameraMovementMode.Classic)
+        elseif type(cameras.GetActiveCameraController) == "function" then
+            local controller = cameras:GetActiveCameraController()
+            if controller and type(controller.SetCameraMovementMode) == "function" then
+                controller:SetCameraMovementMode(Enum.ComputerCameraMovementMode.Classic)
+            end
+        end
+    end)
 
--- Dedo da DIREITA = mouse relativo. O joystick da esquerda nunca e capturado.
-table.insert(connections, UserInputService.TouchStarted:Connect(function(input, gameProcessedEvent)
-    if gameProcessedEvent or not enabled() or suspended then
-        return
-    end
-
-    local cam = getCamera()
-    if not cam then return end
-
-    local viewport = cam.ViewportSize
-    if viewport.X <= 0 then return end
-
-    local threshold = math.clamp(tonumber(getgenv().PCMovementTouchStartX) or 0.42, 0.25, 0.75)
-    if input.Position.X < viewport.X * threshold then
-        return
-    end
-
-    if activeLookTouch == nil then
-        activeLookTouch = input
-        lastTouchPosition = Vector2.new(input.Position.X, input.Position.Y)
-    end
-end))
-
-table.insert(connections, UserInputService.TouchMoved:Connect(function(input, gameProcessedEvent)
-    if input ~= activeLookTouch or not enabled() or suspended then
-        return
-    end
-
-    local now = Vector2.new(input.Position.X, input.Position.Y)
-    local previous = lastTouchPosition or now
-    local delta = now - previous
-    lastTouchPosition = now
-
-    -- RAW: sem lerp, sem aceleracao, sem smoothing do controlador touch do Roblox.
-    local sensitivity = currentSensitivity()
-    yaw = yaw - delta.X * sensitivity
-    pitch = math.clamp(pitch - delta.Y * sensitivity, math.rad(-80), math.rad(80))
-end))
-
-table.insert(connections, UserInputService.TouchEnded:Connect(function(input)
-    releaseLookTouch(input)
-end))
-
-local function getTrackedFocus()
-    if not rootPart or not rootPart.Parent then
-        return nil
-    end
-
-    -- Tracking de edicao: so POSICAO.
-    -- Nao usa CFrame/rotacao do personagem, entao emote/ragdoll continuam livres.
-    return rootPart.Position + currentFocusOffset()
-end
-
-local function solveCameraPosition(focus, desiredPosition)
-    if getgenv().PCMovementCameraCollision == false or not character then
-        return desiredPosition
-    end
-
-    raycastParams.FilterDescendantsInstances = { character }
-
-    local direction = desiredPosition - focus
-    local result = Workspace:Raycast(focus, direction, raycastParams)
-    if not result then
-        return desiredPosition
-    end
-
-    -- Puxa a camera um pouco para fora da parede.
-    local safePosition = result.Position + result.Normal * 0.25
-    if (safePosition - focus).Magnitude < 0.6 then
-        safePosition = focus + direction.Unit * 0.6
-    end
-    return safePosition
-end
-
-RunService:BindToRenderStep(bindName, Enum.RenderPriority.Camera.Value + 50, function()
-    screenGui.Enabled = enabled() and not suspended
-
-    if not enabled() or suspended then
-        return
-    end
-
-    local cam = getCamera()
-    if not cam or not humanoid or not rootPart or humanoid.Health <= 0 then
-        return
-    end
-
-    -- Mantem o controlador touch padrao fora da equacao.
-    if cam.CameraType ~= Enum.CameraType.Scriptable then
+    -- Mantem o CameraSubject normal no personagem. Isso e o que faz a camera
+    -- acompanhar a translacao dele pela fase, sem amarrar a orientacao do corpo.
+    local camera = Workspace.CurrentCamera
+    local character = player.Character
+    local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+    if camera and humanoid and camera.CameraType ~= Enum.CameraType.Scriptable then
         pcall(function()
-            cam.CameraType = Enum.CameraType.Scriptable
+            camera.CameraType = Enum.CameraType.Custom
+            camera.CameraSubject = humanoid
         end)
     end
+end
 
-    local focus = getTrackedFocus()
-    if not focus then return end
+forceClassicCamera()
 
-    local look = getLookVector()
-    local wantedPosition = focus - look * currentDistance()
-    local cameraPosition = solveCameraPosition(focus, wantedPosition)
+-- Respawn: reaplica apenas a camera. Nao toca no movimento/rotacao do personagem.
+table.insert(connections, player.CharacterAdded:Connect(function(character)
+    local humanoid = character:WaitForChild("Humanoid", 10)
+    task.wait()
+    forceClassicCamera()
 
-    -- Translacao acompanha o boneco 1:1 no mesmo frame.
-    -- Rotacao vem SOMENTE do delta do dedo, como mouse preso no centro.
-    cam.CFrame = CFrame.lookAt(cameraPosition, focus, Vector3.yAxis)
-    cam.Focus = CFrame.new(focus)
+    local camera = Workspace.CurrentCamera
+    if camera and humanoid and camera.CameraType ~= Enum.CameraType.Scriptable then
+        pcall(function()
+            camera.CameraSubject = humanoid
+        end)
+    end
+end))
+
+-- Se o jogo tentar trocar o modo touch de volta para Follow/UserChoice,
+-- reaplica Classic. Nada aqui escreve CFrame do personagem.
+pcall(function()
+    table.insert(connections, player:GetPropertyChangedSignal("DevTouchCameraMode"):Connect(function()
+        if getgenv().PCMovementEnabled ~= false then
+            task.defer(forceClassicCamera)
+        end
+    end))
 end)
 
 getgenv().__PCMobileAimCleanup = function()
-    pcall(function()
-        RunService:UnbindFromRenderStep(bindName)
-    end)
-
     for _, connection in ipairs(connections) do
         pcall(function()
             connection:Disconnect()
@@ -328,30 +188,27 @@ getgenv().__PCMobileAimCleanup = function()
         screenGui:Destroy()
     end)
 
-    local cam = getCamera()
-    if cam then
-        if oldCameraType ~= nil then
-            pcall(function()
-                cam.CameraType = oldCameraType
-            end)
-        else
-            pcall(function()
-                cam.CameraType = Enum.CameraType.Custom
-            end)
-        end
-
-        if oldCameraSubject ~= nil then
-            pcall(function()
-                cam.CameraSubject = oldCameraSubject
-            end)
-        elseif humanoid then
-            pcall(function()
-                cam.CameraSubject = humanoid
-            end)
-        end
+    if oldPlayerCameraMode ~= nil then
+        pcall(function()
+            player.CameraMode = oldPlayerCameraMode
+        end)
     end
 
-    activeLookTouch = nil
-    lastTouchPosition = nil
+    if oldDevTouchCameraMode ~= nil then
+        trySetProperty(player, "DevTouchCameraMode", oldDevTouchCameraMode)
+    end
+
+    if oldStarterTouchMode ~= nil then
+        trySetProperty(StarterPlayer, "DevTouchCameraMovementMode", oldStarterTouchMode)
+    end
+
+    if userGameSettings and oldUserTouchMode ~= nil then
+        trySetProperty(userGameSettings, "TouchCameraMovementMode", oldUserTouchMode)
+    end
+
     getgenv().__PCMobileAimCleanup = nil
+end
+
+if getgenv().PCMovementEnabled == nil then
+    getgenv().PCMovementEnabled = true
 end

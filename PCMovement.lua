@@ -5,9 +5,9 @@ local Workspace = game:GetService("Workspace")
 local CoreGui = game:GetService("CoreGui")
 
 local player = Players.LocalPlayer
-local bindName = "__PCMovementLegacyLock"
+local bindName = "__PCMovementPersistentLock"
 
--- Limpa qualquer versao anterior (inclusive V4/V5 com CameraType Scriptable).
+-- Limpa qualquer versao anterior antes de aplicar esta.
 if getgenv().__PCMobileAimCleanup then
     pcall(getgenv().__PCMobileAimCleanup)
 end
@@ -15,22 +15,20 @@ pcall(function()
     RunService:UnbindFromRenderStep(bindName)
 end)
 
+if getgenv().PCMovementEnabled == nil then
+    getgenv().PCMovementEnabled = true
+end
+
 local connections = {}
 local character
 local humanoid
-local animator
-local rootPart
 
 local oldPlayerCameraMode
 local oldDevTouchCameraMode
 local oldStarterTouchMode
 local oldUserTouchMode
 local oldRotationType
-local oldAutoRotate
-local oldCameraController
-local oldControllerMouseLocked
-local oldControllerOffset
-local lastLockState
+local savedControllerState = {}
 
 pcall(function()
     oldPlayerCameraMode = player.CameraMode
@@ -49,11 +47,7 @@ pcall(function()
     oldRotationType = userGameSettings.RotationType
 end)
 
-if getgenv().PCMovementEnabled == nil then
-    getgenv().PCMovementEnabled = true
-end
-
--- O pontinho representa a direcao da camera/mouse do PC.
+-- Pontinho = eixo central da camera/mouse do PC.
 local guiParent = CoreGui
 pcall(function()
     if gethui then
@@ -71,6 +65,7 @@ screenGui.Name = "PCMobileAim"
 screenGui.IgnoreGuiInset = true
 screenGui.ResetOnSpawn = false
 screenGui.DisplayOrder = 1000000
+screenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
 screenGui.Parent = guiParent
 
 local dot = Instance.new("Frame")
@@ -80,7 +75,7 @@ dot.Position = UDim2.fromScale(0.5, 0.5)
 dot.Size = UDim2.fromOffset(2, 2)
 dot.BorderSizePixel = 0
 dot.BackgroundColor3 = Color3.new(1, 1, 1)
-dot.ZIndex = 10
+dot.ZIndex = 1000000
 dot.Parent = screenGui
 
 local corner = Instance.new("UICorner")
@@ -153,26 +148,22 @@ local function getActiveCameraController()
 end
 
 local function rememberController(controller)
-    if not controller or oldCameraController ~= nil then
+    if not controller or savedControllerState[controller] then
         return
     end
 
-    oldCameraController = controller
+    local state = {}
     pcall(function()
         if type(controller.GetIsMouseLocked) == "function" then
-            oldControllerMouseLocked = controller:GetIsMouseLocked()
+            state.mouseLocked = controller:GetIsMouseLocked()
         end
     end)
     pcall(function()
         if type(controller.GetMouseLockOffset) == "function" then
-            oldControllerOffset = controller:GetMouseLockOffset()
+            state.offset = controller:GetMouseLockOffset()
         end
     end)
-end
-
-local function setRotationType(rotationType)
-    if not userGameSettings then return false end
-    return trySetProperty(userGameSettings, "RotationType", rotationType)
+    savedControllerState[controller] = state
 end
 
 local function setControllerLock(locked)
@@ -182,8 +173,8 @@ local function setControllerLock(locked)
     end
 
     rememberController(controller)
-    local changed = false
 
+    local changed = false
     if type(controller.SetIsMouseLocked) == "function" then
         local ok = pcall(function()
             controller:SetIsMouseLocked(locked)
@@ -191,7 +182,7 @@ local function setControllerLock(locked)
         changed = changed or ok
     end
 
-    -- ZERO offset: personagem fica no mesmo eixo do pontinho, nao deslocado pro ombro.
+    -- PC do video: lock central, sem offset de ombro.
     if locked and type(controller.SetMouseLockOffset) == "function" then
         pcall(function()
             controller:SetMouseLockOffset(Vector3.zero)
@@ -207,8 +198,13 @@ local function setControllerLock(locked)
     return changed
 end
 
-local function forceClassicCamera()
-    -- BASE V3: camera normal do Roblox/Evade. Nada de CameraType Scriptable.
+local function setRotationType(value)
+    if not userGameSettings then return end
+    trySetProperty(userGameSettings, "RotationType", value)
+end
+
+local function forcePCBaseCamera()
+    -- Mantem a camera REAL do Roblox/Evade. Nada de Scriptable e nada de escrever CFrame.
     pcall(function()
         player.CameraMode = Enum.CameraMode.Classic
     end)
@@ -235,141 +231,56 @@ local function forceClassicCamera()
     end)
 
     local camera = Workspace.CurrentCamera
-    if camera and humanoid and camera.CameraType ~= Enum.CameraType.Scriptable then
+    if camera and humanoid then
         pcall(function()
-            camera.CameraType = Enum.CameraType.Custom
+            if camera.CameraType ~= Enum.CameraType.Custom then
+                camera.CameraType = Enum.CameraType.Custom
+            end
             camera.CameraSubject = humanoid
         end)
     end
 end
 
-local EMOTE_ATTRIBUTE_NAMES = {
-    "IsEmoting",
-    "Emoting",
-    "EmotePlaying",
-    "PlayingEmote",
-    "DoingEmote",
-    "IsDancing",
-    "Dancing",
-    "IsTaunting",
-    "Taunting",
-}
-
-local function valueMeansActive(value)
-    if value == nil or value == false or value == 0 or value == "" then
-        return false
-    end
-    return true
-end
-
-local function hasEmoteAttribute(instance)
-    if not instance then return false end
-
-    for _, name in ipairs(EMOTE_ATTRIBUTE_NAMES) do
-        local ok, value = pcall(function()
-            return instance:GetAttribute(name)
-        end)
-        if ok and valueMeansActive(value) then
-            return true
-        end
+local function shouldReleaseLock()
+    if not humanoid or humanoid.Health <= 0 then
+        return true
     end
 
-    return false
-end
-
-local function nameLooksLikeEmote(name)
-    name = string.lower(tostring(name or ""))
-    return string.find(name, "emote", 1, true)
-        or string.find(name, "dance", 1, true)
-        or string.find(name, "taunt", 1, true)
-end
-
-local function trackLooksLikeEmote(track)
-    if not track then return false end
-
-    local playing = false
-    local weight = 0
-    local priorityValue = -1
-    local looped = false
-    local length = 0
-    local trackName = ""
-    local animationName = ""
-
-    pcall(function() playing = track.IsPlaying end)
-    if not playing then return false end
-
-    pcall(function() weight = track.WeightCurrent end)
-    if weight <= 0.01 then return false end
-
-    pcall(function() priorityValue = track.Priority.Value end)
-    if priorityValue < Enum.AnimationPriority.Action.Value then
-        return false
-    end
-
-    pcall(function() looped = track.Looped end)
-    pcall(function() length = track.Length end)
-    pcall(function() trackName = track.Name end)
+    local platformStand = false
     pcall(function()
-        if track.Animation then
-            animationName = track.Animation.Name
-        end
+        platformStand = humanoid.PlatformStand
+    end)
+    if platformStand then
+        return true
+    end
+
+    local state
+    pcall(function()
+        state = humanoid:GetState()
     end)
 
-    -- Primeiro tenta nome explicito. Depois usa perfil tipico de emote:
-    -- Action + loop longo, ou Action bem comprida mesmo sem loop.
-    if nameLooksLikeEmote(trackName) or nameLooksLikeEmote(animationName) then
-        return true
-    end
-
-    if looped and length >= 0.8 then
-        return true
-    end
-
-    if length >= 2.5 then
+    if state == Enum.HumanoidStateType.Dead
+        or state == Enum.HumanoidStateType.Physics
+        or state == Enum.HumanoidStateType.Ragdoll
+        or state == Enum.HumanoidStateType.FallingDown then
         return true
     end
 
     return false
 end
 
-local function isEmoting()
-    if not humanoid or humanoid.Health <= 0 then
-        return false
-    end
-
-    if hasEmoteAttribute(player) or hasEmoteAttribute(character) or hasEmoteAttribute(humanoid) then
-        return true
-    end
-
-    if animator then
-        local tracks
-        pcall(function()
-            tracks = animator:GetPlayingAnimationTracks()
-        end)
-
-        if type(tracks) == "table" then
-            for _, track in ipairs(tracks) do
-                if trackLooksLikeEmote(track) then
-                    return true
-                end
-            end
-        end
-    end
-
-    return false
-end
-
-local function applyLegacyLock(locked, force)
-    if not force and lastLockState == locked then
+local lastLocked
+local function applyPCLock(locked, force)
+    if not force and lastLocked == locked then
         return
     end
-    lastLockState = locked
+    lastLocked = locked
 
-    -- PC legacy normal: shift-lock/camera-relative.
-    -- Emote: destrava a orientacao, mas a camera continua seguindo o Humanoid pela V3.
     setControllerLock(locked)
 
     if locked then
+        -- WASD/joystick move o personagem, mas a ORIENTACAO fica presa na camera,
+        -- exatamente como o constant shift-lock do PC.
         setRotationType(Enum.RotationType.CameraRelative)
     else
         setRotationType(Enum.RotationType.MovementRelative)
@@ -379,23 +290,16 @@ end
 local function attachCharacter(newCharacter)
     character = newCharacter
     humanoid = newCharacter:WaitForChild("Humanoid", 10)
-    rootPart = newCharacter:WaitForChild("HumanoidRootPart", 10)
-    animator = humanoid and (humanoid:FindFirstChildOfClass("Animator") or humanoid:WaitForChild("Animator", 5)) or nil
-
-    if humanoid and oldAutoRotate == nil then
-        pcall(function()
-            oldAutoRotate = humanoid.AutoRotate
-        end)
-    end
 
     task.wait()
-    forceClassicCamera()
-    lastLockState = nil
-    applyLegacyLock(not isEmoting(), true)
+    forcePCBaseCamera()
+    lastLocked = nil
+    applyPCLock(not shouldReleaseLock(), true)
 
     local camera = Workspace.CurrentCamera
-    if camera and humanoid and camera.CameraType ~= Enum.CameraType.Scriptable then
+    if camera and humanoid then
         pcall(function()
+            camera.CameraType = Enum.CameraType.Custom
             camera.CameraSubject = humanoid
         end)
     end
@@ -413,33 +317,56 @@ pcall(function()
     table.insert(connections, player:GetPropertyChangedSignal("DevTouchCameraMode"):Connect(function()
         if getgenv().PCMovementEnabled ~= false then
             task.defer(function()
-                forceClassicCamera()
-                applyLegacyLock(not isEmoting(), true)
+                forcePCBaseCamera()
+                applyPCLock(not shouldReleaseLock(), true)
             end)
         end
     end))
 end)
 
--- Nao escreve CFrame da camera nem do HumanoidRootPart.
--- So alterna o MESMO estado de orientacao que o shift-lock usa.
+-- V7: NAO existe mais "emote = unlock".
+-- O pivô continua preso no eixo da camera. Se a animacao mexer nos Motor6D/root joints,
+-- o corpo VISUAL pode virar/separar do pontinho sem soltar a posicao real do personagem.
 RunService:BindToRenderStep(bindName, Enum.RenderPriority.Camera.Value + 2, function()
     local enabled = getgenv().PCMovementEnabled ~= false
     screenGui.Enabled = enabled
 
-    if not enabled or not humanoid or humanoid.Health <= 0 then
-        if lastLockState ~= false then
-            applyLegacyLock(false, true)
-        end
+    if not enabled then
+        applyPCLock(false, false)
         return
     end
 
-    local emoting = isEmoting()
-    applyLegacyLock(not emoting, false)
+    if not humanoid then
+        return
+    end
 
-    -- Se o jogo trocou o controlador de camera, reaplica o estado uma vez nele.
-    local controller = getActiveCameraController()
-    if controller and controller ~= oldCameraController then
-        applyLegacyLock(not emoting, true)
+    local release = shouldReleaseLock()
+    applyPCLock(not release, false)
+
+    -- Alguns jogos trocam o CameraController internamente. Reafirma o mesmo lock
+    -- sem tocar no CFrame da camera nem no HumanoidRootPart.
+    if not release then
+        local controller = getActiveCameraController()
+        if controller then
+            rememberController(controller)
+            if type(controller.SetIsMouseLocked) == "function" then
+                pcall(function()
+                    controller:SetIsMouseLocked(true)
+                end)
+            end
+            if type(controller.SetMouseLockOffset) == "function" then
+                pcall(function()
+                    controller:SetMouseLockOffset(Vector3.zero)
+                end)
+            end
+        end
+
+        -- Reafirma CameraRelative caso o jogo tente voltar para MovementRelative.
+        pcall(function()
+            if userGameSettings and userGameSettings.RotationType ~= Enum.RotationType.CameraRelative then
+                setRotationType(Enum.RotationType.CameraRelative)
+            end
+        end)
     end
 end)
 
@@ -459,41 +386,26 @@ getgenv().__PCMobileAimCleanup = function()
         screenGui:Destroy()
     end)
 
-    local controller = getActiveCameraController()
-    if controller then
-        if oldControllerMouseLocked ~= nil and type(controller.SetIsMouseLocked) == "function" then
-            pcall(function()
-                controller:SetIsMouseLocked(oldControllerMouseLocked)
-            end)
-        else
-            pcall(function()
-                if type(controller.SetIsMouseLocked) == "function" then
-                    controller:SetIsMouseLocked(false)
-                end
-            end)
-        end
+    for controller, state in pairs(savedControllerState) do
+        pcall(function()
+            if state.mouseLocked ~= nil and type(controller.SetIsMouseLocked) == "function" then
+                controller:SetIsMouseLocked(state.mouseLocked)
+            elseif type(controller.SetIsMouseLocked) == "function" then
+                controller:SetIsMouseLocked(false)
+            end
 
-        if oldControllerOffset ~= nil and type(controller.SetMouseLockOffset) == "function" then
-            pcall(function()
-                controller:SetMouseLockOffset(oldControllerOffset)
-            end)
-        end
+            if state.offset ~= nil and type(controller.SetMouseLockOffset) == "function" then
+                controller:SetMouseLockOffset(state.offset)
+            end
 
-        if type(controller.UpdateMouseBehavior) == "function" then
-            pcall(function()
+            if type(controller.UpdateMouseBehavior) == "function" then
                 controller:UpdateMouseBehavior()
-            end)
-        end
+            end
+        end)
     end
 
     if oldRotationType ~= nil then
         setRotationType(oldRotationType)
-    end
-
-    if humanoid and oldAutoRotate ~= nil then
-        pcall(function()
-            humanoid.AutoRotate = oldAutoRotate
-        end)
     end
 
     if oldPlayerCameraMode ~= nil then

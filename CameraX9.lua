@@ -11,7 +11,7 @@ local function add(k,v)
 end
 local function safe(k,f)
     local ok,v=pcall(f)
-    add(k,ok and v or ("ERROR: "..tostring(v)))
+    if ok then add(k,v) else add(k,"ERROR: "..tostring(v)) end
 end
 local function keys(t)
     if type(t)~="table" then return tostring(t) end
@@ -20,14 +20,106 @@ local function keys(t)
     table.sort(a)
     return table.concat(a,", ")
 end
+local function methodKeys(t)
+    local out={}
+    local seen={}
+    local function harvest(x)
+        if type(x)~="table" then return end
+        for k,v in pairs(x) do
+            if type(v)=="function" and not seen[k] then
+                seen[k]=true
+                table.insert(out,tostring(k))
+            end
+        end
+    end
+    harvest(t)
+    harvest(getmetatable(t))
+    table.sort(out)
+    return table.concat(out,", ")
+end
 
-add("=== CAMERA X9 REPORT ===",os.date("%Y-%m-%d %H:%M:%S"))
+local function getUpvalueValues(f)
+    local out={}
+    if type(f)~="function" then return out end
+
+    if debug and type(debug.getupvalues)=="function" then
+        local ok,res=pcall(debug.getupvalues,f)
+        if ok and type(res)=="table" then for _,v in pairs(res) do table.insert(out,v) end end
+    end
+    if #out==0 and type(getupvalues)=="function" then
+        local ok,res=pcall(getupvalues,f)
+        if ok and type(res)=="table" then for _,v in pairs(res) do table.insert(out,v) end end
+    end
+    local single=(debug and debug.getupvalue) or getupvalue
+    if #out==0 and type(single)=="function" then
+        for i=1,80 do
+            local ok,a,b=pcall(single,f,i)
+            if not ok or (a==nil and b==nil) then break end
+            local v=(type(a)=="string") and b or a
+            if v~=nil then table.insert(out,v) end
+        end
+    end
+    return out
+end
+
+local function looksLikeCameraInput(t)
+    return type(t)=="table"
+        and type(rawget(t,"getRotation"))=="function"
+        and (type(rawget(t,"getZoomDelta"))=="function" or type(rawget(t,"getRotationActivated"))=="function")
+end
+
+local function findCameraInputFromController(controller)
+    if type(controller)~="table" then return nil,"controller-not-table" end
+    local visitedFns={}
+    local visitedTables={}
+    local function walk(v,depth)
+        if depth>12 then return nil end
+        if looksLikeCameraInput(v) then return v end
+        if type(v)=="function" then
+            if visitedFns[v] then return nil end
+            visitedFns[v]=true
+            for _,uv in ipairs(getUpvalueValues(v)) do
+                local found=walk(uv,depth+1)
+                if found then return found end
+            end
+        elseif type(v)=="table" then
+            if visitedTables[v] then return nil end
+            visitedTables[v]=true
+            for _,child in pairs(v) do
+                if type(child)=="function" or type(child)=="table" then
+                    local found=walk(child,depth+1)
+                    if found then return found end
+                end
+            end
+            local mt=getmetatable(v)
+            if type(mt)=="table" then
+                local found=walk(mt,depth+1)
+                if found then return found end
+            end
+        end
+        return nil
+    end
+    if type(controller.Update)=="function" then
+        local found=walk(controller.Update,0)
+        if found then return found,"controller.Update-upvalues" end
+    end
+    local found=walk(controller,0)
+    if found then return found,"controller-recursive" end
+    return nil,"not-found"
+end
+
+add("=== CAMERA X9 REPORT V2 ===",os.date("%Y-%m-%d %H:%M:%S"))
 add("PCMovementVersion",getgenv().PCMovementVersion)
 add("PCInputBridgeMode",getgenv().PCInputBridgeMode)
+add("PCInputBridgeDiscovery",getgenv().PCInputBridgeDiscovery)
 add("PCInputBridgeEnabled",getgenv().PCInputBridgeEnabled)
 add("PCInputBridgeSensitivity",getgenv().PCInputBridgeSensitivity)
 add("PCNativeHardCenterEnabled",getgenv().PCNativeHardCenterEnabled)
 add("PCVirtualMouseEnabled",getgenv().PCVirtualMouseEnabled)
+add("debug.getupvalues",debug and type(debug.getupvalues) or "nil")
+add("debug.getupvalue",debug and type(debug.getupvalue) or "nil")
+add("global.getupvalues",type(getupvalues))
+add("global.getupvalue",type(getupvalue))
 
 safe("TouchEnabled",function() return UIS.TouchEnabled end)
 safe("MouseEnabled",function() return UIS.MouseEnabled end)
@@ -40,8 +132,6 @@ safe("FOV",function() return Workspace.CurrentCamera and Workspace.CurrentCamera
 safe("FOVMode",function() return Workspace.CurrentCamera and Workspace.CurrentCamera.FieldOfViewMode end)
 safe("CameraType",function() return Workspace.CurrentCamera and Workspace.CurrentCamera.CameraType end)
 safe("CameraSubject",function() return Workspace.CurrentCamera and Workspace.CurrentCamera.CameraSubject end)
-safe("CameraCFrame",function() return Workspace.CurrentCamera and Workspace.CurrentCamera.CFrame end)
-safe("CameraFocus",function() return Workspace.CurrentCamera and Workspace.CurrentCamera.Focus end)
 safe("GuiInset",function() local a,b=GuiService:GetGuiInset(); return tostring(a).." / "..tostring(b) end)
 
 local ugs
@@ -69,28 +159,54 @@ local playerModule
 if pm then pcall(function() playerModule=require(pm) end) end
 add("PlayerModule.keys",keys(playerModule))
 local cameras
-pcall(function() if playerModule and playerModule.GetCameras then cameras=playerModule:GetCameras() end end)
+pcall(function()
+    if type(playerModule)=="table" and type(playerModule.GetCameras)=="function" then cameras=playerModule:GetCameras()
+    elseif type(playerModule)=="table" then cameras=rawget(playerModule,"cameras") end
+end)
 add("Cameras.keys",keys(cameras))
-local controller
-pcall(function() if cameras and cameras.GetActiveCameraController then controller=cameras:GetActiveCameraController() end end)
+add("Cameras.methods",methodKeys(cameras))
+
+local controller=type(cameras)=="table" and rawget(cameras,"activeCameraController") or nil
+if controller==nil then
+    pcall(function()
+        if cameras and type(cameras.GetActiveCameraController)=="function" then controller=cameras:GetActiveCameraController() end
+    end)
+end
 add("ActiveCameraController",controller)
 add("ActiveCameraController.keys",keys(controller))
+add("ActiveCameraController.methods",methodKeys(controller))
+add("ActiveCameraController.metatable.keys",keys(type(controller)=="table" and getmetatable(controller) or nil))
 if controller then
-    safe("Controller.IsMouseLocked",function() return controller:GetIsMouseLocked() end)
-    safe("Controller.MouseLockOffset",function() return controller:GetMouseLockOffset() end)
-    safe("Controller.CameraDistance",function() return controller:GetCameraToSubjectDistance() end)
+    safe("Controller.inMouseLockedMode",function() return controller.inMouseLockedMode end)
+    safe("Controller.mouseLockOffset",function() return controller.mouseLockOffset end)
+    safe("Controller.GetIsMouseLocked",function() return type(controller.GetIsMouseLocked)=="function" and controller:GetIsMouseLocked() or "METHOD_MISSING" end)
+    safe("Controller.GetMouseLockOffset",function() return type(controller.GetMouseLockOffset)=="function" and controller:GetMouseLockOffset() or "METHOD_MISSING" end)
+    safe("Controller.CameraDistance",function() return type(controller.GetCameraToSubjectDistance)=="function" and controller:GetCameraToSubjectDistance() or "METHOD_MISSING" end)
 end
 
-local ci
+local directCI
 pcall(function()
     local cm=pm and pm:FindFirstChild("CameraModule")
     local m=cm and cm:FindFirstChild("CameraInput")
-    if m then ci=require(m) end
+    if m then directCI=require(m) end
 end)
-add("CameraInput.keys",keys(ci))
-if ci then
-    safe("CameraInput.RotationActivated",function() return ci.getRotationActivated and ci.getRotationActivated() end)
-    safe("CameraInput.getRotation.fn",function() return ci.getRotation end)
+add("DirectCameraInput.keys",keys(directCI))
+
+local discoveredCI,discovery=findCameraInputFromController(controller)
+add("DiscoveredCameraInput.discovery",discovery)
+add("DiscoveredCameraInput.keys",keys(discoveredCI))
+if discoveredCI then
+    safe("DiscoveredCameraInput.RotationActivated",function() return discoveredCI.getRotationActivated and discoveredCI.getRotationActivated() end)
+    safe("DiscoveredCameraInput.getRotation.fn",function() return discoveredCI.getRotation end)
+end
+
+if pm then
+    local desc={}
+    for _,d in ipairs(pm:GetDescendants()) do
+        table.insert(desc,d:GetFullName().." ["..d.ClassName.."]")
+        if #desc>=80 then table.insert(desc,"...TRUNCATED..."); break end
+    end
+    add("PlayerModule.descendants",table.concat(desc," | "))
 end
 
 local char=player.Character
@@ -112,7 +228,6 @@ if char then
 end
 
 add("--- 3 SECOND LIVE SAMPLE ---","")
-local samples={}
 local start=os.clock()
 local lastCF=Workspace.CurrentCamera and Workspace.CurrentCamera.CFrame
 local frames=0
@@ -142,5 +257,5 @@ local report=table.concat(lines,"\n")
 print(report)
 if setclipboard then pcall(setclipboard,report) end
 getgenv().CameraX9Report=report
-warn("[Camera X9] relatório pronto. Foi copiado para o clipboard se o executor permitir. Se não, copie do console ou execute: setclipboard(getgenv().CameraX9Report)")
+warn("[Camera X9 V2] relatório pronto e copiado pro clipboard se permitido.")
 return report

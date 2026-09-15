@@ -659,6 +659,13 @@ end
 
 local function startProbe()
     if probeRunning then return false,"already-running" end
+    if #installedHooks==0 then
+        local ok,hookError=pcall(installTargetHooks)
+        if not ok or #installedHooks==0 then
+            addEvidence("HOOK","restart-installation-error="..cleanText(hookError,180))
+            return false,"hook-reinstall-failed"
+        end
+    end
     resetCounters()
     stateAtStart=snapshotState()
     stateAtStop=nil
@@ -670,10 +677,12 @@ local function startProbe()
 end
 
 local function stopProbe()
+    if not probeRunning then return true,"already-stopped" end
     if probeRunning then probeDuration=os.clock()-probeStartedAt end
     probeRunning=false
     currentUpdate=nil
     stateAtStop=snapshotState()
+    restoreHooks()
     addEvidence("PROBE","stopped duration="..tostring(round(probeDuration,3)))
     return true,"stopped"
 end
@@ -754,7 +763,7 @@ end
 
 getgenv().PCV608Diagnostics=function()
     local base=baseSafe()
-    local current=snapshotState()
+    local current=(not probeRunning and stateAtStop) or snapshotState()
     local conclusion,explained,customProven,v500Proven,v500Cadence=resolveConclusion(current)
     local updateDetail=targetEvidence["CameraModule.Update"] or {}
     return {

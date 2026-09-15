@@ -152,8 +152,11 @@ A V608 não chama setters/getters para simular estado e não chama
 altera `AutoRotate`, sensibilidade, ganho, WalkSpeed ou física; e não cria
 input sintético, `firesignal` ou VirtualInput.
 
-Todos os hooks encaminham a chamada original e são restaurados antes do cleanup
-da V604/V500. O relay/ownership V604 e o fail-open V500 permanecem intactos.
+Todos os hooks encaminham a chamada original. Ao tocar **PARAR**, o estado final
+é congelado e os cinco hooks são restaurados imediatamente; **INICIAR** pode
+reinstalá-los para outra coleta na mesma sessão. O cleanup também mantém uma
+restauração defensiva antes de devolver o controle à V604/V500. O
+relay/ownership V604 e o fail-open V500 permanecem intactos.
 
 `PCMovementV20_STABLE.lua` deve permanecer byte-identical com SHA-256:
 

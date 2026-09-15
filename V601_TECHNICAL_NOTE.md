@@ -81,6 +81,16 @@ For a short summary without the evidence chunks:
 getgenv().PCV601Report(false)
 ```
 
+V600 also reported `inMouseLockedMode = false`. V601 therefore records
+`cameraLockObserved` but does not use that observation as a default blocker: if
+the V500 camera-only-lock feature is enabled and the callback is proved, the
+discovery experiment can still dispatch the synthetic packet. To require the
+controller to report a real lock for a strict repeat, set this before loading:
+
+```lua
+getgenv().PCV601RequireObservedCameraLock=true
+```
+
 ## Non-negotiable invariants
 
 V601 does not call `UpdateMouseBehavior()`, select `CameraRelative`, write
@@ -99,4 +109,3 @@ The V500 and V20 files remain unchanged.
    callback ignored that proxy shape or writes a different state field.
 5. Only when `validationReady = true` is there evidence that this build actually
    exercised the intended MouseMovement experiment.
-

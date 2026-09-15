@@ -56,6 +56,9 @@ getgenv().PCInputBridgeDiscovery="pending"
 
 if getgenv().PCV601MouseRelayEnabled==nil then getgenv().PCV601MouseRelayEnabled=true end
 if getgenv().PCV601AutoFallback==nil then getgenv().PCV601AutoFallback=true end
+if getgenv().PCV601RequireObservedCameraLock==nil then
+    getgenv().PCV601RequireObservedCameraLock=false
+end
 
 -- X9 measured the real V20 angular response in the active Legacy controller.
 -- These gains preserve that response while changing semantics/path only.
@@ -107,6 +110,7 @@ local lastSyntheticStatus="not-attempted"
 local lastTouchEligibility="not-evaluated"
 local relayGate="not-evaluated"
 local lastReportedGate=nil
+local unobservedLockWarningLogged=false
 local fallbackReason="discovery-pending"
 local lastFallbackEvidence=nil
 local fallbackRestoreOk=true
@@ -114,6 +118,7 @@ local fallbackRestoreDetail="not-needed"
 local gcScanStatus="not-needed"
 local alternativeScanStatus="not-started"
 local evidence={}
+local evidenceDropped=0
 local inspectedFunctions={}
 local discoveryStats={
     connectionsFound=0,
@@ -215,7 +220,11 @@ local function relayGateReason(controller)
     if autoDisabled then return "auto-fallback-active" end
     if not touchPreferred() then return "preferred-input-not-touch" end
     if controller~=getActiveController() then return "controller-no-longer-active" end
-    if not controllerIsCameraOnlyLocked(controller) then return "camera-only-lock-not-observed" end
+    if getgenv().PCV500CameraOnlyLockEnabled==false then return "v500-camera-only-lock-disabled" end
+    if getgenv().PCV601RequireObservedCameraLock==true
+        and not controllerIsCameraOnlyLocked(controller) then
+        return "camera-only-lock-not-observed-strict-mode"
+    end
     if not humanoidAllowsCameraRelay() then return "humanoid-state-blocked" end
     return "open"
 end
@@ -236,7 +245,10 @@ local function cleanText(value,limit)
 end
 
 local function addEvidence(section,message)
-    if #evidence>=700 then return end
+    if #evidence>=700 then
+        evidenceDropped+=1
+        return
+    end
     evidence[#evidence+1]=string.format("[%03d][%s] %s",#evidence+1,section,cleanText(message,900))
 end
 
@@ -443,7 +455,7 @@ local function inspectFunction(fn,controller,origin,depth)
             local marker=value==controller and "=ACTIVE_CONTROLLER" or ""
             upvalueSummary[#upvalueSummary+1]=string.format("%s:%s%s",entry.name,valueType(value),marker)
         end
-        if type(value)=="function" and (depth or 0)<2 then
+        if type(value)=="function" and (depth or 0)<2 and #nested<12 then
             nested[#nested+1]={fn=value,origin=origin.." -> upvalue["..tostring(index)..":"..entry.name.."]"}
         end
     end
@@ -658,6 +670,11 @@ local function processTouch(controller,input,processed,dispatch,...)
         return pass
     end
 
+    if not controllerIsCameraOnlyLocked(controller) and not unobservedLockWarningLogged then
+        unobservedLockWarningLogged=true
+        addEvidence("RUNTIME","camera-only lock was not observable, but the discovery experiment proceeded because PCV601RequireObservedCameraLock=false; this matches the V600 test state and is reported separately")
+    end
+
     local previousPan=rawget(controller,"panEnabled")
     if previousPan==nil then
         relayGate="panEnabled-unobservable"
@@ -774,13 +791,16 @@ local function inspectTableFunctions(tbl,controller,origin,statKey)
     end
     table.sort(entries,function(a,b) return a.key<b.key end)
     local keySummary={}
+    local inspectedHere=0
     for _,entry in ipairs(entries) do
         if #keySummary<140 then keySummary[#keySummary+1]=entry.key..":"..valueType(entry.value) end
         if type(entry.value)=="function" then
+            inspectedHere+=1
             discoveryStats[statKey]+=1
             local functionOrigin=origin.."."..entry.key
             inspectFunction(entry.value,controller,functionOrigin,0)
             addEvidence("ALTERNATIVE",functionOrigin.." rejected for automatic direct call: function is visible but not proven to be the connected InputChanged stage")
+            if inspectedHere%8==0 then task.wait() end
         end
     end
     addEvidence("TABLE",origin.." keys="..#entries.." observed={"..table.concat(keySummary,", ").."}")
@@ -930,12 +950,18 @@ local function discoverCandidates(controller)
         local _,enable=safeField(connection,"Enable")
         local hasFire=type(fire)=="function"
         local canIsolate=type(disable)=="function" and type(enable)=="function"
-        local functionProven=fn~=nil and (exact or (functionRecord and functionRecord.referencesController))
-        local callbackProven=exact or (fn~=nil and functionRecord and functionRecord.referencesController)
+        local directControllerReference=functionRecord and functionRecord.referencesController
+            and functionRecord.referenceDepth==0
+        local nestedControllerReference=functionRecord and functionRecord.referencesController
+            and (functionRecord.referenceDepth or 0)>0
+        local functionProven=fn~=nil and (exact or directControllerReference)
+        local callbackProven=exact or (fn~=nil and directControllerReference)
         local rejection={}
         if not exact then rejection[#rejection+1]="wrapper does not map to controller.inputChangedConn" end
         if not fn then rejection[#rejection+1]="Function unavailable/observed "..observedFunctionType end
-        if fn and not (functionRecord and functionRecord.referencesController) and not exact then
+        if nestedControllerReference and not exact then
+            rejection[#rejection+1]="only a nested controller reference was found; insufficient proof for automatic hooking"
+        elseif fn and not directControllerReference and not exact then
             rejection[#rejection+1]="Function/upvalues do not reference active controller"
         end
         if not hasFire then rejection[#rejection+1]="Fire unavailable" end
@@ -1077,6 +1103,7 @@ end
 local function resetForController()
     restoreActiveRoute(false)
     evidence={}
+    evidenceDropped=0
     inspectedFunctions={}
     for key in pairs(discoveryStats) do discoveryStats[key]=0 end
     activeScore=0
@@ -1102,6 +1129,7 @@ local function resetForController()
     lastTouchEligibility="not-evaluated"
     relayGate="not-evaluated"
     lastReportedGate=nil
+    unobservedLockWarningLogged=false
     fallbackReason="discovery-pending"
     lastFallbackEvidence=nil
     fallbackRestoreOk=true
@@ -1172,6 +1200,8 @@ getgenv().PCV601Diagnostics=function()
         functionsExamined=discoveryStats.functionsExamined,
         upvaluesExamined=discoveryStats.upvaluesExamined,
         constantsExamined=discoveryStats.constantsExamined,
+        evidenceLines=#evidence,
+        evidenceDropped=evidenceDropped,
         gcScanStatus=gcScanStatus,
         alternativeScanStatus=alternativeScanStatus,
         gcObjectsExamined=discoveryStats.gcObjectsExamined,
@@ -1202,6 +1232,8 @@ getgenv().PCV601Diagnostics=function()
         ignoredEvents=ignoredEvents,
         failedEvents=failedEvents,
         relayGate=currentGate,
+        cameraLockObserved=type(controller)=="table" and controllerIsCameraOnlyLocked(controller) or false,
+        requireObservedCameraLock=getgenv().PCV601RequireObservedCameraLock==true,
         fallbackActive=fallbackActive,
         fallbackReason=fallbackReason,
         fallbackRestoreOk=fallbackRestoreOk,
@@ -1263,6 +1295,7 @@ getgenv().PCV601Evidence=function()
     local header={
         "Evidence is observational unless an [ACTIVATION] line says installed.",
         "Automatic routes are restricted to a proven callback Function or an exact LuaConnection wrapper with reversible isolation.",
+        "Evidence lines stored="..tostring(#evidence).." dropped-after-cap="..tostring(evidenceDropped),
     }
     local lines={}
     for _,line in ipairs(header) do lines[#lines+1]=line end
@@ -1277,7 +1310,8 @@ getgenv().PCV601Report=function(includeEvidence)
         "version","bridgeMode","discovery","discoveryComplete","discoveryScore","activeRouteScore",
         "candidatesFound","connectionsFound","connectionFunctions","controllerFunctions",
         "metatableFunctions","moduleFunctions","nestedFunctions","functionsExamined",
-        "upvaluesExamined","constantsExamined","alternativeScanStatus","gcScanStatus","gcObjectsExamined",
+        "upvaluesExamined","constantsExamined","evidenceLines","evidenceDropped",
+        "alternativeScanStatus","gcScanStatus","gcObjectsExamined",
         "gcFunctionsExamined","callbackFound","callbackFoundOrigin","callbackRoute",
         "callbackRouteInstalled","callbackHooked","callbackWrapperFireActive",
         "callbackExecuted","callbackExecutedEvents","realTouchCallbackEvents",
@@ -1285,7 +1319,8 @@ getgenv().PCV601Report=function(includeEvidence)
         "syntheticRejected","syntheticRejectedEvents","lastSyntheticStatus","lastTouchEligibility",
         "rotateInputChanged","rotateInputChangedEvents","rotateInputUnchangedEvents",
         "lastRotateBefore","lastRotateAfter","lastAppliedRotation","relayedEvents",
-        "ignoredEvents","failedEvents","relayGate","fallbackActive","fallbackReason",
+        "ignoredEvents","failedEvents","relayGate","cameraLockObserved",
+        "requireObservedCameraLock","fallbackActive","fallbackReason",
         "fallbackRestoreOk","fallbackRestoreDetail","fallbackV500Preserved",
         "validationReady","relayEnabled","autoFallback",
         "autoDisabled","gainX","gainY","preferredInput","rotationType",

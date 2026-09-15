@@ -44,7 +44,7 @@ getgenv().PCV600MouseRelayEnabled=true  -- enable relay again after re-running L
 getgenv().PCV600MouseGainX -- calibrated horizontal gain
 getgenv().PCV600MouseGainY -- calibrated vertical gain
 
-print(getgenv().PCV600Diagnostics())
+getgenv().PCV600Report() -- prints a readable report in the executor console
 ```
 
 The first comparison should keep the default gains. V600 is intended to test input semantics without mixing in another sensitivity experiment.

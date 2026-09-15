@@ -508,11 +508,31 @@ getgenv().PCV600Diagnostics=function()
     return result
 end
 
+getgenv().PCV600Report=function()
+    local diagnostics=getgenv().PCV600Diagnostics()
+    local keys={
+        "version","bridgeMode","discovery","discoveryScore","callbackHooked",
+        "relayEnabled","autoFallback","autoDisabled","relayedEvents","ignoredEvents",
+        "failedEvents","gainX","gainY","lastAppliedRotation","preferredInput",
+        "rotationType","inMouseLockedMode","mouseLockOffset","panEnabled","rotateInput",
+        "writesRootPartCFrame","writesCameraCFrame","forcesAutoRotate",
+        "callsUpdateMouseBehavior","forcesCameraRelative",
+    }
+    local lines={"=== PC MOVEMENT V600 REPORT ==="}
+    for _,key in ipairs(keys) do
+        table.insert(lines,key.." = "..tostring(diagnostics[key]))
+    end
+    local report=table.concat(lines,"\n")
+    warn(report)
+    return report
+end
+
 getgenv().__PCMobileAimCleanup=function()
     pcall(function() RunService:UnbindFromRenderStep(WATCH_BIND) end)
     restoreActiveHook()
 
     getgenv().PCV600Diagnostics=nil
+    getgenv().PCV600Report=nil
     getgenv().PCV600DiscoveryScore=nil
 
     if baseCleanup then pcall(baseCleanup) end

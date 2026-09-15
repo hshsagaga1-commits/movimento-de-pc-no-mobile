@@ -1182,7 +1182,7 @@ getgenv().PCV601Diagnostics=function()
     local controller=getActiveController()
     local currentGate=type(controller)=="table" and relayGateReason(controller) or "active-controller-missing"
     local bridgeMode=getgenv().PCInputBridgeMode
-    local fallbackActive=string.sub(tostring(bridgeMode),1,13)=="fallback-v500"
+    local fallbackActive=string.sub(tostring(bridgeMode),1,8)=="fallback"
     local result={
         version=getgenv().PCMovementVersion,
         bridgeMode=bridgeMode,
@@ -1241,7 +1241,8 @@ getgenv().PCV601Diagnostics=function()
         fallbackV500Preserved=fallbackRestoreOk,
         validationReady=callbackFound and callbackExecutedEvents>0
             and syntheticAcceptedEvents>0 and rotateInputChangedEvents>0
-            and relayedEvents>0 and not autoDisabled,
+            and relayedEvents>0 and activeRoute~="none"
+            and not fallbackActive and not autoDisabled,
         relayEnabled=getgenv().PCV601MouseRelayEnabled~=false,
         autoFallback=getgenv().PCV601AutoFallback~=false,
         autoDisabled=autoDisabled,

@@ -9,6 +9,10 @@ local playerGui = player:WaitForChild("PlayerGui")
 local BIND_NAME = "__PCIndependentJoystickBridge"
 local OVERLAY_GUI_NAME = "PCIndependentJoystickAssist"
 
+-- Hard ownership split: movement bridge can only own touches that BEGIN on
+-- the left half of the screen. Right-half touches are never movement touches.
+local MOVEMENT_SCREEN_FRACTION = 0.50
+
 -- Keyboard-like movement tuning.
 local PRESS_THRESHOLD = 0.30
 local RELEASE_THRESHOLD = 0.18
@@ -73,6 +77,8 @@ local keySendErrors = 0
 local moveApplyErrors = 0
 local movementCaptures = 0
 local movementUpdates = 0
+local rightHalfRejected = 0
+local movementCrossHalfReleases = 0
 local jumpRequests = 0
 local jumpPulses = 0
 local bufferedJumpCount = 0
@@ -82,6 +88,22 @@ local jumpOverlay = nil
 local lastJumpPulse = -math.huge
 local pendingJumpDeadline = nil
 local pendingSpaceReleaseToken = 0
+
+local function viewportSize()
+    local camera = workspace.CurrentCamera
+    return camera and camera.ViewportSize or Vector2.new(1108, 512)
+end
+
+local function isMovementHalf(position)
+    if typeof(position) == "Vector3" then
+        position = Vector2.new(position.X, position.Y)
+    end
+    if typeof(position) ~= "Vector2" then
+        return false
+    end
+    local viewport = viewportSize()
+    return position.X <= viewport.X * MOVEMENT_SCREEN_FRACTION
+end
 
 local function sendKey(name, down)
     local keyCode = KEYCODES[name]
@@ -265,13 +287,21 @@ local function pointInsideExpandedFrame(position, frame, padding)
 end
 
 local function fallbackJoystickHit(position)
-    local camera = workspace.CurrentCamera
-    local viewport = camera and camera.ViewportSize or Vector2.new(1108, 512)
-    -- Fallback is deliberately limited to the normal lower-left movement zone.
-    return position.X <= viewport.X * 0.33 and position.Y >= viewport.Y * 0.48
+    local viewport = viewportSize()
+    -- Fallback stays lower-left AND is bounded by the hard 50% split.
+    return position.X <= viewport.X * MOVEMENT_SCREEN_FRACTION
+        and position.X <= viewport.X * 0.33
+        and position.Y >= viewport.Y * 0.48
 end
 
 local function acquireMovementGeometry(inputPosition)
+    -- Absolute ownership rule: right half can never be claimed as movement,
+    -- even if Roblox exposes a giant DynamicThumbstickFrame.
+    if not isMovementHalf(inputPosition) then
+        rightHalfRejected += 1
+        return false
+    end
+
     local frame = findNativeJoystickFrame(true)
     if frame and pointInsideExpandedFrame(inputPosition, frame, 18) then
         local nameLower = string.lower(frame.Name)
@@ -286,8 +316,7 @@ local function acquireMovementGeometry(inputPosition)
     end
 
     if fallbackJoystickHit(inputPosition) then
-        local camera = workspace.CurrentCamera
-        local viewport = camera and camera.ViewportSize or Vector2.new(1108, 512)
+        local viewport = viewportSize()
         movementCenter = inputPosition
         movementRadius = math.max(52, math.min(viewport.X, viewport.Y) * 0.12)
         return true
@@ -477,6 +506,11 @@ inputConnections[#inputConnections + 1] = UserInputService.InputBegan:Connect(fu
     end
 
     local position = Vector2.new(input.Position.X, input.Position.Y)
+    if not isMovementHalf(position) then
+        rightHalfRejected += 1
+        return
+    end
+
     if acquireMovementGeometry(position) then
         movementTouch = input
         movementCaptures += 1
@@ -487,6 +521,12 @@ end)
 
 inputConnections[#inputConnections + 1] = UserInputService.InputChanged:Connect(function(input)
     if enabled and input == movementTouch then
+        local position = Vector2.new(input.Position.X, input.Position.Y)
+        if not isMovementHalf(position) then
+            movementCrossHalfReleases += 1
+            releaseMovementTouch()
+            return
+        end
         updateMovementPosition(input.Position)
     end
 end)
@@ -534,7 +574,7 @@ RunService:BindToRenderStep(BIND_NAME, Enum.RenderPriority.Last.Value, function(
 end)
 
 getgenv().PCIndependentJoystick = {
-    Version = "4.0-independent-touch-final-move-jump-buffer",
+    Version = "4.1-left-half-gated-final-move-jump-buffer",
     SetEnabled = function(value)
         enabled = value ~= false
         overlayGui.Enabled = enabled
@@ -563,10 +603,13 @@ getgenv().PCIndependentJoystick = {
             movementTouchActive = movementTouch ~= nil,
             joystickFrame = joystickFrameName,
             preferredInput = latestPreferredInput,
+            movementScreenFraction = MOVEMENT_SCREEN_FRACTION,
             directionLatchSeconds = DIRECTION_LATCH_SECONDS,
             jumpMinInterval = JUMP_MIN_INTERVAL,
             movementCaptures = movementCaptures,
             movementUpdates = movementUpdates,
+            rightHalfRejected = rightHalfRejected,
+            movementCrossHalfReleases = movementCrossHalfReleases,
             jumpRequests = jumpRequests,
             jumpPulses = jumpPulses,
             bufferedJumpCount = bufferedJumpCount,

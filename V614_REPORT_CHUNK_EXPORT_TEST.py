@@ -26,17 +26,21 @@ def luau_binary() -> Path:
 
 source = RUNTIME.read_text(encoding="utf-8")
 loader_source = LOADER.read_text(encoding="utf-8")
-if 'local revision="V614-TemporalPoseTelemetryR1-EssentialReportR1"' not in loader_source:
-    raise SystemExit("RED: Loader cache revision was not updated for EssentialReportR1")
+if 'local revision="V614-TemporalPoseTelemetryR1-EssentialReportR1-FullClipboardR1"' not in loader_source:
+    raise SystemExit("RED: Loader cache revision was not updated for FullClipboardR1")
 match = re.search(re.escape(START) + r"\n(.*?)\n" + re.escape(END), source, re.S)
 if not match:
     raise SystemExit("RED: production report-transport helper block is missing")
 
 required_mobile_export_fragments = (
+    'SEGCFG.exportFullButton=makeButton(body,"COPIAR REPORT ESSENCIAL COMPLETO"',
     'SEGCFG.exportCopyButton=makeButton(body,"GERAR PARTES DO REPORT"',
     'SEGCFG.exportPreviousButton=makeButton(body,"PARTE ANTERIOR"',
     'SEGCFG.exportNextButton=makeButton(body,"PRÓXIMA PARTE"',
     "copyToClipboard(transport.text)",
+    "pcall(SEGCFG.copyCompleteReport,export,copyToClipboard)",
+    "CÓPIA COMPLETA OK",
+    "FALHOU • USE AS PARTES",
     "reportId=%s",
     "SEGCFG.resetReportExport()",
 )
@@ -83,7 +87,23 @@ verifyCase("raw-markers","\n=== raw ===\nline\n\n=== END-looking text ===\n",295
 local original="á🙂A\nB漢字"..string.rep("z",70000).."\nFIM\n"
 local chunks=SEGCFG.splitReportPayloads(original,29500)
 expect(table.concat(chunks)==original,"final byte-for-byte reconstruction")
+local copied=nil
+local fullCopyOk,fullCopyChars=SEGCFG.copyCompleteReport({
+    chunks={"á🙂A\n","B漢字","\nFIM\n"},
+    totalReportChars=SEGCFG.reportCharCount("á🙂A\nB漢字\nFIM\n"),
+},function(value)
+    copied=value
+    return true
+end)
+expect(fullCopyOk==true,"complete clipboard result")
+expect(copied=="á🙂A\nB漢字\nFIM\n","complete clipboard exact content")
+expect(fullCopyChars==SEGCFG.reportCharCount(copied),"complete clipboard char count")
+local failedCopyOk=SEGCFG.copyCompleteReport({chunks={"abc"},totalReportChars=3},function()
+    return false
+end)
+expect(failedCopyOk==false,"complete clipboard failure must remain observable")
 print("PASS: V614 report transport preserves the exact original report")
+print("PASS: V614 complete clipboard copies the exact Essential Report")
 '''
 )
 

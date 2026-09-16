@@ -3174,6 +3174,20 @@ function SEGCFG.makeReportChunkTransport(reportId,totalReportChars,chunks,index,
         payloadStartByte=#prefix+1,payloadEndByte=#prefix+#payload,
     }
 end
+
+function SEGCFG.copyCompleteReport(export,copyFunction)
+    if type(export)~="table" or type(export.chunks)~="table" then
+        error("V614 complete clipboard requires a frozen report export",0)
+    end
+    if type(copyFunction)~="function" then error("copyFunction must be callable",0) end
+    local fullReport=table.concat(export.chunks)
+    local totalChars=SEGCFG.reportCharCount(fullReport)
+    if totalChars~=export.totalReportChars then
+        error("V614 complete clipboard reconstruction mismatch",0)
+    end
+    local callOk,copied=pcall(copyFunction,fullReport)
+    return callOk and copied==true,totalChars
+end
 -- END V614 REPORT TRANSPORT PURE HELPERS
 
 do
@@ -3588,40 +3602,20 @@ function SEGCFG.essentialStoredStepPath(series,field,name)
     return found and SEGCFG.roundEssential(total) or nil
 end
 
-function SEGCFG.essentialScreenDecomposition(series,beforeField,afterField,yaw)
-    local within,boundary=0,0
-    local valid=type(yaw)=="number" and yaw>0 and #(series or {})>0
-    for index,item in ipairs(series or {}) do
-        local before,after=item[beforeField],item[afterField]
-        if type(before)~="number" or type(after)~="number" then valid=false
-        else within+=after-before end
-        if index>1 then
-            local previousAfter=series[index-1][afterField]
-            if type(before)~="number" or type(previousAfter)~="number" then valid=false
-            else boundary+=before-previousAfter end
-        end
-    end
-    if not valid then return {valid=false} end
-    local first,last=series[1],series[#series]
-    local endpoint=last[afterField]-first[beforeField]
-    local residual=endpoint-within-boundary
-    local opposed=(within<0 and boundary>0) or (within>0 and boundary<0)
-    return {
-        valid=true,within=SEGCFG.roundEssential(within),boundary=SEGCFG.roundEssential(boundary),
-        endpoint=SEGCFG.roundEssential(endpoint),residual=SEGCFG.roundEssential(residual),
-        withinPerYaw=SEGCFG.roundEssential(within/yaw),boundaryPerYaw=SEGCFG.roundEssential(boundary/yaw),
-        endpointAbsPerYaw=SEGCFG.roundEssential(math.abs(endpoint)/yaw),
-        cancellationPerYaw=SEGCFG.roundEssential((opposed and math.min(math.abs(within),math.abs(boundary)) or 0)/yaw),
-        signsOpposed=opposed,
-    }
-end
-
 function SEGCFG.analyzeEssentialSegment(segment,model)
     local series=segment.series or {}
     local yaw=segment.totalAbsYaw or 0
-    local headDecomposition=SEGCFG.essentialScreenDecomposition(series,"headBeforeX","headAfterX",yaw)
-    local primaryDecomposition=SEGCFG.essentialScreenDecomposition(series,"primaryBeforeX","primaryAfterX",yaw)
-    local subjectDecomposition=SEGCFG.essentialScreenDecomposition(series,"subjectBeforeX","subjectAfterX",yaw)
+    local within,boundary=0,0
+    local valid=yaw>0 and #series>0
+    for index,item in ipairs(series) do
+        if type(item.headBeforeX)~="number" or type(item.headAfterX)~="number" then valid=false
+        else within+=item.headAfterX-item.headBeforeX end
+        if index>1 then
+            local previous=series[index-1]
+            if type(item.headBeforeX)~="number" or type(previous.headAfterX)~="number" then valid=false
+            else boundary+=item.headBeforeX-previous.headAfterX end
+        end
+    end
     local first,last=series[1],series[#series]
     local startBoundary=segment.boundaries and segment.boundaries.start
     local finishBoundary=segment.boundaries and segment.boundaries.finish
@@ -3683,13 +3677,12 @@ function SEGCFG.analyzeEssentialSegment(segment,model)
     local finishPoint=startSnapshot and finishSnapshot
         and SEGCFG.essentialProjectPoint(finishSnapshot.cameraCFrame,finishSnapshot.headCFrame,cameraConfig) or nil
     return {
-        valid=headDecomposition.valid,duration=segment.duration,frameCount=segment.frameCount,
+        valid=valid,duration=segment.duration,frameCount=segment.frameCount,
         headHorizontal=segment.screen and segment.screen.head and segment.screen.head.x or nil,
         primaryHorizontal=segment.screen and segment.screen.primary and segment.screen.primary.x or nil,
         subjectHorizontal=segment.screen and segment.screen.subject and segment.screen.subject.x or nil,
-        headWithinXPerYaw=headDecomposition.withinPerYaw,
-        headBoundaryXPerYaw=headDecomposition.boundaryPerYaw,
-        screenDecomposition={head=headDecomposition,primary=primaryDecomposition,subject=subjectDecomposition},
+        headWithinXPerYaw=valid and SEGCFG.roundEssential(within/yaw) or nil,
+        headBoundaryXPerYaw=valid and SEGCFG.roundEssential(boundary/yaw) or nil,
         rootTranslation=SEGCFG.essentialDistance(startSnapshot and startSnapshot.primaryCFrame,finishSnapshot and finishSnapshot.primaryCFrame),
         rootRotationDeg=SEGCFG.essentialRotationDegrees(startSnapshot and startSnapshot.primaryCFrame,finishSnapshot and finishSnapshot.primaryCFrame),
         rootPathTranslation=SEGCFG.essentialStoredStepPath(series,"rootStep")
@@ -3779,10 +3772,7 @@ function SEGCFG.essentialFirstAnimationAdvance(segmentAnalysis)
 end
 
 function SEGCFG.aggregateEssentialAnalyses(pairAnalyses)
-    local result={pairs={},aggregates={touch={},relay={}},bootstrap={},geometry={
-        maxArithmeticResidual=0,headOpposedTouch=0,headOpposedRelay=0,
-        primaryBoundaryNonzero=0,subjectBoundaryNonzero=0,
-    },decisions={}}
+    local result={pairs={},aggregates={touch={},relay={}},bootstrap={},decisions={}}
     local routeValues={touch={root={},head={},joint={},animation={},duration={},frames={}},
         relay={root={},head={},joint={},animation={},duration={},frames={}}}
     local differences={head={},primary={},subject={}}
@@ -3804,23 +3794,6 @@ function SEGCFG.aggregateEssentialAnalyses(pairAnalyses)
             if type(animation)=="number" then values.animation[#values.animation+1]=animation end
             if type(analysis.duration)=="number" then values.duration[#values.duration+1]=analysis.duration end
             if type(analysis.frameCount)=="number" then values.frames[#values.frames+1]=analysis.frameCount end
-            local decomposition=analysis.screenDecomposition or {}
-            for _,point in ipairs({"head","primary","subject"}) do
-                local residual=decomposition[point] and decomposition[point].residual
-                if type(residual)=="number" then
-                    result.geometry.maxArithmeticResidual=math.max(result.geometry.maxArithmeticResidual,math.abs(residual))
-                end
-            end
-            if decomposition.head and decomposition.head.signsOpposed then
-                local key=route=="touch" and "headOpposedTouch" or "headOpposedRelay"
-                result.geometry[key]+=1
-            end
-            if decomposition.primary and math.abs(decomposition.primary.boundary or 0)>0 then
-                result.geometry.primaryBoundaryNonzero+=1
-            end
-            if decomposition.subject and math.abs(decomposition.subject.boundary or 0)>0 then
-                result.geometry.subjectBoundaryNonzero+=1
-            end
         end
         for key,field in pairs({head="headHorizontal",primary="primaryHorizontal",subject="subjectHorizontal"}) do
             if type(touch[field])=="number" and type(relay[field])=="number" then
@@ -3842,10 +3815,6 @@ function SEGCFG.aggregateEssentialAnalyses(pairAnalyses)
     result.bootstrap.headHorizontal=SEGCFG.essentialMovingBlock(differences.head)
     result.bootstrap.primaryHorizontal=SEGCFG.essentialMovingBlock(differences.primary)
     result.bootstrap.subjectHorizontal=SEGCFG.essentialMovingBlock(differences.subject)
-    result.geometry.maxArithmeticResidual=SEGCFG.roundEssential(result.geometry.maxArithmeticResidual)
-    result.geometry.decompositionIdentityClosed=result.geometry.maxArithmeticResidual==0
-    result.geometry.primarySubjectDoNotExplainObservedHeadDifference=
-        result.geometry.primaryBoundaryNonzero==0 and result.geometry.subjectBoundaryNonzero==0
     result.method={name="paired moving-block bootstrap over time-ordered matched non-overlapping segment pairs",
         unit="matched segment pair",blockSize=math.max(1,math.min(#(pairAnalyses or {}),tonumber(SEGCFG.bootstrapBlock) or 3)),
         iterations=tonumber(SEGCFG.bootstrapIterations) or 2000,
@@ -3858,11 +3827,6 @@ function SEGCFG.aggregateEssentialAnalyses(pairAnalyses)
         jointTransformContribution="quantified pair-by-pair; independent causal share unproved",
         animationProgressContribution="quantified pair-by-pair; independent causal share unproved",
         projectionDepthContribution="quantified pair-by-pair; independent causal share unproved",
-        screenDisplacementDecomposition="endpoint = within-update + inter-frame; arithmetic residual retained pair-by-pair",
-        downstreamCameraCompositionMissing="not observed in the measured decomposition",
-        primarySubjectExplanation="not supported for the observed Head-only horizontal separation",
-        timingPoseInterpretation="relay duration/frame count are larger, allowing more Head-to-rig/pose evolution and projected cancellation",
-        pcMechanismConfirmed=false,
         headHorizontalEffectAfterTemporalControl="unproved: original matcher does not pair duration/frame count/initial pose",
         firstConcreteGeometricDivergence="unproved after temporal and initial-pose control",
         causalMechanismProved=false,implementationTargetIdentified=false,
@@ -4168,7 +4132,6 @@ function SEGCFG.buildEssentialReportText(bundle,size)
     end
     lines[#lines+1]="aggregateAnalysis = "..essentialJsonValue(analysis.aggregates)
     lines[#lines+1]="bootstrapAnalysis = "..essentialJsonValue(analysis.bootstrap)
-    lines[#lines+1]="geometricDecomposition = "..essentialJsonValue(analysis.geometry)
 
     lines[#lines+1]=""
     lines[#lines+1]="=== V614 ESSENTIAL OMISSION MANIFEST ==="
@@ -4193,8 +4156,6 @@ function SEGCFG.buildEssentialReportText(bundle,size)
     lines[#lines+1]="=== V614 ESSENTIAL CAUSAL DECISION ==="
     local decisionKeys={"temporalConfoundResolved","initialPoseConfoundResolved","rootMotionContribution",
         "jointTransformContribution","animationProgressContribution","projectionDepthContribution",
-        "screenDisplacementDecomposition","downstreamCameraCompositionMissing","primarySubjectExplanation",
-        "timingPoseInterpretation","pcMechanismConfirmed",
         "headHorizontalEffectAfterTemporalControl","firstConcreteGeometricDivergence",
         "causalMechanismProved","implementationTargetIdentified","v615Justified","astra6MaxJustified"}
     for _,key in ipairs(decisionKeys) do lines[#lines+1]=key.." = "..tostring(analysis.decisions[key]) end
@@ -4232,6 +4193,7 @@ end
 SEGCFG.reportTransportMaxChars=30000
 SEGCFG.reportPayloadMaxChars=29500
 SEGCFG.reportExport=nil
+SEGCFG.exportFullButton=nil
 SEGCFG.exportCopyButton=nil
 SEGCFG.exportPreviousButton=nil
 SEGCFG.exportNextButton=nil
@@ -4275,6 +4237,9 @@ function SEGCFG.updateReportExportButtons()
     local export=SEGCFG.reportExport
     local current=export and export.current or 1
     local total=export and #export.chunks or 0
+    if SEGCFG.exportFullButton then
+        SEGCFG.exportFullButton.Text="COPIAR REPORT ESSENCIAL COMPLETO"
+    end
     if SEGCFG.exportCopyButton then
         SEGCFG.exportCopyButton.Text=export
             and string.format("COPIAR PARTE %d/%d",current,total)
@@ -4377,7 +4342,7 @@ refreshLiveStatus=function()
             instruction="COBERTURA RELAY BAIXA • GIRE MAIS"
         end
     end
-    local exportText="export=aguardando • toque GERAR PARTES depois de PARAR"
+    local exportText="export=aguardando • depois de PARAR toque COPIAR REPORT COMPLETO"
     if SEGCFG.reportExport then
         local okTransport,transport=pcall(SEGCFG.currentReportTransport)
         if okTransport and type(transport)=="table" then
@@ -4410,7 +4375,7 @@ local function createPanel()
     gui.Name=UI_NAME; gui.ResetOnSpawn=false; gui.DisplayOrder=999999; gui.Parent=parent; screenGui=gui
 
     local panel=Instance.new("Frame")
-    panel.Size=UDim2.fromOffset(336,650); panel.Position=UDim2.new(1,-348,0.5,-325)
+    panel.Size=UDim2.fromOffset(336,685); panel.Position=UDim2.new(1,-348,0.5,-342)
     panel.BackgroundColor3=Color3.fromRGB(9,14,27); panel.BackgroundTransparency=0.04
     panel.BorderSizePixel=0; panel.Active=true; panel.Draggable=true; panel.Parent=gui
     local corner=Instance.new("UICorner"); corner.CornerRadius=UDim.new(0,14); corner.Parent=panel
@@ -4435,7 +4400,7 @@ local function createPanel()
     local instructions=Instance.new("TextLabel")
     instructions.LayoutOrder=0; instructions.Size=UDim2.new(1,0,0,92)
     instructions.BackgroundColor3=Color3.fromRGB(18,28,48); instructions.BorderSizePixel=0
-    instructions.Text="INICIAR; depois siga 1→2→3→4 (ABBA).\nParado, sem joystick; espere ACTIVE.\nGire horizontalmente até FASE COMPLETA.\nSiga GIRE MAIS / CONTINUE / PITCH ALTO.\nPARAR → copie cada PARTE antes de sair."
+    instructions.Text="INICIAR; depois siga 1→2→3→4 (ABBA).\nParado, sem joystick; espere ACTIVE.\nGire horizontalmente até FASE COMPLETA.\nSiga GIRE MAIS / CONTINUE / PITCH ALTO.\nPARAR → COPIAR REPORT COMPLETO; partes são fallback."
     instructions.TextColor3=Color3.fromRGB(226,232,240); instructions.TextSize=11
     instructions.TextWrapped=true; instructions.TextXAlignment=Enum.TextXAlignment.Left
     instructions.Font=Enum.Font.Gotham; instructions.Parent=body
@@ -4448,11 +4413,12 @@ local function createPanel()
     phaseA2Button=makeButton(body,"4 • A2 TOUCH",Color3.fromRGB(30,64,175),5)
     local stop=makeButton(body,"PARAR",Color3.fromRGB(245,158,11),6)
     local emergency=makeButton(body,"EMERGÊNCIA • RELAY OFF / V500",Color3.fromRGB(190,24,93),7)
-    SEGCFG.exportCopyButton=makeButton(body,"GERAR PARTES DO REPORT",Color3.fromRGB(2,132,199),8)
-    SEGCFG.exportPreviousButton=makeButton(body,"PARTE ANTERIOR",Color3.fromRGB(51,65,85),9)
-    SEGCFG.exportNextButton=makeButton(body,"PRÓXIMA PARTE",Color3.fromRGB(8,145,178),10)
+    SEGCFG.exportFullButton=makeButton(body,"COPIAR REPORT ESSENCIAL COMPLETO",Color3.fromRGB(5,150,105),8)
+    SEGCFG.exportCopyButton=makeButton(body,"GERAR PARTES DO REPORT",Color3.fromRGB(2,132,199),9)
+    SEGCFG.exportPreviousButton=makeButton(body,"PARTE ANTERIOR",Color3.fromRGB(51,65,85),10)
+    SEGCFG.exportNextButton=makeButton(body,"PRÓXIMA PARTE",Color3.fromRGB(8,145,178),11)
     statusLabel=Instance.new("TextLabel")
-    statusLabel.LayoutOrder=11; statusLabel.Size=UDim2.new(1,0,0,158); statusLabel.BackgroundTransparency=1
+    statusLabel.LayoutOrder=12; statusLabel.Size=UDim2.new(1,0,0,158); statusLabel.BackgroundTransparency=1
     statusLabel.Text="Pronto. INICIAR e depois 1 • A1 TOUCH."; statusLabel.TextColor3=Color3.fromRGB(148,163,184)
     statusLabel.TextSize=10; statusLabel.TextWrapped=true; statusLabel.Font=Enum.Font.Gotham; statusLabel.Parent=body
 
@@ -4493,6 +4459,20 @@ local function createPanel()
         if type(baseSetRelay)=="function" then pcall(baseSetRelay,false) end
         refreshPhaseButtons(); setStatus("Emergência: relay OFF; V500 ativo.",Color3.fromRGB(251,113,133))
     end)
+    uiConnections[#uiConnections+1]=SEGCFG.exportFullButton.Activated:Connect(function()
+        local okExport,export=pcall(SEGCFG.ensureReportExport)
+        if not okExport then
+            SEGCFG.lastExportMessage="CÓPIA COMPLETA FALHOU • USE AS PARTES • "..cleanText(export,80)
+            refreshLiveStatus()
+            return
+        end
+        local okCall,copied,totalChars=pcall(SEGCFG.copyCompleteReport,export,copyToClipboard)
+        local ok=okCall and copied==true
+        SEGCFG.lastExportMessage=ok
+            and string.format("CÓPIA COMPLETA OK • %d caracteres",totalChars)
+            or "CÓPIA COMPLETA FALHOU • USE AS PARTES"
+        SEGCFG.updateReportExportButtons(); refreshLiveStatus()
+    end)
     uiConnections[#uiConnections+1]=SEGCFG.exportCopyButton.Activated:Connect(function()
         local okTransport,transport=pcall(SEGCFG.currentReportTransport)
         if not okTransport then
@@ -4530,7 +4510,7 @@ local function createPanel()
     local expanded=true
     uiConnections[#uiConnections+1]=collapse.Activated:Connect(function()
         expanded=not expanded; body.Visible=expanded
-        panel.Size=expanded and UDim2.fromOffset(336,650) or UDim2.fromOffset(336,45)
+        panel.Size=expanded and UDim2.fromOffset(336,685) or UDim2.fromOffset(336,45)
         collapse.Text=expanded and "–" or "+"
     end)
     refreshPhaseButtons()
@@ -4570,7 +4550,8 @@ getgenv().__PCMobileAimCleanup=function()
     uiConnections={}
     if screenGui then pcall(function() screenGui:Destroy() end) end
     screenGui=nil
-    SEGCFG.exportCopyButton=nil; SEGCFG.exportPreviousButton=nil; SEGCFG.exportNextButton=nil
+    SEGCFG.exportFullButton=nil; SEGCFG.exportCopyButton=nil
+    SEGCFG.exportPreviousButton=nil; SEGCFG.exportNextButton=nil
     SEGCFG.resetReportExport()
     restoreHooks()
     getgenv().PCV614Start=nil

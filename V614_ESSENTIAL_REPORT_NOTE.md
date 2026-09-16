@@ -25,19 +25,6 @@ The Essential Report retains:
 - pair-by-pair decomposition, aggregate distributions, moving-block bootstrap/CI, decision rules, and all final causal flags;
 - an omission manifest, A/B parity digests, exact report-size fields, and the chunk count used by the mobile exporter.
 
-The preserved causal interpretation remains deliberately conservative: the
-endpoint Head displacement is decomposed as within-update plus inter-frame
-motion and retains the arithmetic residual for every matched segment. The prior
-V614 audit closed that identity with zero residual, found no evidence of a
-missing downstream camera-composition step, and found no corresponding
-PrimaryPart/subject separation. Relay nevertheless spans substantially more
-time and frames for matched yaw, allowing more Head-to-rig/pose evolution and
-more projected cancellation. Duration/frame count, initial pose, and animation
-state therefore remain uncontrolled confounders. This revision does not call
-Relay a confirmed PC mechanism and keeps `causalMechanismProved`,
-`implementationTargetIdentified`, `v615Justified`, and `astra6MaxJustified`
-false.
-
 ## Categories no longer exported
 
 | Removed from transport | Why it is not needed for an auditable final conclusion |
@@ -56,6 +43,12 @@ false.
 ## Export behavior
 
 `PCV614EssentialReport()` builds the Essential Report after collection. The compatibility alias `PCV614Report()` now returns that same Essential Report. Chunking still occurs only after the final report string is complete and immutable. Concatenating the original-content payloads reconstructs the Essential Report exactly.
+
+`COPIAR REPORT ESSENCIAL COMPLETO` reconstructs that same frozen string from
+the already-verified payloads and sends it to the executor clipboard in one
+operation. The panel reports success or failure. Existing chunk navigation and
+copy controls remain available unchanged as the fallback when the executor or
+iOS clipboard rejects the complete text.
 
 The report prints:
 

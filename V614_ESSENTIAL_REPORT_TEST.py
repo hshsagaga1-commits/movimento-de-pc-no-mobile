@@ -32,7 +32,7 @@ if "getgenv().PCV614EssentialReport=function()" not in source:
     raise SystemExit("RED: PCV614EssentialReport entry point is missing")
 if "local fullReport=getgenv().PCV614EssentialReport()" not in source:
     raise SystemExit("RED: chunk export is not wired to the essential report")
-if 'local revision="V614-TemporalPoseTelemetryR1-EssentialReportR1"' not in loader_source:
+if 'local revision="V614-TemporalPoseTelemetryR1-EssentialReportR1-FullClipboardR1"' not in loader_source:
     raise SystemExit("RED: Loader essential-report cache revision is missing")
 
 

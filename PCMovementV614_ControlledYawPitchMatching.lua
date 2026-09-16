@@ -1544,6 +1544,7 @@ local function startProbe()
             return false,"hook-install-failed"
         end
     end
+    if type(SEGCFG.resetReportExport)=="function" then SEGCFG.resetReportExport() end
     resetCounters()
     stateAtStop=nil
     probeStartedAt=os.clock(); probeDuration=0; probeRunning=true
@@ -3101,6 +3102,124 @@ getgenv().PCV614Report=function(includeEvidence)
     return table.concat(lines,"\n")
 end
 
+-- BEGIN V614 REPORT TRANSPORT PURE HELPERS
+function SEGCFG.reportCharCount(value)
+    local count=utf8.len(value)
+    if count==nil then error("V614 report transport requires valid UTF-8",0) end
+    return count
+end
+
+function SEGCFG.splitReportPayloads(fullReport,maxPayloadChars)
+    if type(fullReport)~="string" then error("fullReport must be a string",0) end
+    if type(maxPayloadChars)~="number" or maxPayloadChars<1 then
+        error("maxPayloadChars must be positive",0)
+    end
+    local chunks={}
+    if #fullReport==0 then
+        chunks[1]=""
+        return chunks
+    end
+    local startByte=1
+    while startByte<=#fullReport do
+        local nextByte=utf8.offset(fullReport,maxPayloadChars+1,startByte)
+        local endByte=nextByte and (nextByte-1) or #fullReport
+        chunks[#chunks+1]=string.sub(fullReport,startByte,endByte)
+        startByte=endByte+1
+    end
+    if table.concat(chunks)~=fullReport then
+        error("V614 report transport reconstruction mismatch",0)
+    end
+    return chunks
+end
+
+function SEGCFG.makeReportChunkTransport(reportId,totalReportChars,chunks,index,maxTransportChars)
+    local payload=chunks[index]
+    if type(payload)~="string" then error("invalid report chunk index",0) end
+    local total=#chunks
+    local label=string.format("%02d/%02d",index,total)
+    local payloadChars=SEGCFG.reportCharCount(payload)
+    local prefix=table.concat({
+        "=== V614 REPORT CHUNK "..label.." ===",
+        "reportId = "..tostring(reportId),
+        "totalReportChars = "..tostring(totalReportChars),
+        "chunkChars = "..tostring(payloadChars),
+        "=== ORIGINAL REPORT CONTENT START ===",
+        "",
+    },"\n")
+    local suffix="\n=== ORIGINAL REPORT CONTENT END ===\n=== END CHUNK "..label.." ==="
+    local text=prefix..payload..suffix
+    local transportChars=SEGCFG.reportCharCount(text)
+    if transportChars>maxTransportChars then
+        error("V614 report transport chunk exceeds limit: "..tostring(transportChars),0)
+    end
+    return {
+        text=text,payloadChars=payloadChars,transportChars=transportChars,
+        payloadStartByte=#prefix+1,payloadEndByte=#prefix+#payload,
+    }
+end
+-- END V614 REPORT TRANSPORT PURE HELPERS
+
+SEGCFG.reportTransportMaxChars=30000
+SEGCFG.reportPayloadMaxChars=29500
+SEGCFG.reportExport=nil
+SEGCFG.exportCopyButton=nil
+SEGCFG.exportPreviousButton=nil
+SEGCFG.exportNextButton=nil
+SEGCFG.lastExportMessage="report ainda não congelado"
+
+function SEGCFG.resetReportExport()
+    SEGCFG.reportExport=nil
+    SEGCFG.lastExportMessage="report ainda não congelado"
+end
+
+function SEGCFG.ensureReportExport()
+    if SEGCFG.reportExport then return SEGCFG.reportExport end
+    stopProbe()
+    -- The complete report is built first, exactly by the existing generator.
+    -- Chunking starts only after this immutable string already exists.
+    local fullReport=getgenv().PCV614Report(true)
+    local reportId=HttpService:GenerateGUID(false)
+    local chunks=SEGCFG.splitReportPayloads(fullReport,SEGCFG.reportPayloadMaxChars)
+    if table.concat(chunks)~=fullReport then
+        error("V614 export refused: original report reconstruction mismatch",0)
+    end
+    SEGCFG.reportExport={
+        reportId=reportId,chunks=chunks,current=1,reconstructionVerified=true,
+        totalReportChars=SEGCFG.reportCharCount(fullReport),
+    }
+    SEGCFG.lastExportMessage="report congelado; copie todas as partes"
+    return SEGCFG.reportExport
+end
+
+function SEGCFG.currentReportTransport()
+    local export=SEGCFG.ensureReportExport()
+    if export.transportIndex~=export.current or type(export.currentTransport)~="table" then
+        export.currentTransport=SEGCFG.makeReportChunkTransport(export.reportId,export.totalReportChars,
+            export.chunks,export.current,SEGCFG.reportTransportMaxChars)
+        export.transportIndex=export.current
+    end
+    return export.currentTransport
+end
+
+function SEGCFG.updateReportExportButtons()
+    local export=SEGCFG.reportExport
+    local current=export and export.current or 1
+    local total=export and #export.chunks or 0
+    if SEGCFG.exportCopyButton then
+        SEGCFG.exportCopyButton.Text=export
+            and string.format("COPIAR PARTE %d/%d",current,total)
+            or "GERAR PARTES DO REPORT"
+    end
+    if SEGCFG.exportPreviousButton then
+        SEGCFG.exportPreviousButton.Text="PARTE ANTERIOR"
+        SEGCFG.exportPreviousButton.AutoButtonColor=export~=nil and current>1
+    end
+    if SEGCFG.exportNextButton then
+        SEGCFG.exportNextButton.Text="PRÓXIMA PARTE"
+        SEGCFG.exportNextButton.AutoButtonColor=export~=nil and current<total
+    end
+end
+
 local function copyToClipboard(text)
     local env=getgenv()
     for _,fn in ipairs({env.setclipboard,env.toclipboard,setclipboard,toclipboard}) do
@@ -3145,6 +3264,7 @@ local function refreshPhaseButtons()
         phaseA2Button.BackgroundColor3=currentWindow=="A2" and Color3.fromRGB(14,165,233) or Color3.fromRGB(30,64,175)
         phaseA2Button.Text="4 • A2 TOUCH"..(currentWindow=="A2" and " • ATUAL" or completedWindows.A2 and " • OK" or "")
     end
+    SEGCFG.updateReportExportButtons()
 end
 
 refreshLiveStatus=function()
@@ -3187,11 +3307,24 @@ refreshLiveStatus=function()
             instruction="COBERTURA RELAY BAIXA • GIRE MAIS"
         end
     end
+    local exportText="export=aguardando • toque GERAR PARTES depois de PARAR"
+    if SEGCFG.reportExport then
+        local okTransport,transport=pcall(SEGCFG.currentReportTransport)
+        if okTransport and type(transport)=="table" then
+            local export=SEGCFG.reportExport
+            exportText=string.format(
+                "parte=%d/%d payloadChars=%d transportChars=%d totalReportChars=%d\nreportId=%s\n%s",
+                export.current,#export.chunks,transport.payloadChars,transport.transportChars,
+                export.totalReportChars,export.reportId,SEGCFG.lastExportMessage)
+        else
+            exportText="exportError="..cleanText(transport,120)
+        end
+    end
     statusLabel.Text=string.format(
-        "phase=%s route=%s state=%s relay=%s\ncurrentSegmentYawDeg=%.2f/%.0f pitchNet/Abs=%.2f/%.2f\neligibleThisPhase=%d/%d • eligibleTouch=%d relay=%d\nmatchedPairsAvailable=%d targetPairs=%d\n%s\ncorrErr=%d telemetryErr=%d uiErr=%d",
+        "phase=%s route=%s state=%s relay=%s\ncurrentSegmentYawDeg=%.2f/%.0f pitchNet/Abs=%.2f/%.2f\neligibleThisPhase=%d/%d • eligibleTouch=%d relay=%d\nmatchedPairsAvailable=%d targetPairs=%d\n%s\ncorrErr=%d telemetryErr=%d uiErr=%d\n%s",
         currentWindow,currentPhase,stateText,relayText,segmentYaw,SEGCFG.targetYaw,segmentPitch,segmentAbsPitch,
         eligibleThis,SEGCFG.phaseEligibleTarget,touchEligible,relayEligible,#pairs,SEGCFG.minMatched,
-        instruction,frameCorrelationErrors,telemetryCaptureErrors,uiRefreshErrors)
+        instruction,frameCorrelationErrors,telemetryCaptureErrors,uiRefreshErrors,exportText)
     statusLabel.TextColor3=(phaseState=="active" or phaseState=="complete")
         and Color3.fromRGB(74,222,128) or Color3.fromRGB(250,204,21)
     refreshPhaseButtons()
@@ -3207,7 +3340,7 @@ local function createPanel()
     gui.Name=UI_NAME; gui.ResetOnSpawn=false; gui.DisplayOrder=999999; gui.Parent=parent; screenGui=gui
 
     local panel=Instance.new("Frame")
-    panel.Size=UDim2.fromOffset(336,548); panel.Position=UDim2.new(1,-348,0.5,-274)
+    panel.Size=UDim2.fromOffset(336,650); panel.Position=UDim2.new(1,-348,0.5,-325)
     panel.BackgroundColor3=Color3.fromRGB(9,14,27); panel.BackgroundTransparency=0.04
     panel.BorderSizePixel=0; panel.Active=true; panel.Draggable=true; panel.Parent=gui
     local corner=Instance.new("UICorner"); corner.CornerRadius=UDim.new(0,14); corner.Parent=panel
@@ -3232,7 +3365,7 @@ local function createPanel()
     local instructions=Instance.new("TextLabel")
     instructions.LayoutOrder=0; instructions.Size=UDim2.new(1,0,0,92)
     instructions.BackgroundColor3=Color3.fromRGB(18,28,48); instructions.BorderSizePixel=0
-    instructions.Text="INICIAR; depois siga 1→2→3→4 (ABBA).\nParado, sem joystick; espere ACTIVE.\nGire horizontalmente até FASE COMPLETA.\nSiga GIRE MAIS / CONTINUE / PITCH ALTO.\nNão conte segundos. PARAR → COPIAR antes de sair."
+    instructions.Text="INICIAR; depois siga 1→2→3→4 (ABBA).\nParado, sem joystick; espere ACTIVE.\nGire horizontalmente até FASE COMPLETA.\nSiga GIRE MAIS / CONTINUE / PITCH ALTO.\nPARAR → copie cada PARTE antes de sair."
     instructions.TextColor3=Color3.fromRGB(226,232,240); instructions.TextSize=11
     instructions.TextWrapped=true; instructions.TextXAlignment=Enum.TextXAlignment.Left
     instructions.Font=Enum.Font.Gotham; instructions.Parent=body
@@ -3245,9 +3378,11 @@ local function createPanel()
     phaseA2Button=makeButton(body,"4 • A2 TOUCH",Color3.fromRGB(30,64,175),5)
     local stop=makeButton(body,"PARAR",Color3.fromRGB(245,158,11),6)
     local emergency=makeButton(body,"EMERGÊNCIA • RELAY OFF / V500",Color3.fromRGB(190,24,93),7)
-    local copy=makeButton(body,"COPIAR REPORT COMPLETO",Color3.fromRGB(2,132,199),8)
+    SEGCFG.exportCopyButton=makeButton(body,"GERAR PARTES DO REPORT",Color3.fromRGB(2,132,199),8)
+    SEGCFG.exportPreviousButton=makeButton(body,"PARTE ANTERIOR",Color3.fromRGB(51,65,85),9)
+    SEGCFG.exportNextButton=makeButton(body,"PRÓXIMA PARTE",Color3.fromRGB(8,145,178),10)
     statusLabel=Instance.new("TextLabel")
-    statusLabel.LayoutOrder=9; statusLabel.Size=UDim2.new(1,0,0,124); statusLabel.BackgroundTransparency=1
+    statusLabel.LayoutOrder=11; statusLabel.Size=UDim2.new(1,0,0,158); statusLabel.BackgroundTransparency=1
     statusLabel.Text="Pronto. INICIAR e depois 1 • A1 TOUCH."; statusLabel.TextColor3=Color3.fromRGB(148,163,184)
     statusLabel.TextSize=10; statusLabel.TextWrapped=true; statusLabel.Font=Enum.Font.Gotham; statusLabel.Parent=body
 
@@ -3288,16 +3423,44 @@ local function createPanel()
         if type(baseSetRelay)=="function" then pcall(baseSetRelay,false) end
         refreshPhaseButtons(); setStatus("Emergência: relay OFF; V500 ativo.",Color3.fromRGB(251,113,133))
     end)
-    uiConnections[#uiConnections+1]=copy.Activated:Connect(function()
-        stopProbe()
-        local ok=copyToClipboard(getgenv().PCV614Report(true))
-        setStatus(ok and "REPORT COPIADO. Agora pode sair e colar." or "Clipboard indisponível no Delta.",
-            ok and Color3.fromRGB(74,222,128) or Color3.fromRGB(251,113,133))
+    uiConnections[#uiConnections+1]=SEGCFG.exportCopyButton.Activated:Connect(function()
+        local okTransport,transport=pcall(SEGCFG.currentReportTransport)
+        if not okTransport then
+            SEGCFG.lastExportMessage="ERRO AO GERAR: "..cleanText(transport,100)
+            refreshLiveStatus()
+            return
+        end
+        local ok=copyToClipboard(transport.text)
+        local export=SEGCFG.reportExport
+        SEGCFG.lastExportMessage=ok
+            and string.format("PARTE %d/%d COPIADA",export.current,#export.chunks)
+            or "Clipboard indisponível no Delta"
+        SEGCFG.updateReportExportButtons(); refreshLiveStatus()
+    end)
+    uiConnections[#uiConnections+1]=SEGCFG.exportPreviousButton.Activated:Connect(function()
+        local export=SEGCFG.reportExport
+        if export then
+            export.current=math.max(1,export.current-1)
+            SEGCFG.lastExportMessage="parte selecionada; toque COPIAR"
+        else
+            SEGCFG.lastExportMessage="gere o report no botão azul primeiro"
+        end
+        SEGCFG.updateReportExportButtons(); refreshLiveStatus()
+    end)
+    uiConnections[#uiConnections+1]=SEGCFG.exportNextButton.Activated:Connect(function()
+        local export=SEGCFG.reportExport
+        if export then
+            export.current=math.min(#export.chunks,export.current+1)
+            SEGCFG.lastExportMessage="parte selecionada; toque COPIAR"
+        else
+            SEGCFG.lastExportMessage="gere o report no botão azul primeiro"
+        end
+        SEGCFG.updateReportExportButtons(); refreshLiveStatus()
     end)
     local expanded=true
     uiConnections[#uiConnections+1]=collapse.Activated:Connect(function()
         expanded=not expanded; body.Visible=expanded
-        panel.Size=expanded and UDim2.fromOffset(336,548) or UDim2.fromOffset(336,45)
+        panel.Size=expanded and UDim2.fromOffset(336,650) or UDim2.fromOffset(336,45)
         collapse.Text=expanded and "–" or "+"
     end)
     refreshPhaseButtons()
@@ -3337,6 +3500,8 @@ getgenv().__PCMobileAimCleanup=function()
     uiConnections={}
     if screenGui then pcall(function() screenGui:Destroy() end) end
     screenGui=nil
+    SEGCFG.exportCopyButton=nil; SEGCFG.exportPreviousButton=nil; SEGCFG.exportNextButton=nil
+    SEGCFG.resetReportExport()
     restoreHooks()
     getgenv().PCV614Start=nil
     getgenv().PCV614PhaseA1=nil

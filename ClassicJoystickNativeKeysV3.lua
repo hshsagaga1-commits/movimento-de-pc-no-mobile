@@ -47,7 +47,6 @@ end
 local function applyKeys(desired)
     desired = desired or {}
 
-    -- Release only keys that left the chord.
     for _, name in ipairs({"W", "A", "S", "D"}) do
         if pressed[name] and not desired[name] then
             sendKey(name, false)
@@ -55,7 +54,6 @@ local function applyKeys(desired)
         end
     end
 
-    -- Press only newly-entered keys. Existing keys remain physically held.
     for _, name in ipairs({"W", "A", "S", "D"}) do
         if desired[name] and not pressed[name] then
             if sendKey(name, true) then
@@ -197,8 +195,8 @@ local function updateMovement(screenPosition)
         return
     end
 
-    -- Match the known-working PC-controller script: X and Y are independent.
-    -- This is intentionally NOT an 8-sector angle quantizer.
+    -- Match the known-working PC-controller script: horizontal and vertical
+    -- thresholds are independent, not an angle-sector quantizer.
     applyKeys({
         W = ny < -AXIS_THRESHOLD,
         S = ny > AXIS_THRESHOLD,
@@ -239,8 +237,6 @@ connections[#connections + 1] = jump.InputBegan:Connect(function(input)
     if not enabled or jumpTouch ~= nil then return end
     if input.UserInputType ~= Enum.UserInputType.Touch then return end
     jumpTouch = input
-    sendKey("W", false) -- no-op only if W was not tracked below; immediately restore tracked state
-    if pressed.W then sendKey("W", true) end
     pcall(function()
         VirtualInputManager:SendKeyEvent(true, Enum.KeyCode.Space, false, game)
     end)
@@ -253,9 +249,9 @@ connections[#connections + 1] = jump.InputEnded:Connect(function(input)
     end)
 end)
 
--- This is the key architectural difference from V2: do not keep Roblox's
--- native TouchGui/controller alive while simultaneously trying to drive the
--- keyboard controller. The known-working reference disables TouchGui every step.
+-- Key architectural difference from V2: mirror the known-working reference and
+-- keep Roblox's native TouchGui disabled instead of keeping the touch movement
+-- controller alive while keyboard events are being held.
 connections[#connections + 1] = RunService.Stepped:Connect(function()
     local touchGui = playerGui:FindFirstChild("TouchGui")
     if touchGui and touchGui:IsA("ScreenGui") then

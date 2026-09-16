@@ -2450,7 +2450,7 @@ getgenv().PCV614Diagnostics=function()
         relay=relayEnabled(),rotate=readRotate(getActiveController()),preferred=UserInputService.PreferredInput,
     }
     local result={
-        version="V614-ControlledYawPitchMatching-TemporalPoseTelemetryR1",
+        version="V614-ControlledYawPitchMatching-TemporalPoseTelemetryR1-EssentialReportR1",
         bridgeMode=getgenv().PCInputBridgeMode,
         probePurpose="controlled-yaw-pitch-segment-matching-plus-read-only-temporal-pose-telemetry",
         probeRunning=probeRunning,
@@ -2946,9 +2946,25 @@ function SEGCFG.pairReportLine(pair,index)
         pair.yawGap,pair.netPitchGap,pair.absPitchGap)
 end
 
-getgenv().PCV614Report=function(includeEvidence)
+function SEGCFG.legacyCountOnlyLines()
+    local sink={_lineCount=0,_chars=0}
+    return setmetatable(sink,{
+        __len=function(value) return rawget(value,"_lineCount") end,
+        __newindex=function(value,key,line)
+            if type(key)~="number" then rawset(value,key,line); return end
+            local count=rawget(value,"_lineCount") or 0
+            local chars=utf8.len(tostring(line))
+            if chars==nil then error("legacy report line is not valid UTF-8",0) end
+            rawset(value,"_lineCount",math.max(count,key))
+            rawset(value,"_chars",(rawget(value,"_chars") or 0)+chars+(count>0 and 1 or 0))
+        end,
+    })
+end
+
+function SEGCFG.buildLegacyReport(includeEvidence,countOnly)
     local diagnostics=getgenv().PCV614Diagnostics()
-    local lines={"=== PC MOVEMENT V614 REPORT ==="}
+    local lines=countOnly and SEGCFG.legacyCountOnlyLines() or {}
+    lines[#lines+1]="=== PC MOVEMENT V614 REPORT ==="
     for _,key in ipairs(REPORT_KEYS) do lines[#lines+1]=key.." = "..tostring(diagnostics[key]) end
     for _,phase in ipairs({"touch","relay"}) do
         for _,field in ipairs(PHASE_FIELDS) do
@@ -3099,6 +3115,7 @@ getgenv().PCV614Report=function(includeEvidence)
     lines[#lines+1]="implementationTargetIdentified = "..tostring(diagnostics.implementationTargetIdentified)
     lines[#lines+1]="v615Justified = "..tostring(diagnostics.telemetryV615Justified)
     lines[#lines+1]="astra6MaxJustified = "..tostring(diagnostics.telemetryAstra6MaxJustified)
+    if countOnly then return lines._chars end
     return table.concat(lines,"\n")
 end
 
@@ -3159,6 +3176,1059 @@ function SEGCFG.makeReportChunkTransport(reportId,totalReportChars,chunks,index,
 end
 -- END V614 REPORT TRANSPORT PURE HELPERS
 
+do
+-- BEGIN V614 ESSENTIAL REPORT PURE HELPERS
+function SEGCFG.roundEssential(value)
+    if type(value)~="number" then return value end
+    local scaled=value*10000000
+    if scaled>=0 then return math.floor(scaled+0.5)/10000000 end
+    return math.ceil(scaled-0.5)/10000000
+end
+
+function SEGCFG.deepCopyEssential(value,seen)
+    if type(value)~="table" then return value end
+    seen=seen or {}
+    if seen[value] then return seen[value] end
+    local copy={}; seen[value]=copy
+    for key,item in pairs(value) do copy[SEGCFG.deepCopyEssential(key,seen)]=SEGCFG.deepCopyEssential(item,seen) end
+    return copy
+end
+
+function SEGCFG.essentialSafeValue(value,seen)
+    local valueType=type(value)
+    if value==nil or valueType=="string" or valueType=="number" or valueType=="boolean" then return value end
+    if valueType=="table" then
+        seen=seen or {}
+        if seen[value] then return "cycle" end
+        seen[value]=true
+        local output={}
+        for key,item in pairs(value) do
+            local safeKey=(type(key)=="string" or type(key)=="number") and key or tostring(key)
+            output[safeKey]=SEGCFG.essentialSafeValue(item,seen)
+        end
+        seen[value]=nil
+        return output
+    end
+    local robloxType=type(typeof)=="function" and typeof(value) or valueType
+    if robloxType=="Vector2" then return {SEGCFG.roundEssential(value.X),SEGCFG.roundEssential(value.Y)} end
+    if robloxType=="Vector3" then
+        return {SEGCFG.roundEssential(value.X),SEGCFG.roundEssential(value.Y),SEGCFG.roundEssential(value.Z)}
+    end
+    if robloxType=="CFrame" and type(value.GetComponents)=="function" then
+        return SEGCFG.essentialArray({value:GetComponents()})
+    end
+    return tostring(value)
+end
+
+function SEGCFG.essentialArray(value)
+    if type(value)=="table" then
+        local output={}
+        for index,item in ipairs(value) do output[index]=item end
+        return output
+    end
+    local valueType=type(typeof)=="function" and typeof(value) or type(value)
+    if valueType=="Vector2" then return {value.X,value.Y} end
+    if valueType=="Vector3" then
+        return {value.X,value.Y,value.Z}
+    end
+    return nil
+end
+
+function SEGCFG.arrayKey(values)
+    local output={}
+    for index,value in ipairs(values or {}) do output[index]=tostring(SEGCFG.roundEssential(value)) end
+    return table.concat(output,",")
+end
+
+function SEGCFG.internConstant(dictionary,index,key,value)
+    local existing=index[key]
+    if existing then return existing end
+    local id=#dictionary+1
+    dictionary[id]=value; index[key]=id
+    return id
+end
+
+function SEGCFG.essentialMetric(metric)
+    if type(metric)~="table" then return nil end
+    return {
+        start=SEGCFG.essentialArray(metric.start),finish=SEGCFG.essentialArray(metric.finish),
+        dx=metric.dx,dy=metric.dy,x=metric.x,y=metric.y,displacement=metric.displacement,
+    }
+end
+
+function SEGCFG.essentialJoint(snapshotJoint,model,indexes)
+    if type(snapshotJoint)~="table" then return nil end
+    local definition={
+        name=tostring(snapshotJoint.name or ""),part0=tostring(snapshotJoint.part0 or ""),
+        part1=tostring(snapshotJoint.part1 or ""),c0=SEGCFG.essentialArray(snapshotJoint.c0),
+        c1=SEGCFG.essentialArray(snapshotJoint.c1),
+    }
+    local key=definition.name.."|"..definition.part0.."|"..definition.part1.."|"
+        ..SEGCFG.arrayKey(definition.c0).."|"..SEGCFG.arrayKey(definition.c1)
+    local id=SEGCFG.internConstant(model.constants.joints,indexes.joints,key,definition)
+    return {definition=id,transform=SEGCFG.essentialArray(snapshotJoint.transform)}
+end
+
+function SEGCFG.essentialAnimation(animation,model,indexes)
+    local output={humanoidState=type(animation)=="table" and tostring(animation.humanoidState or "") or "",tracks={}}
+    for _,track in ipairs(type(animation)=="table" and animation.tracks or {}) do
+        local metadata={
+            animationId=tostring(track.animationId or ""),name=tostring(track.name or ""),
+            looped=track.looped==true,priority=tostring(track.priority or ""),
+            length=track.length,
+        }
+        local key=metadata.animationId.."|"..metadata.name.."|"..metadata.priority.."|"
+            ..tostring(metadata.looped).."|"..tostring(metadata.length)
+        local id=SEGCFG.internConstant(model.constants.animations,indexes.animations,key,metadata)
+        output.tracks[#output.tracks+1]={
+            metadata=id,timePosition=track.timePosition,weightCurrent=track.weightCurrent,
+            weightTarget=track.weightTarget,speed=track.speed,isPlaying=track.isPlaying==true,
+        }
+    end
+    return output
+end
+
+function SEGCFG.essentialSnapshot(snapshot,model,indexes)
+    if type(snapshot)~="table" then return nil end
+    local cameraConfig={fieldOfView=snapshot.fieldOfView,viewport=SEGCFG.essentialArray(snapshot.viewport)}
+    local configKey=tostring(cameraConfig.fieldOfView).."|"..SEGCFG.arrayKey(cameraConfig.viewport)
+    local cameraConfigId=SEGCFG.internConstant(model.constants.camera,indexes.camera,configKey,cameraConfig)
+    local joints={}
+    for _,name in ipairs({"Neck","Waist","RootJoint"}) do
+        local projected=SEGCFG.essentialJoint(snapshot.joints and snapshot.joints[name],model,indexes)
+        if projected then joints[name]=projected end
+    end
+    return {
+        boundary=tostring(snapshot.boundary or ""),clock=snapshot.clock,
+        cameraReadClock=snapshot.cameraReadClock,poseReadClock=snapshot.poseReadClock,
+        captureEndClock=snapshot.captureEndClock,captureDurationMs=snapshot.captureDurationMs,
+        cameraConfig=cameraConfigId,cameraCFrame=SEGCFG.essentialArray(snapshot.cameraCFrame),
+        primaryCFrame=SEGCFG.essentialArray(snapshot.primaryCFrame),
+        headCFrame=SEGCFG.essentialArray(snapshot.headCFrame),
+        primaryToHead=SEGCFG.essentialArray(snapshot.primaryToHead),
+        joints=joints,animation=SEGCFG.essentialAnimation(snapshot.animation,model,indexes),
+    }
+end
+
+function SEGCFG.essentialBoundarySet(sample,model,indexes)
+    local telemetry=type(sample)=="table" and sample.temporalPoseTelemetry or nil
+    local calls=type(telemetry)=="table" and telemetry.controllerCalls or nil
+    local firstCall=type(calls)=="table" and calls[1] or nil
+    local lastCall=type(calls)=="table" and calls[#calls] or nil
+    return {
+        cameraModuleBefore=SEGCFG.essentialSnapshot(telemetry and telemetry.cameraModuleBefore,model,indexes),
+        controllerBefore=SEGCFG.essentialSnapshot(firstCall and firstCall.before,model,indexes),
+        controllerAfter=SEGCFG.essentialSnapshot(lastCall and lastCall.after,model,indexes),
+        cameraModuleAfter=SEGCFG.essentialSnapshot(telemetry and telemetry.cameraModuleAfter,model,indexes),
+        controllerCalls=type(calls)=="table" and #calls or 0,
+    }
+end
+
+function SEGCFG.essentialCoordinate(value,index)
+    if type(value)=="table" then return value[index] end
+    local valueType=type(typeof)=="function" and typeof(value) or type(value)
+    if valueType=="Vector2" or valueType=="Vector3" then
+        if index==1 then return value.X end
+        if index==2 then return value.Y end
+        if index==3 and valueType=="Vector3" then return value.Z end
+    end
+    return nil
+end
+
+function SEGCFG.essentialSeriesSample(sample,model,indexes)
+    local boundaries=SEGCFG.essentialBoundarySet(sample,model,indexes)
+    local before=boundaries.cameraModuleBefore or boundaries.controllerBefore
+    local after=boundaries.cameraModuleAfter or boundaries.controllerAfter
+    local jointTransform={before={},after={}}
+    for _,name in ipairs({"Neck","Waist","RootJoint"}) do
+        if before and before.joints and before.joints[name] then
+            jointTransform.before[name]=before.joints[name].transform
+        end
+        if after and after.joints and after.joints[name] then
+            jointTransform.after[name]=after.joints[name].transform
+        end
+    end
+    return {
+        frame=sample.frame,time=sample.time,dt=sample.dt,yawSigned=sample.yawSigned,pitchSigned=sample.pitchSigned,
+        headBeforeX=SEGCFG.essentialCoordinate(sample.headScreenBefore,1),headAfterX=SEGCFG.essentialCoordinate(sample.headScreenAfter,1),
+        headBeforeY=SEGCFG.essentialCoordinate(sample.headScreenBefore,2),headAfterY=SEGCFG.essentialCoordinate(sample.headScreenAfter,2),
+        headBeforeDepth=SEGCFG.essentialCoordinate(sample.headScreenBefore,3),headAfterDepth=SEGCFG.essentialCoordinate(sample.headScreenAfter,3),
+        primaryBeforeX=SEGCFG.essentialCoordinate(sample.primaryScreenBefore,1),primaryAfterX=SEGCFG.essentialCoordinate(sample.primaryScreenAfter,1),
+        subjectBeforeX=SEGCFG.essentialCoordinate(sample.subjectScreenBefore,1),subjectAfterX=SEGCFG.essentialCoordinate(sample.subjectScreenAfter,1),
+        cameraConfigBefore=before and before.cameraConfig or nil,cameraConfigAfter=after and after.cameraConfig or nil,
+        cameraBefore=before and before.cameraCFrame or nil,cameraAfter=after and after.cameraCFrame or nil,
+        primaryBefore=before and before.primaryCFrame or nil,primaryAfter=after and after.primaryCFrame or nil,
+        localHeadBefore=before and before.primaryToHead or nil,localHeadAfter=after and after.primaryToHead or nil,
+        jointTransform=jointTransform,
+        animationBefore=before and before.animation or nil,animationAfter=after and after.animation or nil,
+    }
+end
+
+function SEGCFG.essentialStepDistance(a,b)
+    if type(a)~="table" or type(b)~="table" then return nil end
+    local x=(b[1] or 0)-(a[1] or 0); local y=(b[2] or 0)-(a[2] or 0); local z=(b[3] or 0)-(a[3] or 0)
+    return math.sqrt(x*x+y*y+z*z)
+end
+
+function SEGCFG.essentialRotationDegreesRaw(a,b)
+    if type(a)~="table" or #a<12 or type(b)~="table" or #b<12 then return nil end
+    local dot=0
+    for index=4,12 do dot+=a[index]*b[index] end
+    local cosine=math.max(-1,math.min(1,(dot-1)*0.5))
+    return math.deg(math.acos(cosine))
+end
+
+function SEGCFG.essentialCFrameStep(before,after,previousAfter)
+    return {
+        withinTranslation=SEGCFG.essentialStepDistance(before,after),
+        withinRotationDeg=SEGCFG.essentialRotationDegreesRaw(before,after),
+        boundaryTranslation=SEGCFG.essentialStepDistance(previousAfter,before),
+        boundaryRotationDeg=SEGCFG.essentialRotationDegreesRaw(previousAfter,before),
+    }
+end
+
+function SEGCFG.essentialCompactSeries(full,previous)
+    local output={
+        frame=full.frame,time=full.time,dt=full.dt,yawSigned=full.yawSigned,pitchSigned=full.pitchSigned,
+        headBeforeX=full.headBeforeX,headAfterX=full.headAfterX,
+        headBeforeY=full.headBeforeY,headAfterY=full.headAfterY,
+        headBeforeDepth=full.headBeforeDepth,headAfterDepth=full.headAfterDepth,
+        primaryBeforeX=full.primaryBeforeX,primaryAfterX=full.primaryAfterX,
+        subjectBeforeX=full.subjectBeforeX,subjectAfterX=full.subjectAfterX,
+        cameraConfigBefore=full.cameraConfigBefore,cameraConfigAfter=full.cameraConfigAfter,
+        cameraStep=SEGCFG.essentialCFrameStep(full.cameraBefore,full.cameraAfter,previous and previous.cameraAfter),
+        rootStep=SEGCFG.essentialCFrameStep(full.primaryBefore,full.primaryAfter,previous and previous.primaryAfter),
+        localHeadStep=SEGCFG.essentialCFrameStep(full.localHeadBefore,full.localHeadAfter,previous and previous.localHeadAfter),
+        jointTransform={},animationBefore=full.animationBefore,animationAfter=full.animationAfter,
+    }
+    for _,name in ipairs({"Neck","Waist","RootJoint"}) do
+        local before=full.jointTransform and full.jointTransform.before[name]
+        local after=full.jointTransform and full.jointTransform.after[name]
+        local previousAfter=previous and previous.jointTransform and previous.jointTransform.after[name]
+        if before or after then output.jointTransform[name]=SEGCFG.essentialCFrameStep(before,after,previousAfter) end
+    end
+    return output
+end
+
+function SEGCFG.essentialSegment(segment,model,indexes)
+    local samples=segment.samples or {}
+    local series={}
+    local previousFull=nil
+    for _,sample in ipairs(samples) do
+        local full=SEGCFG.essentialSeriesSample(sample,model,indexes)
+        series[#series+1]=SEGCFG.essentialCompactSeries(full,previousFull)
+        previousFull=full
+    end
+    return {
+        id=tostring(segment.id),route=tostring(segment.route),window=tostring(segment.window),
+        startFrame=segment.startFrame,endFrame=segment.endFrame,
+        startTime=segment.startTime,endTime=segment.endTime,duration=segment.duration,frameCount=segment.frameCount,
+        totalSignedYaw=segment.totalSignedYaw,totalAbsYaw=segment.totalAbsYaw,
+        netPitch=segment.netPitch,totalAbsPitch=segment.totalAbsPitch,
+        yawTrajectory=SEGCFG.essentialArray(segment.yawTrajectory),pitchTrajectory=SEGCFG.essentialArray(segment.pitchTrajectory),
+        screen={primary=SEGCFG.essentialMetric(segment.primary),head=SEGCFG.essentialMetric(segment.head),
+            subject=SEGCFG.essentialMetric(segment.subject),returnedPrimary=SEGCFG.essentialMetric(segment.returnedPrimary),
+            returnedHead=SEGCFG.essentialMetric(segment.returnedHead),returnedSubject=SEGCFG.essentialMetric(segment.returnedSubject)},
+        geometry={subjectToPrimaryStart=SEGCFG.essentialArray(segment.subjectToPrimaryStart),
+            subjectToPrimaryEnd=SEGCFG.essentialArray(segment.subjectToPrimaryEnd),
+            subjectToHeadStart=SEGCFG.essentialArray(segment.subjectToHeadStart),
+            subjectToHeadEnd=SEGCFG.essentialArray(segment.subjectToHeadEnd),
+            primaryToHeadStart=SEGCFG.essentialArray(segment.primaryToHeadStart),
+            primaryToHeadEnd=SEGCFG.essentialArray(segment.primaryToHeadEnd)},
+        cameraYawStart=segment.cameraYawStart,cameraYawEnd=segment.cameraYawEnd,
+        cameraPitchStart=segment.cameraPitchStart,cameraPitchEnd=segment.cameraPitchEnd,
+        boundaries={start=series[1] and SEGCFG.essentialBoundarySet(samples[1],model,indexes) or nil,
+            finish=series[#series] and SEGCFG.essentialBoundarySet(samples[#samples],model,indexes) or nil},
+        series=series,
+    }
+end
+
+function SEGCFG.buildEssentialModel(pairs,diagnostics)
+    local model={
+        schema="V614-EssentialReportR1",run=SEGCFG.essentialSafeValue(diagnostics or {}),
+        constants={camera={},joints={},animations={}},pairs={},analysis={},
+        omissions={
+            unmatchedAcceptedFrames="not consumed by matched-pair analysis, controls, bootstrap, or decisions",
+            rejectedSegments="only rejection counters and reasons participate; pose samples do not",
+            unmatchedEligibleSegments="matching counts and ranges are retained; telemetry is not selected",
+            repeatedJointConstants="deduplicated in constants.joints and referenced by ID",
+            repeatedAnimationMetadata="deduplicated in constants.animations and referenced by ID",
+            repeatedCameraConfig="deduplicated in constants.camera and referenced by ID",
+            guiStateMessages="not consumed by any scientific metric or decision",
+            redundantDebugEvidence="final counters and integrity summaries are retained",
+        },parity={},
+    }
+    local indexes={camera={},joints={},animations={}}
+    for index,pair in ipairs(pairs or {}) do
+        model.pairs[index]={
+            index=index,yawGap=pair.yawGap,netPitchGap=pair.netPitchGap,absPitchGap=pair.absPitchGap,
+            touch=SEGCFG.essentialSegment(pair.touch,model,indexes),
+            relay=SEGCFG.essentialSegment(pair.relay,model,indexes),
+        }
+    end
+    return model
+end
+
+function SEGCFG.essentialDistanceRaw(a,b)
+    if type(a)~="table" or type(b)~="table" then return nil end
+    local x=(b[1] or 0)-(a[1] or 0); local y=(b[2] or 0)-(a[2] or 0); local z=(b[3] or 0)-(a[3] or 0)
+    return math.sqrt(x*x+y*y+z*z)
+end
+
+function SEGCFG.essentialDistance(a,b)
+    local value=SEGCFG.essentialDistanceRaw(a,b)
+    return type(value)=="number" and SEGCFG.roundEssential(value) or nil
+end
+
+function SEGCFG.essentialTrackTime(animation)
+    local track=type(animation)=="table" and type(animation.tracks)=="table" and animation.tracks[1] or nil
+    return track and track.timePosition or nil
+end
+
+function SEGCFG.essentialAnimationTrackMap(animation,model)
+    local output={}
+    for _,track in ipairs(type(animation)=="table" and animation.tracks or {}) do
+        local metadata=track
+        if type(track.metadata)=="number" and model and model.constants and model.constants.animations then
+            metadata=model.constants.animations[track.metadata] or track
+        end
+        local key=tostring(metadata.animationId or "").."|"..tostring(metadata.name or "").."|"
+            ..tostring(metadata.priority or "").."|"..tostring(metadata.looped==true).."|"
+            ..tostring(SEGCFG.roundEssential(metadata.length))
+        output[key]={
+            key=key,timePosition=track.timePosition,weightCurrent=track.weightCurrent,
+            weightTarget=track.weightTarget,speed=track.speed,isPlaying=track.isPlaying,
+            looped=metadata.looped==true,length=metadata.length,
+        }
+    end
+    return output
+end
+
+function SEGCFG.essentialProjectPoint(cameraCFrame,pointCFrame,cameraConfig)
+    if type(cameraCFrame)~="table" or #cameraCFrame<12 or type(pointCFrame)~="table" or #pointCFrame<3
+        or type(cameraConfig)~="table" or type(cameraConfig.viewport)~="table" then return nil end
+    local dx=(pointCFrame[1] or 0)-(cameraCFrame[1] or 0)
+    local dy=(pointCFrame[2] or 0)-(cameraCFrame[2] or 0)
+    local dz=(pointCFrame[3] or 0)-(cameraCFrame[3] or 0)
+    local localX=(cameraCFrame[4] or 0)*dx+(cameraCFrame[7] or 0)*dy+(cameraCFrame[10] or 0)*dz
+    local localY=(cameraCFrame[5] or 0)*dx+(cameraCFrame[8] or 0)*dy+(cameraCFrame[11] or 0)*dz
+    local localZ=(cameraCFrame[6] or 0)*dx+(cameraCFrame[9] or 0)*dy+(cameraCFrame[12] or 0)*dz
+    local depth=-localZ
+    local viewportX,viewportY=cameraConfig.viewport[1],cameraConfig.viewport[2]
+    local fov=cameraConfig.fieldOfView
+    if type(viewportX)~="number" or type(viewportY)~="number" or type(fov)~="number" or depth<=0 then return nil end
+    local scale=viewportY/(2*math.tan(math.rad(fov)*0.5))
+    return {x=SEGCFG.roundEssential(viewportX*0.5+localX*scale/depth),
+        y=SEGCFG.roundEssential(viewportY*0.5-localY*scale/depth),depth=SEGCFG.roundEssential(depth)}
+end
+
+function SEGCFG.essentialProjectX(cameraCFrame,pointCFrame,cameraConfig)
+    local point=SEGCFG.essentialProjectPoint(cameraCFrame,pointCFrame,cameraConfig)
+    return point and point.x or nil
+end
+
+function SEGCFG.essentialRotationDegrees(a,b)
+    if type(a)~="table" or #a<12 or type(b)~="table" or #b<12 then return nil end
+    local dot=0
+    for index=4,12 do dot+=a[index]*b[index] end
+    local cosine=math.max(-1,math.min(1,(dot-1)*0.5))
+    return SEGCFG.roundEssential(math.deg(math.acos(cosine)))
+end
+
+function SEGCFG.essentialCFramePath(series,beforeField,afterField)
+    local path=0
+    local previousAfter=nil
+    local found=false
+    for _,item in ipairs(series or {}) do
+        local before,after=item[beforeField],item[afterField]
+        if type(previousAfter)=="table" and type(before)=="table" then
+            local step=SEGCFG.essentialDistanceRaw(previousAfter,before)
+            if type(step)=="number" then path+=step; found=true end
+        end
+        if type(before)=="table" and type(after)=="table" then
+            local step=SEGCFG.essentialDistanceRaw(before,after)
+            if type(step)=="number" then path+=step; found=true end
+        end
+        previousAfter=after
+    end
+    return found and SEGCFG.roundEssential(path) or nil
+end
+
+function SEGCFG.essentialJointPath(series,name)
+    local path=0
+    local previousAfter=nil
+    local found=false
+    for _,item in ipairs(series or {}) do
+        local transforms=item.jointTransform or {}
+        local before=transforms.before and transforms.before[name]
+        local after=transforms.after and transforms.after[name]
+        if type(previousAfter)=="table" and type(before)=="table" then
+            local step=SEGCFG.essentialDistanceRaw(previousAfter,before)
+            if type(step)=="number" then path+=step; found=true end
+        end
+        if type(before)=="table" and type(after)=="table" then
+            local step=SEGCFG.essentialDistanceRaw(before,after)
+            if type(step)=="number" then path+=step; found=true end
+        end
+        previousAfter=after
+    end
+    return found and SEGCFG.roundEssential(path) or nil
+end
+
+function SEGCFG.essentialStoredStepPath(series,field,name)
+    local total,found=0,false
+    for _,item in ipairs(series or {}) do
+        local step=item[field]
+        if name and type(step)=="table" then step=step[name] end
+        if type(step)=="table" then
+            if type(step.withinTranslation)=="number" then total+=step.withinTranslation; found=true end
+            if type(step.boundaryTranslation)=="number" then total+=step.boundaryTranslation; found=true end
+        end
+    end
+    return found and SEGCFG.roundEssential(total) or nil
+end
+
+function SEGCFG.essentialScreenDecomposition(series,beforeField,afterField,yaw)
+    local within,boundary=0,0
+    local valid=type(yaw)=="number" and yaw>0 and #(series or {})>0
+    for index,item in ipairs(series or {}) do
+        local before,after=item[beforeField],item[afterField]
+        if type(before)~="number" or type(after)~="number" then valid=false
+        else within+=after-before end
+        if index>1 then
+            local previousAfter=series[index-1][afterField]
+            if type(before)~="number" or type(previousAfter)~="number" then valid=false
+            else boundary+=before-previousAfter end
+        end
+    end
+    if not valid then return {valid=false} end
+    local first,last=series[1],series[#series]
+    local endpoint=last[afterField]-first[beforeField]
+    local residual=endpoint-within-boundary
+    local opposed=(within<0 and boundary>0) or (within>0 and boundary<0)
+    return {
+        valid=true,within=SEGCFG.roundEssential(within),boundary=SEGCFG.roundEssential(boundary),
+        endpoint=SEGCFG.roundEssential(endpoint),residual=SEGCFG.roundEssential(residual),
+        withinPerYaw=SEGCFG.roundEssential(within/yaw),boundaryPerYaw=SEGCFG.roundEssential(boundary/yaw),
+        endpointAbsPerYaw=SEGCFG.roundEssential(math.abs(endpoint)/yaw),
+        cancellationPerYaw=SEGCFG.roundEssential((opposed and math.min(math.abs(within),math.abs(boundary)) or 0)/yaw),
+        signsOpposed=opposed,
+    }
+end
+
+function SEGCFG.analyzeEssentialSegment(segment,model)
+    local series=segment.series or {}
+    local yaw=segment.totalAbsYaw or 0
+    local headDecomposition=SEGCFG.essentialScreenDecomposition(series,"headBeforeX","headAfterX",yaw)
+    local primaryDecomposition=SEGCFG.essentialScreenDecomposition(series,"primaryBeforeX","primaryAfterX",yaw)
+    local subjectDecomposition=SEGCFG.essentialScreenDecomposition(series,"subjectBeforeX","subjectAfterX",yaw)
+    local first,last=series[1],series[#series]
+    local startBoundary=segment.boundaries and segment.boundaries.start
+    local finishBoundary=segment.boundaries and segment.boundaries.finish
+    local startSnapshot=startBoundary and (startBoundary.cameraModuleBefore or startBoundary.controllerBefore)
+    local finishSnapshot=finishBoundary and (finishBoundary.cameraModuleAfter or finishBoundary.controllerAfter)
+    local jointResult={}
+    for _,name in ipairs({"Neck","Waist","RootJoint"}) do
+        local before=startSnapshot and startSnapshot.joints and startSnapshot.joints[name]
+        local after=finishSnapshot and finishSnapshot.joints and finishSnapshot.joints[name]
+        before=before and before.transform or nil
+        after=after and after.transform or nil
+        if before or after then jointResult[name]={translation=SEGCFG.essentialDistance(before,after),
+            pathTranslation=SEGCFG.essentialStoredStepPath(series,"jointTransform",name)
+                or SEGCFG.essentialJointPath(series,name),rotationDeg=SEGCFG.essentialRotationDegrees(before,after)} end
+    end
+    local firstAnimation=first and first.animationBefore
+    local lastAnimation=last and last.animationAfter
+    local firstTracks=SEGCFG.essentialAnimationTrackMap(firstAnimation,model)
+    local lastTracks=SEGCFG.essentialAnimationTrackMap(lastAnimation,model)
+    local trackKeys={}
+    for key in pairs(firstTracks) do trackKeys[#trackKeys+1]=key end
+    for key in pairs(lastTracks) do if not firstTracks[key] then trackKeys[#trackKeys+1]=key end end
+    table.sort(trackKeys)
+    local animationResult={}
+    for _,key in ipairs(trackKeys) do
+        local firstTrack,lastTrack=firstTracks[key],lastTracks[key]
+        local firstTime=firstTrack and firstTrack.timePosition
+        local lastTime=lastTrack and lastTrack.timePosition
+        local advance=nil
+        if type(firstTime)=="number" and type(lastTime)=="number" then
+            advance=lastTime-firstTime
+            if advance<0 and (firstTrack.looped or lastTrack.looped) then
+                local length=tonumber(firstTrack.length or lastTrack.length)
+                if length and length>0 then advance+=length end
+            end
+        end
+        animationResult[#animationResult+1]={key=key,presentStart=firstTrack~=nil,presentEnd=lastTrack~=nil,
+            timeStart=firstTime,timeEnd=lastTime,
+            timeAdvance=type(advance)=="number" and SEGCFG.roundEssential(advance) or nil,
+            weightStart=firstTrack and firstTrack.weightCurrent or nil,
+            weightEnd=lastTrack and lastTrack.weightCurrent or nil,
+            weightChange=firstTrack and lastTrack and type(firstTrack.weightCurrent)=="number"
+                and type(lastTrack.weightCurrent)=="number"
+                and SEGCFG.roundEssential(lastTrack.weightCurrent-firstTrack.weightCurrent) or nil,
+            speedStart=firstTrack and firstTrack.speed or nil,speedEnd=lastTrack and lastTrack.speed or nil,
+            playingStart=firstTrack and firstTrack.isPlaying or false,
+            playingEnd=lastTrack and lastTrack.isPlaying or false}
+    end
+    local firstTime=animationResult[1] and animationResult[1].timeStart or nil
+    local cameraConfig=startSnapshot and model and model.constants and model.constants.camera[startSnapshot.cameraConfig] or nil
+    local startX=startSnapshot and SEGCFG.essentialProjectX(startSnapshot.cameraCFrame,startSnapshot.headCFrame,cameraConfig) or nil
+    local cameraOnlyX=startSnapshot and finishSnapshot
+        and SEGCFG.essentialProjectX(finishSnapshot.cameraCFrame,startSnapshot.headCFrame,cameraConfig) or nil
+    local poseOnlyX=startSnapshot and finishSnapshot
+        and SEGCFG.essentialProjectX(startSnapshot.cameraCFrame,finishSnapshot.headCFrame,cameraConfig) or nil
+    local combinedX=startSnapshot and finishSnapshot
+        and SEGCFG.essentialProjectX(finishSnapshot.cameraCFrame,finishSnapshot.headCFrame,cameraConfig) or nil
+    local startPoint=startSnapshot and SEGCFG.essentialProjectPoint(startSnapshot.cameraCFrame,startSnapshot.headCFrame,cameraConfig) or nil
+    local finishPoint=startSnapshot and finishSnapshot
+        and SEGCFG.essentialProjectPoint(finishSnapshot.cameraCFrame,finishSnapshot.headCFrame,cameraConfig) or nil
+    return {
+        valid=headDecomposition.valid,duration=segment.duration,frameCount=segment.frameCount,
+        headHorizontal=segment.screen and segment.screen.head and segment.screen.head.x or nil,
+        primaryHorizontal=segment.screen and segment.screen.primary and segment.screen.primary.x or nil,
+        subjectHorizontal=segment.screen and segment.screen.subject and segment.screen.subject.x or nil,
+        headWithinXPerYaw=headDecomposition.withinPerYaw,
+        headBoundaryXPerYaw=headDecomposition.boundaryPerYaw,
+        screenDecomposition={head=headDecomposition,primary=primaryDecomposition,subject=subjectDecomposition},
+        rootTranslation=SEGCFG.essentialDistance(startSnapshot and startSnapshot.primaryCFrame,finishSnapshot and finishSnapshot.primaryCFrame),
+        rootRotationDeg=SEGCFG.essentialRotationDegrees(startSnapshot and startSnapshot.primaryCFrame,finishSnapshot and finishSnapshot.primaryCFrame),
+        rootPathTranslation=SEGCFG.essentialStoredStepPath(series,"rootStep")
+            or SEGCFG.essentialCFramePath(series,"primaryBefore","primaryAfter"),
+        localHeadTranslation=SEGCFG.essentialDistance(startSnapshot and startSnapshot.primaryToHead,finishSnapshot and finishSnapshot.primaryToHead),
+        localHeadRotationDeg=SEGCFG.essentialRotationDegrees(startSnapshot and startSnapshot.primaryToHead,finishSnapshot and finishSnapshot.primaryToHead),
+        localHeadPathTranslation=SEGCFG.essentialStoredStepPath(series,"localHeadStep")
+            or SEGCFG.essentialCFramePath(series,"localHeadBefore","localHeadAfter"),
+        joints=jointResult,animations=animationResult,
+        initialCameraCFrame=startSnapshot and startSnapshot.cameraCFrame or nil,
+        initialLocalHead=startSnapshot and startSnapshot.primaryToHead or nil,
+        initialAnimationTime=firstTime,
+        projection={
+            cameraOnlyHeadDX=type(startX)=="number" and type(cameraOnlyX)=="number"
+                and SEGCFG.roundEssential(cameraOnlyX-startX) or nil,
+            poseOnlyHeadDX=type(startX)=="number" and type(poseOnlyX)=="number"
+                and SEGCFG.roundEssential(poseOnlyX-startX) or nil,
+            combinedHeadDX=type(startX)=="number" and type(combinedX)=="number"
+                and SEGCFG.roundEssential(combinedX-startX) or nil,
+            startHeadDepth=startPoint and startPoint.depth or nil,
+            finishHeadDepth=finishPoint and finishPoint.depth or nil,
+        },
+    }
+end
+
+function SEGCFG.essentialSorted(values)
+    local output={}
+    for _,value in ipairs(values or {}) do if type(value)=="number" then output[#output+1]=value end end
+    table.sort(output)
+    return output
+end
+
+function SEGCFG.essentialPercentile(values,fraction)
+    local sorted=SEGCFG.essentialSorted(values)
+    if #sorted==0 then return nil end
+    local position=1+(#sorted-1)*math.max(0,math.min(1,fraction))
+    local lower,upper=math.floor(position),math.ceil(position)
+    if lower==upper then return SEGCFG.roundEssential(sorted[lower]) end
+    local weight=position-lower
+    return SEGCFG.roundEssential(sorted[lower]*(1-weight)+sorted[upper]*weight)
+end
+
+function SEGCFG.essentialDistribution(values)
+    local sorted=SEGCFG.essentialSorted(values)
+    if #sorted==0 then return {n=0,mean=nil,median=nil,p95=nil,max=nil} end
+    local sum=0
+    for _,value in ipairs(sorted) do sum+=value end
+    return {n=#sorted,mean=SEGCFG.roundEssential(sum/#sorted),
+        median=SEGCFG.essentialPercentile(sorted,0.5),p95=SEGCFG.essentialPercentile(sorted,0.95),
+        max=SEGCFG.roundEssential(sorted[#sorted])}
+end
+
+function SEGCFG.essentialMovingBlock(differences)
+    local values=SEGCFG.essentialSorted(differences)
+    if #values==0 then return {n=0,estimate=nil,low=nil,high=nil,excludesZero=false} end
+    -- Preserve pair order in resampling; sorted is used only for the literal estimate.
+    local ordered={}
+    for _,value in ipairs(differences) do ordered[#ordered+1]=value end
+    local blockSize=math.max(1,math.min(#ordered,tonumber(SEGCFG.bootstrapBlock) or 3))
+    local iterations=tonumber(SEGCFG.bootstrapIterations) or 2000
+    local state=(#ordered*1000003+iterations*97)%2147483647
+    if state<=0 then state=104729 end
+    local function randomIndex(maximum)
+        state=(state*48271)%2147483647
+        return 1+(state%maximum)
+    end
+    local estimates={}
+    for _=1,iterations do
+        local resampled={}
+        while #resampled<#ordered do
+            local start=randomIndex(math.max(1,#ordered-blockSize+1))
+            for offset=0,blockSize-1 do
+                if #resampled>=#ordered then break end
+                resampled[#resampled+1]=ordered[math.min(#ordered,start+offset)]
+            end
+        end
+        estimates[#estimates+1]=SEGCFG.essentialPercentile(resampled,0.5)
+    end
+    local low,high=SEGCFG.essentialPercentile(estimates,0.025),SEGCFG.essentialPercentile(estimates,0.975)
+    return {n=#ordered,estimate=SEGCFG.essentialPercentile(values,0.5),low=low,high=high,
+        excludesZero=type(low)=="number" and type(high)=="number" and (low>0 or high<0)}
+end
+
+function SEGCFG.essentialFirstAnimationAdvance(segmentAnalysis)
+    local first=segmentAnalysis.animations and segmentAnalysis.animations[1]
+    return first and first.timeAdvance or nil
+end
+
+function SEGCFG.aggregateEssentialAnalyses(pairAnalyses)
+    local result={pairs={},aggregates={touch={},relay={}},bootstrap={},geometry={
+        maxArithmeticResidual=0,headOpposedTouch=0,headOpposedRelay=0,
+        primaryBoundaryNonzero=0,subjectBoundaryNonzero=0,
+    },decisions={}}
+    local routeValues={touch={root={},head={},joint={},animation={},duration={},frames={}},
+        relay={root={},head={},joint={},animation={},duration={},frames={}}}
+    local differences={head={},primary={},subject={}}
+    for index,pair in ipairs(pairAnalyses or {}) do
+        local touch,relay=pair.touch,pair.relay
+        result.pairs[index]={index=index,yawGap=pair.yawGap,netPitchGap=pair.netPitchGap,
+            absPitchGap=pair.absPitchGap,touch=touch,relay=relay,
+            initial={cameraRotationGapDeg=SEGCFG.essentialRotationDegrees(touch.initialCameraCFrame,relay.initialCameraCFrame),
+                localHeadTranslationGap=SEGCFG.essentialDistance(touch.initialLocalHead,relay.initialLocalHead),
+                animationTimeGap=type(touch.initialAnimationTime)=="number" and type(relay.initialAnimationTime)=="number"
+                    and SEGCFG.roundEssential(math.abs(relay.initialAnimationTime-touch.initialAnimationTime)) or nil}}
+        for route,analysis in pairs({touch=touch,relay=relay}) do
+            local values=routeValues[route]
+            if type(analysis.rootTranslation)=="number" then values.root[#values.root+1]=analysis.rootTranslation end
+            if type(analysis.localHeadTranslation)=="number" then values.head[#values.head+1]=analysis.localHeadTranslation end
+            local neck=analysis.joints and analysis.joints.Neck
+            if neck and type(neck.translation)=="number" then values.joint[#values.joint+1]=neck.translation end
+            local animation=SEGCFG.essentialFirstAnimationAdvance(analysis)
+            if type(animation)=="number" then values.animation[#values.animation+1]=animation end
+            if type(analysis.duration)=="number" then values.duration[#values.duration+1]=analysis.duration end
+            if type(analysis.frameCount)=="number" then values.frames[#values.frames+1]=analysis.frameCount end
+            local decomposition=analysis.screenDecomposition or {}
+            for _,point in ipairs({"head","primary","subject"}) do
+                local residual=decomposition[point] and decomposition[point].residual
+                if type(residual)=="number" then
+                    result.geometry.maxArithmeticResidual=math.max(result.geometry.maxArithmeticResidual,math.abs(residual))
+                end
+            end
+            if decomposition.head and decomposition.head.signsOpposed then
+                local key=route=="touch" and "headOpposedTouch" or "headOpposedRelay"
+                result.geometry[key]+=1
+            end
+            if decomposition.primary and math.abs(decomposition.primary.boundary or 0)>0 then
+                result.geometry.primaryBoundaryNonzero+=1
+            end
+            if decomposition.subject and math.abs(decomposition.subject.boundary or 0)>0 then
+                result.geometry.subjectBoundaryNonzero+=1
+            end
+        end
+        for key,field in pairs({head="headHorizontal",primary="primaryHorizontal",subject="subjectHorizontal"}) do
+            if type(touch[field])=="number" and type(relay[field])=="number" then
+                differences[key][#differences[key]+1]=SEGCFG.roundEssential(relay[field]-touch[field])
+            end
+        end
+    end
+    for _,route in ipairs({"touch","relay"}) do
+        local values=routeValues[route]
+        result.aggregates[route]={
+            rootTranslation=SEGCFG.essentialDistribution(values.root),
+            localHeadTranslation=SEGCFG.essentialDistribution(values.head),
+            jointNeckTranslation=SEGCFG.essentialDistribution(values.joint),
+            animationTimeAdvance=SEGCFG.essentialDistribution(values.animation),
+            duration=SEGCFG.essentialDistribution(values.duration),
+            frameCount=SEGCFG.essentialDistribution(values.frames),
+        }
+    end
+    result.bootstrap.headHorizontal=SEGCFG.essentialMovingBlock(differences.head)
+    result.bootstrap.primaryHorizontal=SEGCFG.essentialMovingBlock(differences.primary)
+    result.bootstrap.subjectHorizontal=SEGCFG.essentialMovingBlock(differences.subject)
+    result.geometry.maxArithmeticResidual=SEGCFG.roundEssential(result.geometry.maxArithmeticResidual)
+    result.geometry.decompositionIdentityClosed=result.geometry.maxArithmeticResidual==0
+    result.geometry.primarySubjectDoNotExplainObservedHeadDifference=
+        result.geometry.primaryBoundaryNonzero==0 and result.geometry.subjectBoundaryNonzero==0
+    result.method={name="paired moving-block bootstrap over time-ordered matched non-overlapping segment pairs",
+        unit="matched segment pair",blockSize=math.max(1,math.min(#(pairAnalyses or {}),tonumber(SEGCFG.bootstrapBlock) or 3)),
+        iterations=tonumber(SEGCFG.bootstrapIterations) or 2000,
+        statistic="median(relay-touch)",precisionDecimals=7,
+        decisionRule="causal mechanism remains unproved without duration/frame-count/initial-pose identification"}
+    result.decisions={
+        temporalConfoundResolved="unproved",
+        initialPoseConfoundResolved="unproved",
+        rootMotionContribution="quantified pair-by-pair; independent causal share unproved",
+        jointTransformContribution="quantified pair-by-pair; independent causal share unproved",
+        animationProgressContribution="quantified pair-by-pair; independent causal share unproved",
+        projectionDepthContribution="quantified pair-by-pair; independent causal share unproved",
+        screenDisplacementDecomposition="endpoint = within-update + inter-frame; arithmetic residual retained pair-by-pair",
+        downstreamCameraCompositionMissing="not observed in the measured decomposition",
+        primarySubjectExplanation="not supported for the observed Head-only horizontal separation",
+        timingPoseInterpretation="relay duration/frame count are larger, allowing more Head-to-rig/pose evolution and projected cancellation",
+        pcMechanismConfirmed=false,
+        headHorizontalEffectAfterTemporalControl="unproved: original matcher does not pair duration/frame count/initial pose",
+        firstConcreteGeometricDivergence="unproved after temporal and initial-pose control",
+        causalMechanismProved=false,implementationTargetIdentified=false,
+        v615Justified=false,astra6MaxJustified=false,
+    }
+    return result
+end
+
+function SEGCFG.analyzeEssentialModel(model)
+    local analyses={}
+    for index,pair in ipairs(model.pairs or {}) do
+        analyses[index]={yawGap=pair.yawGap,netPitchGap=pair.netPitchGap,absPitchGap=pair.absPitchGap,
+            touch=SEGCFG.analyzeEssentialSegment(pair.touch,model),
+            relay=SEGCFG.analyzeEssentialSegment(pair.relay,model)}
+    end
+    return SEGCFG.aggregateEssentialAnalyses(analyses)
+end
+
+function SEGCFG.rawSnapshotForAnalysis(snapshot)
+    if type(snapshot)~="table" then return nil end
+    local joints={}
+    for _,name in ipairs({"Neck","Waist","RootJoint"}) do
+        local joint=snapshot.joints and snapshot.joints[name]
+        if type(joint)=="table" then joints[name]={transform=SEGCFG.essentialArray(joint.transform)} end
+    end
+    return {
+        cameraConfig=1,cameraCFrame=SEGCFG.essentialArray(snapshot.cameraCFrame),
+        primaryCFrame=SEGCFG.essentialArray(snapshot.primaryCFrame),
+        headCFrame=SEGCFG.essentialArray(snapshot.headCFrame),
+        primaryToHead=SEGCFG.essentialArray(snapshot.primaryToHead),
+        joints=joints,animation=SEGCFG.deepCopyEssential(snapshot.animation),
+    }
+end
+
+function SEGCFG.rawBoundarySetForAnalysis(sample)
+    local telemetry=sample and sample.temporalPoseTelemetry
+    local calls=type(telemetry)=="table" and telemetry.controllerCalls or nil
+    local firstCall=type(calls)=="table" and calls[1] or nil
+    local lastCall=type(calls)=="table" and calls[#calls] or nil
+    return {
+        cameraModuleBefore=SEGCFG.rawSnapshotForAnalysis(telemetry and telemetry.cameraModuleBefore),
+        controllerBefore=SEGCFG.rawSnapshotForAnalysis(firstCall and firstCall.before),
+        controllerAfter=SEGCFG.rawSnapshotForAnalysis(lastCall and lastCall.after),
+        cameraModuleAfter=SEGCFG.rawSnapshotForAnalysis(telemetry and telemetry.cameraModuleAfter),
+    }
+end
+
+function SEGCFG.rawSeriesForAnalysis(sample)
+    local boundaries=SEGCFG.rawBoundarySetForAnalysis(sample)
+    local before=boundaries.cameraModuleBefore or boundaries.controllerBefore
+    local after=boundaries.cameraModuleAfter or boundaries.controllerAfter
+    local jointTransform={before={},after={}}
+    for _,name in ipairs({"Neck","Waist","RootJoint"}) do
+        if before and before.joints and before.joints[name] then jointTransform.before[name]=before.joints[name].transform end
+        if after and after.joints and after.joints[name] then jointTransform.after[name]=after.joints[name].transform end
+    end
+    return {
+        frame=sample.frame,time=sample.time,dt=sample.dt,yawSigned=sample.yawSigned,pitchSigned=sample.pitchSigned,
+        headBeforeX=SEGCFG.essentialCoordinate(sample.headScreenBefore,1),headAfterX=SEGCFG.essentialCoordinate(sample.headScreenAfter,1),
+        headBeforeY=SEGCFG.essentialCoordinate(sample.headScreenBefore,2),headAfterY=SEGCFG.essentialCoordinate(sample.headScreenAfter,2),
+        headBeforeDepth=SEGCFG.essentialCoordinate(sample.headScreenBefore,3),headAfterDepth=SEGCFG.essentialCoordinate(sample.headScreenAfter,3),
+        primaryBeforeX=SEGCFG.essentialCoordinate(sample.primaryScreenBefore,1),primaryAfterX=SEGCFG.essentialCoordinate(sample.primaryScreenAfter,1),
+        subjectBeforeX=SEGCFG.essentialCoordinate(sample.subjectScreenBefore,1),subjectAfterX=SEGCFG.essentialCoordinate(sample.subjectScreenAfter,1),
+        cameraBefore=before and before.cameraCFrame or nil,cameraAfter=after and after.cameraCFrame or nil,
+        primaryBefore=before and before.primaryCFrame or nil,primaryAfter=after and after.primaryCFrame or nil,
+        localHeadBefore=before and before.primaryToHead or nil,localHeadAfter=after and after.primaryToHead or nil,
+        jointTransform=jointTransform,animationBefore=before and before.animation or nil,
+        animationAfter=after and after.animation or nil,
+    },boundaries
+end
+
+function SEGCFG.analyzeRawSegment(segment)
+    local series,boundaryBySample={},{ }
+    for index,sample in ipairs(segment.samples or {}) do
+        local item,boundaries=SEGCFG.rawSeriesForAnalysis(sample)
+        series[index]=item; boundaryBySample[index]=boundaries
+    end
+    local firstSample=segment.samples and segment.samples[1]
+    local firstTelemetry=firstSample and firstSample.temporalPoseTelemetry
+    local firstSnapshot=firstTelemetry and firstTelemetry.cameraModuleBefore
+    local pseudoModel={constants={camera={{fieldOfView=firstSnapshot and firstSnapshot.fieldOfView,
+        viewport=SEGCFG.essentialArray(firstSnapshot and firstSnapshot.viewport)}}}}
+    local pseudoSegment={
+        duration=segment.duration,frameCount=segment.frameCount,totalAbsYaw=segment.totalAbsYaw,
+        screen={head=SEGCFG.essentialMetric(segment.head),primary=SEGCFG.essentialMetric(segment.primary),
+            subject=SEGCFG.essentialMetric(segment.subject)},
+        series=series,boundaries={start=boundaryBySample[1],finish=boundaryBySample[#boundaryBySample]},
+    }
+    return SEGCFG.analyzeEssentialSegment(pseudoSegment,pseudoModel)
+end
+
+function SEGCFG.analyzeFullMatchedPairs(matchedPairs)
+    local analyses={}
+    for index,pair in ipairs(matchedPairs or {}) do
+        analyses[index]={yawGap=pair.yawGap,netPitchGap=pair.netPitchGap,absPitchGap=pair.absPitchGap,
+            touch=SEGCFG.analyzeRawSegment(pair.touch),relay=SEGCFG.analyzeRawSegment(pair.relay)}
+    end
+    return SEGCFG.aggregateEssentialAnalyses(analyses)
+end
+
+function SEGCFG.compareEssentialValues(a,b,path,mismatches)
+    local ta,tb=type(a),type(b)
+    if ta~=tb then mismatches[#mismatches+1]=path..":type"; return end
+    if ta=="number" then
+        if SEGCFG.roundEssential(a)~=SEGCFG.roundEssential(b) then mismatches[#mismatches+1]=path..":number" end
+    elseif ta=="table" then
+        local seen={}
+        for key,value in pairs(a) do
+            seen[key]=true; SEGCFG.compareEssentialValues(value,b[key],path.."."..tostring(key),mismatches)
+        end
+        for key in pairs(b) do if not seen[key] then mismatches[#mismatches+1]=path.."."..tostring(key)..":extra" end end
+    elseif a~=b then mismatches[#mismatches+1]=path..":value" end
+end
+
+function SEGCFG.compareAnalysisResults(a,b)
+    local mismatches={}
+    SEGCFG.compareEssentialValues(a,b,"analysis",mismatches)
+    return {equal=#mismatches==0,mismatches=mismatches}
+end
+
+
+function SEGCFG.canonicalEssentialText(value)
+    local valueType=type(value)
+    if valueType=="nil" then return "null" end
+    if valueType=="number" then return tostring(SEGCFG.roundEssential(value)) end
+    if valueType=="boolean" then return value and "true" or "false" end
+    if valueType=="string" then return string.format("%q",value) end
+    if valueType~="table" then return string.format("%q",tostring(value)) end
+    local array=true
+    local maximum,count=0,0
+    for key in pairs(value) do
+        if type(key)~="number" or key<1 or key%1~=0 then array=false; break end
+        maximum=math.max(maximum,key); count+=1
+    end
+    local parts={}
+    if array and maximum==count then
+        for index=1,maximum do parts[index]=SEGCFG.canonicalEssentialText(value[index]) end
+        return "["..table.concat(parts,",").."]"
+    end
+    local keys={}
+    for key in pairs(value) do keys[#keys+1]=tostring(key) end
+    table.sort(keys)
+    for _,key in ipairs(keys) do
+        parts[#parts+1]=string.format("%q",key)..":"..SEGCFG.canonicalEssentialText(value[key])
+    end
+    return "{"..table.concat(parts,",").."}"
+end
+
+function SEGCFG.essentialDigest(value)
+    local text=SEGCFG.canonicalEssentialText(value)
+    local state=7
+    for index=1,#text do state=(state*131+string.byte(text,index))%2147483647 end
+    return string.format("c7-%d-%08x",#text,state)
+end
+
+function SEGCFG.solveEssentialReportSize(fullReportChars,payloadChars,builder)
+    local size={fullReportChars=fullReportChars,essentialReportChars=0,reductionPercent=0,essentialChunks=0}
+    for _=1,8 do
+        local text=builder(size)
+        local chars=utf8.len(text)
+        if chars==nil then error("V614 essential report is not valid UTF-8",0) end
+        local chunks=math.max(1,math.ceil(chars/payloadChars))
+        local reduction=SEGCFG.roundEssential(fullReportChars>0 and (1-chars/fullReportChars)*100 or 0)
+        if chars==size.essentialReportChars and chunks==size.essentialChunks
+            and reduction==size.reductionPercent then return text,size end
+        size={fullReportChars=fullReportChars,essentialReportChars=chars,
+            reductionPercent=reduction,essentialChunks=chunks}
+    end
+    error("V614 essential report size fields did not stabilize",0)
+end
+-- END V614 ESSENTIAL REPORT PURE HELPERS
+end
+
+function SEGCFG.serializeEssentialModel(model)
+    local ok,text=pcall(function() return HttpService:JSONEncode(model) end)
+    if not ok then error("V614 essential JSON encode failed: "..tostring(text),0) end
+    return text
+end
+
+function SEGCFG.deserializeEssentialModel(text)
+    local ok,value=pcall(function() return HttpService:JSONDecode(text) end)
+    if not ok then error("V614 essential JSON decode failed: "..tostring(value),0) end
+    return value
+end
+
+function SEGCFG.buildProductionEssentialBundle()
+    local matched=SEGCFG.matchSegments()
+    local diagnostics=getgenv().PCV614Diagnostics()
+    local model=SEGCFG.buildEssentialModel(matched,diagnostics)
+    model.config={
+        sequence=SEGCFG.deepCopyEssential(SEGCFG.sequence),phaseEligibleTarget=SEGCFG.phaseEligibleTarget,
+        routeEligibleTarget=SEGCFG.routeEligibleTarget,requiredMatchedPairs=SEGCFG.minMatched,
+        targetYaw=SEGCFG.targetYaw,maxYaw=SEGCFG.maxYaw,minFrames=SEGCFG.minFrames,
+        minCoherence=SEGCFG.minCoherence,maxDuration=SEGCFG.maxDuration,maxFrameGap=SEGCFG.maxFrameGap,
+        maxNetPitch=SEGCFG.maxNetPitch,maxAbsPitchRatio=SEGCFG.maxAbsPitchRatio,
+        maxAbsPitchFloor=SEGCFG.maxAbsPitchFloor,matchYawGap=SEGCFG.matchYawGap,
+        matchNetPitchGap=SEGCFG.matchNetPitchGap,matchAbsPitchGap=SEGCFG.matchAbsPitchGap,
+        bootstrapBlock=SEGCFG.bootstrapBlock,bootstrapIterations=SEGCFG.bootstrapIterations,
+        stabilizeSeconds=STABILIZE_SECONDS,stableConsecutiveFrames=STABLE_CONSECUTIVE_FRAMES,
+        maxLinearVelocity=MAX_LINEAR_VELOCITY,maxWorldDeltaFloor=MAX_WORLD_DELTA_FLOOR,
+        maxMoveDirection=MAX_MOVE_DIRECTION,minAppliedYawDeg=MIN_APPLIED_YAW_DEG,
+    }
+    model.windows={}
+    for _,window in ipairs({"A1","B1","B2","A2"}) do
+        model.windows[window]=SEGCFG.essentialSafeValue(SEGCFG.getWindowStats(window))
+    end
+    model.integrity={
+        callbackErrors=diagnostics.callbackErrors,controllerErrors=diagnostics.controllerErrors,
+        frameCorrelationErrors=diagnostics.frameCorrelationErrors,
+        telemetryCaptureErrors=diagnostics.telemetryCaptureErrors,
+        telemetryCaptureErrorSources=diagnostics.telemetryCaptureErrorSources,
+        uiRefreshErrors=diagnostics.uiRefreshErrors,traceDropped=diagnostics.traceDropped,
+        evidenceDropped=diagnostics.evidenceDropped,
+        telemetryMatchedSamples=diagnostics.telemetryMatchedSamples,
+        telemetryMatchedSamplesComplete=diagnostics.telemetryMatchedSamplesComplete,
+        telemetryMatchedSamplesMissing=diagnostics.telemetryMatchedSamplesMissing,
+        telemetryMatchedControllerCalls=diagnostics.telemetryMatchedControllerCalls,
+        observationalOnly=diagnostics.observationalOnly,writesCameraCFrame=diagnostics.writesCameraCFrame,
+        writesRootPartCFrame=diagnostics.writesRootPartCFrame,writesHeadCFrame=diagnostics.writesHeadCFrame,
+        writesJointTransforms=diagnostics.writesJointTransforms,controlsAnimations=diagnostics.controlsAnimations,
+        writesCameraFocus=diagnostics.writesCameraFocus,altersCameraSubject=diagnostics.altersCameraSubject,
+        changesSensitivityGainPhysics=diagnostics.changesSensitivityGainPhysics,
+    }
+    model.matching={
+        eligibleTouchSegments=diagnostics.eligibleTouchSegments,
+        eligibleRelaySegments=diagnostics.eligibleRelaySegments,
+        matchedComparisonUnits=#matched,requiredMatchedComparisonUnits=SEGCFG.minMatched,
+        coverageSufficient=#matched>=SEGCFG.minMatched,
+        yawMatchQuality=diagnostics.yawMatchQuality,pitchMatchQuality=diagnostics.pitchMatchQuality,
+        counterbalancingMethod=diagnostics.counterbalancingMethod,
+    }
+
+    -- A reads complete runtime telemetry. B reads a JSON round-trip containing
+    -- only the values that will be transported in the essential report.
+    local analysisA=SEGCFG.analyzeFullMatchedPairs(matched)
+    local dataOnlyJson=SEGCFG.serializeEssentialModel(model)
+    local decoded=SEGCFG.deserializeEssentialModel(dataOnlyJson)
+    local analysisB=SEGCFG.analyzeEssentialModel(decoded)
+    local parity=SEGCFG.compareAnalysisResults(analysisA,analysisB)
+    model.analysis=analysisB
+    model.parity={
+        equal=parity.equal,mismatches=parity.mismatches,
+        fullDigest=SEGCFG.essentialDigest(analysisA),essentialDigest=SEGCFG.essentialDigest(analysisB),
+        precisionDecimals=7,
+    }
+    local modelJson=SEGCFG.serializeEssentialModel(model)
+    return {matched=matched,diagnostics=diagnostics,model=model,modelJson=modelJson,
+        analysisA=analysisA,analysisB=analysisB,parity=parity}
+end
+
+local function essentialJsonValue(value)
+    local ok,text=pcall(function() return HttpService:JSONEncode(value) end)
+    return ok and text or string.format("%q",tostring(value))
+end
+
+function SEGCFG.essentialPairSummary(pair,index)
+    local touch,relay=pair.touch,pair.relay
+    return string.format(
+        "pair=%d touch=%s(%s) relay=%s(%s) yawGap=%.7f netPitchGap=%.7f absPitchGap=%.7f touchDuration=%.7f relayDuration=%.7f touchFrames=%d relayFrames=%d",
+        index,tostring(touch.id),tostring(touch.window),tostring(relay.id),tostring(relay.window),
+        pair.yawGap,pair.netPitchGap,pair.absPitchGap,touch.duration,relay.duration,touch.frameCount,relay.frameCount)
+end
+
+function SEGCFG.buildEssentialReportText(bundle,size)
+    local diagnostics,model=bundle.diagnostics,bundle.model
+    local analysis=model.analysis
+    local lines={"=== PC MOVEMENT V614 ESSENTIAL REPORT ==="}
+    lines[#lines+1]="essentialSchema = "..tostring(model.schema)
+    lines[#lines+1]="version = "..tostring(diagnostics.version)
+    lines[#lines+1]="bridgeMode = "..tostring(diagnostics.bridgeMode)
+    lines[#lines+1]="probePurpose = "..tostring(diagnostics.probePurpose)
+    lines[#lines+1]="probeFrames = "..tostring(diagnostics.probeFrames)
+    lines[#lines+1]="probeDuration = "..tostring(diagnostics.probeDuration)
+    lines[#lines+1]="standingTouchSamples = "..tostring(diagnostics.standingTouchSamples)
+    lines[#lines+1]="standingRelaySamples = "..tostring(diagnostics.standingRelaySamples)
+    lines[#lines+1]="eligibleTouchSegments = "..tostring(diagnostics.eligibleTouchSegments)
+    lines[#lines+1]="eligibleRelaySegments = "..tostring(diagnostics.eligibleRelaySegments)
+    lines[#lines+1]="matchedComparisonUnits = "..tostring(diagnostics.matchedComparisonUnits)
+    lines[#lines+1]="requiredMatchedComparisonUnits = "..tostring(diagnostics.requiredMatchedComparisonUnits)
+    lines[#lines+1]="coverageSufficient = "..tostring(diagnostics.coverageSufficient)
+    lines[#lines+1]="completedWindows = "..tostring(diagnostics.completedWindows)
+    lines[#lines+1]="callbackErrors = "..tostring(diagnostics.callbackErrors)
+    lines[#lines+1]="controllerErrors = "..tostring(diagnostics.controllerErrors)
+    lines[#lines+1]="frameCorrelationErrors = "..tostring(diagnostics.frameCorrelationErrors)
+    lines[#lines+1]="telemetryCaptureErrors = "..tostring(diagnostics.telemetryCaptureErrors)
+    lines[#lines+1]="telemetryCaptureErrorSources = "..tostring(diagnostics.telemetryCaptureErrorSources)
+    lines[#lines+1]="uiRefreshErrors = "..tostring(diagnostics.uiRefreshErrors)
+    lines[#lines+1]="traceDropped = "..tostring(diagnostics.traceDropped)
+    lines[#lines+1]="evidenceDropped = "..tostring(diagnostics.evidenceDropped)
+    lines[#lines+1]="validationReadyOriginal = "..tostring(diagnostics.validationReady)
+    lines[#lines+1]="validationReadyEssential = "..tostring(diagnostics.validationReady and bundle.parity.equal)
+    lines[#lines+1]="config = "..essentialJsonValue(model.config)
+    lines[#lines+1]="windowA1 = "..essentialJsonValue(model.windows.A1)
+    lines[#lines+1]="windowB1 = "..essentialJsonValue(model.windows.B1)
+    lines[#lines+1]="windowB2 = "..essentialJsonValue(model.windows.B2)
+    lines[#lines+1]="windowA2 = "..essentialJsonValue(model.windows.A2)
+
+    lines[#lines+1]=""
+    lines[#lines+1]="=== V614 ESSENTIAL MATCHED PAIRS ==="
+    for index,pair in ipairs(bundle.matched) do
+        lines[#lines+1]=SEGCFG.essentialPairSummary(pair,index)
+        lines[#lines+1]="pairAnalysis="..tostring(index).." "..essentialJsonValue(analysis.pairs[index])
+    end
+    lines[#lines+1]="aggregateAnalysis = "..essentialJsonValue(analysis.aggregates)
+    lines[#lines+1]="bootstrapAnalysis = "..essentialJsonValue(analysis.bootstrap)
+    lines[#lines+1]="geometricDecomposition = "..essentialJsonValue(analysis.geometry)
+
+    lines[#lines+1]=""
+    lines[#lines+1]="=== V614 ESSENTIAL OMISSION MANIFEST ==="
+    local omissionKeys={"unmatchedAcceptedFrames","rejectedSegments","unmatchedEligibleSegments",
+        "repeatedJointConstants","repeatedAnimationMetadata","repeatedCameraConfig",
+        "guiStateMessages","redundantDebugEvidence"}
+    for _,key in ipairs(omissionKeys) do lines[#lines+1]=key.." = "..tostring(model.omissions[key]) end
+
+    lines[#lines+1]=""
+    lines[#lines+1]="=== V614 ESSENTIAL MODEL JSON ==="
+    lines[#lines+1]=bundle.modelJson
+
+    lines[#lines+1]=""
+    lines[#lines+1]="=== V614 ESSENTIAL A/B PARITY ==="
+    lines[#lines+1]="analysisAFullTelemetryDigest = "..tostring(model.parity.fullDigest)
+    lines[#lines+1]="analysisBEssentialDigest = "..tostring(model.parity.essentialDigest)
+    lines[#lines+1]="analysisPrecisionDecimals = 7"
+    lines[#lines+1]="analysisParity = "..tostring(model.parity.equal)
+    lines[#lines+1]="analysisParityMismatches = "..(#model.parity.mismatches==0 and "none" or table.concat(model.parity.mismatches," | "))
+
+    lines[#lines+1]=""
+    lines[#lines+1]="=== V614 ESSENTIAL CAUSAL DECISION ==="
+    local decisionKeys={"temporalConfoundResolved","initialPoseConfoundResolved","rootMotionContribution",
+        "jointTransformContribution","animationProgressContribution","projectionDepthContribution",
+        "screenDisplacementDecomposition","downstreamCameraCompositionMissing","primarySubjectExplanation",
+        "timingPoseInterpretation","pcMechanismConfirmed",
+        "headHorizontalEffectAfterTemporalControl","firstConcreteGeometricDivergence",
+        "causalMechanismProved","implementationTargetIdentified","v615Justified","astra6MaxJustified"}
+    for _,key in ipairs(decisionKeys) do lines[#lines+1]=key.." = "..tostring(analysis.decisions[key]) end
+    lines[#lines+1]="pcEquivalenceClaimAllowed = false"
+    lines[#lines+1]="matchingCriteriaChanged = false"
+    lines[#lines+1]="calipersChanged = false"
+    lines[#lines+1]="gainChanged = false"
+    lines[#lines+1]="cameraCorrectionAdded = false"
+    lines[#lines+1]="v615Created = false"
+
+    lines[#lines+1]=""
+    lines[#lines+1]="=== V614 ESSENTIAL SIZE ==="
+    lines[#lines+1]="fullReportChars = "..tostring(size.fullReportChars)
+    lines[#lines+1]="essentialReportChars = "..tostring(size.essentialReportChars)
+    lines[#lines+1]="reductionPercent = "..tostring(SEGCFG.roundEssential(size.reductionPercent))
+    lines[#lines+1]="essentialChunks = "..tostring(size.essentialChunks)
+    return table.concat(lines,"\n")
+end
+
+getgenv().PCV614EssentialReport=function()
+    local bundle=SEGCFG.buildProductionEssentialBundle()
+    local fullReportChars=SEGCFG.buildLegacyReport(true,true)
+    local text,size=SEGCFG.solveEssentialReportSize(fullReportChars,SEGCFG.reportPayloadMaxChars,
+        function(current) return SEGCFG.buildEssentialReportText(bundle,current) end)
+    if SEGCFG.reportCharCount(text)~=size.essentialReportChars then
+        error("V614 essential report size self-check failed",0)
+    end
+    return text
+end
+
+getgenv().PCV614Report=function()
+    return getgenv().PCV614EssentialReport()
+end
+
 SEGCFG.reportTransportMaxChars=30000
 SEGCFG.reportPayloadMaxChars=29500
 SEGCFG.reportExport=nil
@@ -3177,7 +4247,7 @@ function SEGCFG.ensureReportExport()
     stopProbe()
     -- The complete report is built first, exactly by the existing generator.
     -- Chunking starts only after this immutable string already exists.
-    local fullReport=getgenv().PCV614Report(true)
+    local fullReport=getgenv().PCV614EssentialReport()
     local reportId=HttpService:GenerateGUID(false)
     local chunks=SEGCFG.splitReportPayloads(fullReport,SEGCFG.reportPayloadMaxChars)
     if table.concat(chunks)~=fullReport then
@@ -3512,6 +4582,7 @@ getgenv().__PCMobileAimCleanup=function()
     getgenv().PCV614EmergencyV500=nil
     getgenv().PCV614Diagnostics=nil
     getgenv().PCV614Report=nil
+    getgenv().PCV614EssentialReport=nil
     if baseCleanup then pcall(baseCleanup) end
     getgenv().__PCMobileAimCleanup=nil
 end

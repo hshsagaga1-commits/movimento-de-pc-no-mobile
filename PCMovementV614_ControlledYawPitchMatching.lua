@@ -7,17 +7,21 @@ local player=Players.LocalPlayer
 local UI_NAME="PCMovementV614Panel"
 
 --[[
-    V614 / CONTROLLED YAW-PITCH SEGMENT MATCHING / ACQUISITION R2
+    V614 / CONTROLLED YAW-PITCH MATCHING / TEMPORAL-POSE TELEMETRY R1
 
     V604-V613 and the post-V613 audit are accepted evidence. No search is
     reopened. This probe resolves only PrimaryPart-vs-Head ambiguity inside:
       A) native Touch, character standing
       B) V604 OnMouseMoved(same real Touch), character standing.
 
-    Acquisition R2 changes only the mobile guidance and phase completion. The
-    60-degree segment unit, pitch limits, matching calipers, ABBA order and
-    bootstrap are unchanged. No camera, character, subject, focus, sensitivity
-    or physics value is written. Relay is not labeled native PC MouseMovement.
+    Acquisition R2 remains unchanged. This revision only records protected,
+    read-only numeric snapshots at the existing CameraModule.Update and active
+    Controller.Update boundaries so the already-observed Head effect can be
+    decomposed into camera projection, root motion, local joints and animation
+    progression. The 60-degree segment unit, pitch limits, matching calipers,
+    ABBA order and bootstrap are unchanged. No camera, character, subject,
+    focus, joint, animation, sensitivity or physics value is written. Relay is
+    not labeled native PC MouseMovement.
 ]]
 
 local v604Source=game:HttpGet(
@@ -47,8 +51,8 @@ local baseSetRelay=getgenv().PCV604SetRelayEnabled
 local baseDiagnostics=getgenv().PCV604Diagnostics
 local baseReport=getgenv().PCV604Report
 
-getgenv().PCMovementVersion="V614-ControlledYawPitchMatching-AcquisitionR2"
-getgenv().PCInputBridgeMode="v614-controlled-yaw-pitch-matching-acquisition-r2"
+getgenv().PCMovementVersion="V614-ControlledYawPitchMatching-TemporalPoseTelemetryR1"
+getgenv().PCInputBridgeMode="v614-controlled-yaw-pitch-matching-temporal-pose-telemetry-r1"
 
 local cameras=nil
 local activeController=nil
@@ -167,6 +171,9 @@ local frameCorrelationErrors=0
 local correlationFramesExcluded=0
 local correlationErrorSources={}
 local optionalDiagnosticReadErrors=0
+local telemetryCaptureErrors=0
+local telemetryCaptureErrorSources={}
+local telemetryBoundariesCaptured=0
 local lastCorrelationErrorSource="none"
 local subjectClassCounts={}
 local lastCorrelatedFrame=""
@@ -446,6 +453,139 @@ local function characterSnapshot()
     return character,primary,head,humanoid
 end
 
+function SEGCFG.noteTelemetryError(source,value)
+    telemetryCaptureErrors+=1
+    local key=tostring(source)..":"..cleanText(value,120)
+    telemetryCaptureErrorSources[key]=(telemetryCaptureErrorSources[key] or 0)+1
+end
+
+function SEGCFG.telemetryRead(source,reader)
+    local ok,value=pcall(reader)
+    if not ok then
+        SEGCFG.noteTelemetryError(source,value)
+        return nil
+    end
+    return value
+end
+
+-- Store only immutable value types / plain tables. No Instance captured here is
+-- retained in a sample or report, and every executor-sensitive read fails open.
+function SEGCFG.cframeComponents(cf)
+    if typeof(cf)~="CFrame" then return nil end
+    local values={cf:GetComponents()}
+    return values
+end
+
+function SEGCFG.vector2Components(value)
+    return typeof(value)=="Vector2" and {value.X,value.Y} or nil
+end
+
+function SEGCFG.snapshotJoint(character,name)
+    if not character then return nil end
+    local joint=SEGCFG.telemetryRead("joint-find-"..name,function()
+        return character:FindFirstChild(name,true)
+    end)
+    if not joint then return nil end
+    return SEGCFG.telemetryRead("joint-read-"..name,function()
+        if not joint:IsA("Motor6D") then return nil end
+        return {
+            name=name,
+            part0=joint.Part0 and joint.Part0.Name or "nil",
+            part1=joint.Part1 and joint.Part1.Name or "nil",
+            transform=SEGCFG.cframeComponents(joint.Transform),
+            -- C0/C1 are required to reconstruct the Motor6D relation exactly.
+            c0=SEGCFG.cframeComponents(joint.C0),c1=SEGCFG.cframeComponents(joint.C1),
+        }
+    end)
+end
+
+function SEGCFG.snapshotAnimationTracks(humanoid)
+    local result={humanoidState="unavailable",tracks={}}
+    if not humanoid then return result end
+    local state=SEGCFG.telemetryRead("humanoid-state",function() return humanoid:GetState() end)
+    if state~=nil then result.humanoidState=cleanText(state,60) end
+    local animator=SEGCFG.telemetryRead("animator-find",function()
+        return humanoid:FindFirstChildOfClass("Animator")
+    end)
+    if not animator then return result end
+    local tracks=SEGCFG.telemetryRead("animation-tracks",function()
+        return animator:GetPlayingAnimationTracks()
+    end)
+    if type(tracks)~="table" then return result end
+    for index,track in ipairs(tracks) do
+        local entry=SEGCFG.telemetryRead("animation-track-"..tostring(index),function()
+            local animation=track.Animation
+            return {
+                animationId=animation and animation.AnimationId or "",
+                name=track.Name,
+                timePosition=track.TimePosition,
+                weightCurrent=track.WeightCurrent,
+                weightTarget=track.WeightTarget,
+                speed=track.Speed,
+                isPlaying=track.IsPlaying,
+                looped=track.Looped,
+                priority=track.Priority and track.Priority.Name or cleanText(track.Priority,40),
+                length=track.Length,
+            }
+        end)
+        if entry then result.tracks[#result.tracks+1]=entry end
+    end
+    table.sort(result.tracks,function(a,b)
+        local ak=(a.animationId or "").."|"..(a.name or "").."|"..(a.priority or "")
+        local bk=(b.animationId or "").."|"..(b.name or "").."|"..(b.priority or "")
+        if ak==bk then return (a.timePosition or 0)<(b.timePosition or 0) end
+        return ak<bk
+    end)
+    return result
+end
+
+function SEGCFG.temporalPoseSnapshot(boundary)
+    local captureStarted=os.clock()
+    local character,primary,head,humanoid=characterSnapshot()
+    local camera=workspace.CurrentCamera
+    local cameraCFrame=SEGCFG.telemetryRead(boundary.."-camera-cframe",function()
+        return camera and camera.CFrame or nil
+    end)
+    local cameraReadAt=os.clock()
+    local primaryCFrame=SEGCFG.telemetryRead(boundary.."-primary-cframe",function()
+        return primary and primary.CFrame or nil
+    end)
+    local headCFrame=SEGCFG.telemetryRead(boundary.."-head-cframe",function()
+        return head and head.CFrame or nil
+    end)
+    local localHead=nil
+    if typeof(primaryCFrame)=="CFrame" and typeof(headCFrame)=="CFrame" then
+        localHead=SEGCFG.telemetryRead(boundary.."-primary-to-head",function()
+            return primaryCFrame:ToObjectSpace(headCFrame)
+        end)
+    end
+    local poseReadAt=os.clock()
+    local fieldOfView=SEGCFG.telemetryRead(boundary.."-camera-fov",function()
+        return camera and camera.FieldOfView or nil
+    end)
+    local viewport=SEGCFG.telemetryRead(boundary.."-camera-viewport",function()
+        return camera and camera.ViewportSize or nil
+    end)
+    local joints={
+        Neck=SEGCFG.snapshotJoint(character,"Neck"),
+        Waist=SEGCFG.snapshotJoint(character,"Waist"),
+        RootJoint=SEGCFG.snapshotJoint(character,"RootJoint"),
+    }
+    local animation=SEGCFG.snapshotAnimationTracks(humanoid)
+    local captureEnded=os.clock()
+    telemetryBoundariesCaptured+=1
+    return {
+        boundary=boundary,clock=captureStarted-probeStartedAt,
+        cameraReadClock=cameraReadAt-probeStartedAt,poseReadClock=poseReadAt-probeStartedAt,
+        captureEndClock=captureEnded-probeStartedAt,captureDurationMs=(captureEnded-captureStarted)*1000,
+        cameraCFrame=SEGCFG.cframeComponents(cameraCFrame),fieldOfView=fieldOfView,
+        viewport=SEGCFG.vector2Components(viewport),
+        primaryCFrame=SEGCFG.cframeComponents(primaryCFrame),headCFrame=SEGCFG.cframeComponents(headCFrame),
+        primaryToHead=SEGCFG.cframeComponents(localHead),
+        joints=joints,animation=animation,
+    }
+end
+
 local function projectPart(camera,part)
     if not camera or not part then return nil,false end
     local point,onScreen=nil,false
@@ -681,12 +821,21 @@ local function controllerFactory(callOriginal)
         if self~=getActiveController() then return callOriginal(self,dt,...) end
         controllerUpdates+=1
         local frame=currentFrame
+        local telemetryCall=nil
         if frame then
             frame.controllerEntryRotate=readRotate(self)
             frame.sequence[#frame.sequence+1]="Controller.Update:enter"
+            frame.telemetry=frame.telemetry or {enabled=false,controllerCalls={}}
+            frame.telemetry.controllerCalls=frame.telemetry.controllerCalls or {}
+            if frame.telemetry.enabled then
+                telemetryCall={index=#frame.telemetry.controllerCalls+1,
+                    before=SEGCFG.temporalPoseSnapshot("controller-before")}
+                frame.telemetry.controllerCalls[#frame.telemetry.controllerCalls+1]=telemetryCall
+            end
         end
         local results=packCall(callOriginal,self,dt,...)
         if frame then
+            if telemetryCall then telemetryCall.after=SEGCFG.temporalPoseSnapshot("controller-after") end
             frame.controllerReturnCFrame=results[2]
             frame.controllerReturnFocus=results[3]
             frame.controllerExitRotate=readRotate(self)
@@ -880,6 +1029,7 @@ local function recordPairedSample(frame,stats,yawSigned,pitchSigned,returnedYawS
         returnedPrimaryScreen=frame.returnedPrimaryPoint,returnedHeadScreen=frame.returnedHeadPoint,
         subjectScreenBefore=frame.subjectBeforePoint,subjectScreenAfter=frame.subjectAfterPoint,
         returnedSubjectScreen=frame.returnedSubjectPoint,
+        temporalPoseTelemetry=frame.telemetry,
     }
     stats.samples[#stats.samples+1]=sample
     if type(segmentConsumer)=="function" then segmentConsumer(sample) end
@@ -944,6 +1094,9 @@ function SEGCFG.rejectSegment(route,window,reason,closeReason,build,pitchLimit)
         "rejected=%s close=%s window=%s yaw=%.3f netPitch=%.3f absPitch=%.3f pitchLimit=%.3f frames=%d",
         reason,tostring(closeReason),tostring(window),build.totalAbsYaw,build.netPitch,
         build.totalAbsPitch,pitchLimit,#build.samples)
+    -- Rejected samples remain in the original V614 scalar trace, but their
+    -- heavy telemetry is not needed for the final matched decomposition.
+    for _,sample in ipairs(build.samples) do sample.temporalPoseTelemetry=nil end
 end
 
 function SEGCFG.closeCurrentSegment(reason)
@@ -987,6 +1140,9 @@ function SEGCFG.closeCurrentSegment(reason)
         cameraYawStart=first.cameraYawBefore,cameraYawEnd=last.cameraYawAfter,
         cameraPitchStart=first.cameraPitchBefore,cameraPitchEnd=last.cameraPitchAfter,
         returnedYawEnd=last.returnedYawValue,returnedPitchEnd=last.returnedPitchValue,
+        -- Retained only on eligible segments. Matching/calipers do not inspect
+        -- this field; it exists solely for the post-match telemetry report.
+        samples=build.samples,
         closeReason=reason,
     }
     local list=segmentStats[build.route].eligible
@@ -1280,12 +1436,22 @@ local function cameraModuleFactory(callOriginal)
         pendingWrites=newPending()
         local phase=writes.relayNonzero>0 and "relay" or (writes.touchNonzero>0 and "touch")
             or (relayEnabled() and "relay" or "touch")
+        local telemetryWanted=phaseState=="active"
+            and ((currentPhase=="touch" and writes.touchNonzero>0 and writes.relayNonzero==0)
+                or (currentPhase=="relay" and writes.relayNonzero>0 and writes.touchNonzero==0))
         local frame={
             id=frameSerial,dt=dt,phase=phase,writes=writes,startedAt=os.clock(),screenBefore=screenSnapshot(),
             sequence={"CameraModule.Update:enter"},calculateIndex=0,
+            telemetry={enabled=telemetryWanted,controllerCalls={}},
         }
+        if telemetryWanted then
+            frame.telemetry.cameraModuleBefore=SEGCFG.temporalPoseSnapshot("camera-module-before")
+        end
         currentFrame=frame
         local results=packCall(callOriginal,self,dt,...)
+        if telemetryWanted then
+            frame.telemetry.cameraModuleAfter=SEGCFG.temporalPoseSnapshot("camera-module-after")
+        end
         frame.screenAfter=screenSnapshot()
         frame.sequence[#frame.sequence+1]="CameraModule.Update:exit"
         frame.correlationStage="finalize-entry"
@@ -1350,7 +1516,9 @@ local function resetCounters()
     calculateCalls=0; firstCalculateCalls=0; getCameraLookCallsInCalc=0
     getSubjectCalls=0; getMouseLockOffsetCalls=0; controllerUpdates=0; cameraModuleUpdates=0
     controllerErrors=0; frameCorrelationErrors=0; correlationFramesExcluded=0
-    correlationErrorSources={}; optionalDiagnosticReadErrors=0; lastCorrelationErrorSource="none"; subjectClassCounts={}
+    correlationErrorSources={}; optionalDiagnosticReadErrors=0
+    telemetryCaptureErrors=0; telemetryCaptureErrorSources={}; telemetryBoundariesCaptured=0
+    lastCorrelationErrorSource="none"; subjectClassCounts={}
     lastCorrelatedFrame=""; lastSubjectDetail=""; lastGeometryDetail=""; lastStandingDetail=""
     phaseStats={touch=newPhaseStats(),relay=newPhaseStats()}
     pairedStats={touch=newPairedStats(),relay=newPairedStats()}
@@ -1393,6 +1561,7 @@ local function stopProbe()
         return true,"already-stopped"
     end
     SEGCFG.closeCurrentSegment("probe-stop")
+    SEGCFG.pruneTelemetryToMatched()
     probeDuration=os.clock()-probeStartedAt
     probeRunning=false; currentFrame=nil; currentCalc=nil; currentPhase="none"; currentWindow="none"; phaseState="stopped"
     stateAtStop={relay=relayEnabled(),rotate=readRotate(getActiveController()),preferred=UserInputService.PreferredInput}
@@ -2043,6 +2212,41 @@ function SEGCFG.matchSegments()
     return pairs
 end
 
+function SEGCFG.telemetryCoverage(pairs)
+    local result={samples=0,complete=0,missing=0,controllerCalls=0}
+    for _,pair in ipairs(pairs or {}) do
+        for _,route in ipairs({"touch","relay"}) do
+            for _,sample in ipairs((pair[route] and pair[route].samples) or {}) do
+                result.samples+=1
+                local telemetry=sample.temporalPoseTelemetry
+                local calls=type(telemetry)=="table" and telemetry.controllerCalls or nil
+                result.controllerCalls+=type(calls)=="table" and #calls or 0
+                local complete=type(telemetry)=="table"
+                    and type(telemetry.cameraModuleBefore)=="table"
+                    and type(telemetry.cameraModuleAfter)=="table"
+                    and type(calls)=="table" and #calls>0
+                    and type(calls[1].before)=="table" and type(calls[1].after)=="table"
+                if complete then result.complete+=1 else result.missing+=1 end
+            end
+        end
+    end
+    return result
+end
+
+function SEGCFG.pruneTelemetryToMatched()
+    local keep={}
+    for _,pair in ipairs(SEGCFG.matchSegments()) do
+        keep[pair.touch]=true; keep[pair.relay]=true
+    end
+    for _,route in ipairs({"touch","relay"}) do
+        for _,segment in ipairs(segmentStats[route].eligible) do
+            if not keep[segment] then
+                for _,sample in ipairs(segment.samples or {}) do sample.temporalPoseTelemetry=nil end
+            end
+        end
+    end
+end
+
 function SEGCFG.updateCoverageState(segment)
     local pairs=SEGCFG.matchSegments()
     SEGCFG.livePotentialPairs=#pairs
@@ -2240,13 +2444,14 @@ end
 getgenv().PCV614Diagnostics=function()
     local base=baseSafe()
     local decision=SEGCFG.segmentClassification()
+    local telemetryCoverage=SEGCFG.telemetryCoverage(decision.pairs)
     local frozen=(not probeRunning and stateAtStop) or {
         relay=relayEnabled(),rotate=readRotate(getActiveController()),preferred=UserInputService.PreferredInput,
     }
     local result={
-        version="V614-ControlledYawPitchMatching-AcquisitionR2",
+        version="V614-ControlledYawPitchMatching-TemporalPoseTelemetryR1",
         bridgeMode=getgenv().PCInputBridgeMode,
-        probePurpose="controlled-yaw-pitch-segment-matching",
+        probePurpose="controlled-yaw-pitch-segment-matching-plus-read-only-temporal-pose-telemetry",
         probeRunning=probeRunning,
         probeFrames=probeFrames,
         probeDuration=round(probeRunning and (os.clock()-probeStartedAt) or probeDuration,3),
@@ -2263,6 +2468,13 @@ getgenv().PCV614Diagnostics=function()
         callbackErrors=callbackErrors,
         controllerErrors=controllerErrors,
         frameCorrelationErrors=frameCorrelationErrors,
+        telemetryCaptureErrors=telemetryCaptureErrors,
+        telemetryCaptureErrorSources=countSummary(telemetryCaptureErrorSources),
+        telemetryBoundariesCaptured=telemetryBoundariesCaptured,
+        telemetryMatchedSamples=telemetryCoverage.samples,
+        telemetryMatchedSamplesComplete=telemetryCoverage.complete,
+        telemetryMatchedSamplesMissing=telemetryCoverage.missing,
+        telemetryMatchedControllerCalls=telemetryCoverage.controllerCalls,
         traceDropped=traceDropped,
         evidenceDropped=evidenceDropped,
         handlerCallsTouch=handlerCallsTouch,
@@ -2303,12 +2515,16 @@ getgenv().PCV614Diagnostics=function()
         relayErrors=base.relayErrors,
         v604CallbackErrors=base.callbackErrors,
         validationReady=callbackErrors==0 and frameCorrelationErrors==0 and uiRefreshErrors==0
+            and telemetryCaptureErrors==0
+            and telemetryCoverage.samples>0 and telemetryCoverage.missing==0
             and decision.matchedComparisonUnits>=SEGCFG.minMatched
             and completedWindows.A1 and completedWindows.B1 and completedWindows.B2 and completedWindows.A2,
         observationalOnly=true,
         writesCameraCFrame=false,
         writesRootPartCFrame=false,
         writesHeadCFrame=false,
+        writesJointTransforms=false,
+        controlsAnimations=false,
         writesCameraFocus=false,
         altersCameraSubject=false,
         forcesPreferredInput=false,
@@ -2412,6 +2628,18 @@ getgenv().PCV614Diagnostics=function()
         experimentEligible=decision.experimentEligible,
         v615Justified=decision.v615Justified,
         astra6MaxJustified=decision.astra6MaxJustified,
+        temporalConfoundResolved="unproved: requires fresh TemporalPoseTelemetryR1 runtime and pair-by-pair control",
+        initialPoseConfoundResolved="unproved: requires fresh TemporalPoseTelemetryR1 runtime and overlap assessment",
+        rootMotionContribution="unproved pending full PrimaryPart CFrame boundary telemetry",
+        jointTransformContribution="unproved pending Neck/Waist/RootJoint Transform telemetry",
+        animationProgressContribution="unproved pending active-track state and TimePosition telemetry",
+        projectionDepthContribution="unproved pending full Camera CFrame counterfactual reprojection",
+        headHorizontalEffectAfterTemporalControl="unproved pending telemetry-controlled analysis",
+        firstConcreteGeometricDivergence="unproved after temporal/initial-pose control; prior V614 first divergence remains unequal segment duration/frame count",
+        causalMechanismProved=false,
+        implementationTargetIdentified=false,
+        telemetryV615Justified=false,
+        telemetryAstra6MaxJustified=false,
     }
     local names={
         "frames","inputFrames","calcFrames","writeCount","writeXAbs","writeYAbs",
@@ -2471,7 +2699,10 @@ local REPORT_KEYS={
     "version","bridgeMode","probePurpose","probeRunning","probeFrames","probeDuration","discoveryStatus",
     "discoveryErrors","horizontalClampMin","horizontalClampMax","horizontalBoundsSource",
     "hooksCurrentlyInstalled","hooksInstalledTotal","hookInstallFailures","hookRestoreOk","hookRestoreDetail",
-    "callbackErrors","controllerErrors","frameCorrelationErrors","traceDropped","evidenceDropped",
+    "callbackErrors","controllerErrors","frameCorrelationErrors","telemetryCaptureErrors",
+    "telemetryCaptureErrorSources","telemetryBoundariesCaptured","telemetryMatchedSamples",
+    "telemetryMatchedSamplesComplete","telemetryMatchedSamplesMissing","telemetryMatchedControllerCalls",
+    "traceDropped","evidenceDropped",
     "handlerCallsTouch","handlerCallsMouseTouch","nonzeroWritesTouch","nonzeroWritesRelay",
     "calculateCalls","firstCalculateCalls","getCameraLookCallsInCalc","getSubjectCalls",
     "getMouseLockOffsetCalls","controllerUpdates","cameraModuleUpdates","subjectClassSummary",
@@ -2487,7 +2718,7 @@ local REPORT_KEYS={
     "joystickCriterionAvailable","joystickCriterionLast","relayEnabled","rotateAtStop",
     "preferredInputAtStop","ownershipGateProven","relayValidationReady","touchRoleConflicts",
     "joystickMouseCrossovers","relayErrors","v604CallbackErrors","validationReady","observationalOnly",
-    "writesCameraCFrame","writesRootPartCFrame","writesHeadCFrame","writesCameraFocus",
+    "writesCameraCFrame","writesRootPartCFrame","writesHeadCFrame","writesJointTransforms","controlsAnimations","writesCameraFocus",
     "altersCameraSubject","forcesPreferredInput","forcesMouseBehavior","forcesRotationType","forcesAutoRotate",
     "changesSensitivityGainPhysics","usesSyntheticUserInputObject","usesFireSignal","usesVirtualInput",
     "preservesV604Ownership","fallbackV500Preserved",
@@ -2521,6 +2752,115 @@ local PHASE_FIELDS={
     "StandingPrimaryDriftPerYawDegree","StandingHeadSamples","StandingHeadDriftPerYawDegree",
     "MovingPrimarySamples","MovingPrimaryDriftPerYawDegree","ControllerCameraDistanceMean",
 }
+
+function SEGCFG.compactToken(value,limit)
+    local output=cleanText(value,limit or 100)
+    output=string.gsub(output,"[|;{}%[%],]","_")
+    output=string.gsub(output,"%s+","_")
+    return output
+end
+
+function SEGCFG.componentsText(values)
+    if type(values)~="table" then return "nil" end
+    local output={}
+    for index,value in ipairs(values) do output[index]=tostring(round(value,7)) end
+    return table.concat(output,",")
+end
+
+function SEGCFG.jointTelemetryText(joint)
+    if type(joint)~="table" then return "nil" end
+    return table.concat({
+        SEGCFG.compactToken(joint.part0,40)..">"..SEGCFG.compactToken(joint.part1,40),
+        "T="..SEGCFG.componentsText(joint.transform),"C0="..SEGCFG.componentsText(joint.c0),
+        "C1="..SEGCFG.componentsText(joint.c1),
+    },";")
+end
+
+function SEGCFG.animationTelemetryText(animation)
+    if type(animation)~="table" then return "state=unavailable tracks=[]" end
+    local tracks={}
+    for _,track in ipairs(animation.tracks or {}) do
+        tracks[#tracks+1]=table.concat({
+            SEGCFG.compactToken(track.animationId,100),SEGCFG.compactToken(track.name,50),
+            tostring(round(track.timePosition,7)),tostring(round(track.weightCurrent,7)),
+            tostring(round(track.weightTarget,7)),tostring(round(track.speed,7)),
+            tostring(track.isPlaying),tostring(track.looped),SEGCFG.compactToken(track.priority,40),
+            tostring(round(track.length,7)),
+        },"~")
+    end
+    return "state="..SEGCFG.compactToken(animation.humanoidState,60).." tracks=["..table.concat(tracks,"|").."]"
+end
+
+function SEGCFG.boundaryTelemetryText(snapshot)
+    if type(snapshot)~="table" then return "nil" end
+    local joints=snapshot.joints or {}
+    return table.concat({
+        "clock="..tostring(round(snapshot.clock,7)),
+        "cameraReadClock="..tostring(round(snapshot.cameraReadClock,7)),
+        "poseReadClock="..tostring(round(snapshot.poseReadClock,7)),
+        "captureEndClock="..tostring(round(snapshot.captureEndClock,7)),
+        "captureDurationMs="..tostring(round(snapshot.captureDurationMs,7)),
+        "cameraCF="..SEGCFG.componentsText(snapshot.cameraCFrame),
+        "fov="..tostring(round(snapshot.fieldOfView,7)),
+        "viewport="..SEGCFG.componentsText(snapshot.viewport),
+        "primaryCF="..SEGCFG.componentsText(snapshot.primaryCFrame),
+        "headCF="..SEGCFG.componentsText(snapshot.headCFrame),
+        "primaryToHead="..SEGCFG.componentsText(snapshot.primaryToHead),
+        "Neck={"..SEGCFG.jointTelemetryText(joints.Neck).."}",
+        "Waist={"..SEGCFG.jointTelemetryText(joints.Waist).."}",
+        "RootJoint={"..SEGCFG.jointTelemetryText(joints.RootJoint).."}",
+        "animation={"..SEGCFG.animationTelemetryText(snapshot.animation).."}",
+    }," ")
+end
+
+function SEGCFG.telemetrySampleReportLine(pairIndex,route,segment,sampleIndex,sample)
+    local telemetry=sample.temporalPoseTelemetry or {}
+    local parts={
+        "pair="..tostring(pairIndex),"route="..tostring(route),"segment="..tostring(segment.id),
+        "sample="..tostring(sampleIndex),"frame="..tostring(sample.frame),
+        "time="..tostring(round(sample.time,7)),"dt="..tostring(round(sample.dt,7)),
+        "cameraModuleBefore={"..SEGCFG.boundaryTelemetryText(telemetry.cameraModuleBefore).."}",
+        "cameraModuleAfter={"..SEGCFG.boundaryTelemetryText(telemetry.cameraModuleAfter).."}",
+        "controllerCalls="..tostring(#(telemetry.controllerCalls or {})),
+    }
+    for index,call in ipairs(telemetry.controllerCalls or {}) do
+        parts[#parts+1]="controller"..tostring(index).."Before={"..SEGCFG.boundaryTelemetryText(call.before).."}"
+        parts[#parts+1]="controller"..tostring(index).."After={"..SEGCFG.boundaryTelemetryText(call.after).."}"
+    end
+    return table.concat(parts," ")
+end
+
+function SEGCFG.componentsToCFrame(values)
+    if type(values)~="table" or #values<12 then return nil end
+    local ok,value=pcall(function() return CFrame.new(table.unpack(values,1,12)) end)
+    return ok and value or nil
+end
+
+function SEGCFG.cframeDeltaText(firstValues,lastValues)
+    local first,last=SEGCFG.componentsToCFrame(firstValues),SEGCFG.componentsToCFrame(lastValues)
+    if not first or not last then return "unavailable" end
+    local relative=first:ToObjectSpace(last)
+    local _,angle=relative:ToAxisAngle()
+    return string.format("translation=%.7f rotationDeg=%.7f",relative.Position.Magnitude,math.deg(math.abs(angle)))
+end
+
+function SEGCFG.segmentTelemetrySummary(segment)
+    local first=segment.samples and segment.samples[1]
+    local last=segment.samples and segment.samples[#segment.samples]
+    local firstBoundary=first and first.temporalPoseTelemetry and first.temporalPoseTelemetry.cameraModuleBefore
+    local lastBoundary=last and last.temporalPoseTelemetry and last.temporalPoseTelemetry.cameraModuleAfter
+    return table.concat({
+        "duration="..tostring(round(segment.duration,7)),"frames="..tostring(segment.frameCount),
+        "cameraDelta={"..SEGCFG.cframeDeltaText(firstBoundary and firstBoundary.cameraCFrame,lastBoundary and lastBoundary.cameraCFrame).."}",
+        "primaryDelta={"..SEGCFG.cframeDeltaText(firstBoundary and firstBoundary.primaryCFrame,lastBoundary and lastBoundary.primaryCFrame).."}",
+        "primaryToHeadDelta={"..SEGCFG.cframeDeltaText(firstBoundary and firstBoundary.primaryToHead,lastBoundary and lastBoundary.primaryToHead).."}",
+    }," ")
+end
+
+function SEGCFG.telemetryPairReportLine(pair,index)
+    return "pair="..tostring(index).." touch={"..SEGCFG.segmentTelemetrySummary(pair.touch)
+        .."} relay={"..SEGCFG.segmentTelemetrySummary(pair.relay).."}"
+end
 
 local function sampleReportLine(sample)
     local parts={
@@ -2638,6 +2978,19 @@ getgenv().PCV614Report=function(includeEvidence)
         local matched=SEGCFG.matchSegments()
         for index,pair in ipairs(matched) do lines[#lines+1]=SEGCFG.pairReportLine(pair,index) end
         lines[#lines+1]=""
+        lines[#lines+1]="=== V614 MATCHED TEMPORAL POSE TELEMETRY ==="
+        lines[#lines+1]="schema = numeric read-only snapshots; cameraCF/primaryCF/headCF/primaryToHead/C0/C1/Transform are CFrame GetComponents x,y,z,r00,r01,r02,r10,r11,r12,r20,r21,r22"
+        lines[#lines+1]="animationTrackSchema = AnimationId~Name~TimePosition~WeightCurrent~WeightTarget~Speed~IsPlaying~Looped~Priority~Length"
+        for index,pair in ipairs(matched) do
+            lines[#lines+1]=SEGCFG.telemetryPairReportLine(pair,index)
+            for _,route in ipairs({"touch","relay"}) do
+                local segment=pair[route]
+                for sampleIndex,sample in ipairs(segment.samples or {}) do
+                    lines[#lines+1]=SEGCFG.telemetrySampleReportLine(index,route,segment,sampleIndex,sample)
+                end
+            end
+        end
+        lines[#lines+1]=""
         lines[#lines+1]="=== V614 FOCUSED TARGET EVIDENCE ==="
         for _,line in ipairs(evidence) do lines[#lines+1]=line end
         if type(baseReport)=="function" then
@@ -2662,7 +3015,7 @@ getgenv().PCV614Report=function(includeEvidence)
     lines[#lines+1]=""
     lines[#lines+1]="=== V614 REQUIRED AUDIT/SEGMENT DECISION ==="
     lines[#lines+1]="LuauValidation = pass: luau-compile"
-    lines[#lines+1]="LoaderValidation = pass: luau-compile plus cache-busted V614 R2 URL"
+    lines[#lines+1]="LoaderValidation = pass: luau-compile plus cache-busted V614 TemporalPoseTelemetryR1 URL"
     lines[#lines+1]="StateTransitionValidation = pass: ABBA order, early-advance rejection, freeze at 16 per window, no 17th sample, 32 per route"
     lines[#lines+1]="ProhibitedWriteAudit = pass: no prohibited property writes or input APIs added"
     lines[#lines+1]="relaySegmentLossPrimaryCause = "..tostring(diagnostics.relaySegmentLossPrimaryCause)
@@ -2731,6 +3084,20 @@ getgenv().PCV614Report=function(includeEvidence)
     lines[#lines+1]="nextDiagnosticTarget = "..tostring(diagnostics.nextDiagnosticTarget)
     lines[#lines+1]="v615Justified = "..tostring(diagnostics.v615Justified)
     lines[#lines+1]="astra6MaxJustified = "..tostring(diagnostics.astra6MaxJustified)
+    lines[#lines+1]=""
+    lines[#lines+1]="=== V614 TEMPORAL/POSE CAUSAL DECISION ==="
+    lines[#lines+1]="temporalConfoundResolved = "..tostring(diagnostics.temporalConfoundResolved)
+    lines[#lines+1]="initialPoseConfoundResolved = "..tostring(diagnostics.initialPoseConfoundResolved)
+    lines[#lines+1]="rootMotionContribution = "..tostring(diagnostics.rootMotionContribution)
+    lines[#lines+1]="jointTransformContribution = "..tostring(diagnostics.jointTransformContribution)
+    lines[#lines+1]="animationProgressContribution = "..tostring(diagnostics.animationProgressContribution)
+    lines[#lines+1]="projectionDepthContribution = "..tostring(diagnostics.projectionDepthContribution)
+    lines[#lines+1]="headHorizontalEffectAfterTemporalControl = "..tostring(diagnostics.headHorizontalEffectAfterTemporalControl)
+    lines[#lines+1]="firstConcreteGeometricDivergence = "..tostring(diagnostics.firstConcreteGeometricDivergence)
+    lines[#lines+1]="causalMechanismProved = "..tostring(diagnostics.causalMechanismProved)
+    lines[#lines+1]="implementationTargetIdentified = "..tostring(diagnostics.implementationTargetIdentified)
+    lines[#lines+1]="v615Justified = "..tostring(diagnostics.telemetryV615Justified)
+    lines[#lines+1]="astra6MaxJustified = "..tostring(diagnostics.telemetryAstra6MaxJustified)
     return table.concat(lines,"\n")
 end
 
@@ -2821,10 +3188,10 @@ refreshLiveStatus=function()
         end
     end
     statusLabel.Text=string.format(
-        "phase=%s route=%s state=%s relay=%s\ncurrentSegmentYawDeg=%.2f/%.0f pitchNet/Abs=%.2f/%.2f\neligibleThisPhase=%d/%d • eligibleTouch=%d relay=%d\nmatchedPairsAvailable=%d targetPairs=%d\n%s\ncorrErr=%d uiErr=%d",
+        "phase=%s route=%s state=%s relay=%s\ncurrentSegmentYawDeg=%.2f/%.0f pitchNet/Abs=%.2f/%.2f\neligibleThisPhase=%d/%d • eligibleTouch=%d relay=%d\nmatchedPairsAvailable=%d targetPairs=%d\n%s\ncorrErr=%d telemetryErr=%d uiErr=%d",
         currentWindow,currentPhase,stateText,relayText,segmentYaw,SEGCFG.targetYaw,segmentPitch,segmentAbsPitch,
         eligibleThis,SEGCFG.phaseEligibleTarget,touchEligible,relayEligible,#pairs,SEGCFG.minMatched,
-        instruction,frameCorrelationErrors,uiRefreshErrors)
+        instruction,frameCorrelationErrors,telemetryCaptureErrors,uiRefreshErrors)
     statusLabel.TextColor3=(phaseState=="active" or phaseState=="complete")
         and Color3.fromRGB(74,222,128) or Color3.fromRGB(250,204,21)
     refreshPhaseButtons()
@@ -2848,7 +3215,7 @@ local function createPanel()
 
     local title=Instance.new("TextLabel")
     title.Size=UDim2.new(1,-48,0,34); title.Position=UDim2.fromOffset(13,7); title.BackgroundTransparency=1
-    title.Text="V614 R2 • COBERTURA PAREADA"; title.TextColor3=Color3.fromRGB(103,232,249)
+    title.Text="V614 • TELEMETRIA TEMPORAL"; title.TextColor3=Color3.fromRGB(103,232,249)
     title.TextSize=15; title.Font=Enum.Font.GothamBold; title.TextXAlignment=Enum.TextXAlignment.Left; title.Parent=panel
 
     local collapse=Instance.new("TextButton")
@@ -2984,5 +3351,5 @@ getgenv().__PCMobileAimCleanup=function()
     getgenv().__PCMobileAimCleanup=nil
 end
 
-addEvidence("READY","V614 Acquisition R2 ready; fixed coverage targets and unchanged controlled matching; observational geometry only")
-warn("[V614 R2] acquisition coverage revision ready | use mobile panel")
+addEvidence("READY","V614 TemporalPoseTelemetryR1 ready; Acquisition R2 and controlled matching unchanged; read-only matched telemetry")
+warn("[V614 TemporalPoseTelemetryR1] ready | use mobile panel")

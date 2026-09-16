@@ -6,10 +6,18 @@ local VirtualInputManager = game:GetService("VirtualInputManager")
 local player = Players.LocalPlayer
 local playerGui = player:WaitForChild("PlayerGui")
 
-local BIND_NAME = "__PCSelectiveWASDMove"
+local BIND_NAME = "__PCIndependentJoystickBridge"
+local OVERLAY_GUI_NAME = "PCIndependentJoystickAssist"
+
+-- Keyboard-like movement tuning.
 local PRESS_THRESHOLD = 0.30
 local RELEASE_THRESHOLD = 0.18
-local CONTROLLER_REFRESH_SECONDS = 0.20
+local DIRECTION_LATCH_SECONDS = 0.09
+
+-- Jump assist: explicit taps only. Fast double taps are spaced instead of spammed.
+local JUMP_MIN_INTERVAL = 0.11
+local JUMP_BUFFER_SECONDS = 0.14
+local SPACE_PULSE_SECONDS = 0.055
 
 local KEYCODES = {
     W = Enum.KeyCode.W,
@@ -18,8 +26,9 @@ local KEYCODES = {
     D = Enum.KeyCode.D,
 }
 
--- Remove every older movement experiment so two bridges cannot fight each other.
+-- Older experiments used different control architectures. Never let two run together.
 for _, cleanupName in ipairs({
+    "__PCIndependentJoystickCleanup",
     "__PCSelectiveWASDCleanup",
     "__PCClassicNativeKeysV3Cleanup",
     "__PCClassicNativeKeysCleanup",
@@ -35,102 +44,44 @@ pcall(function()
     RunService:UnbindFromRenderStep(BIND_NAME)
 end)
 
-local controls
-local touchController
-local originalGetMoveVector
-local previousOwnGetMoveVector
-local hadOwnGetMoveVector = false
-local lastControllerRefresh = 0
-local previousTouchGuiEnabled = nil
+local oldOverlay = playerGui:FindFirstChild(OVERLAY_GUI_NAME)
+if oldOverlay then
+    oldOverlay:Destroy()
+end
+
 local enabled = true
+local movementTouch = nil
+local movementCenter = nil
+local movementRadius = 64
+local latestTouchPosition = nil
+local latestNormalizedX = 0
+local latestNormalizedZ = 0
+local joystickFrame = nil
+local joystickFrameName = "none"
+local joystickFrameRefreshAt = 0
 
 local pressed = { W = false, A = false, S = false, D = false }
-local axisX = 0
-local axisZ = 0
-local latestRaw = Vector3.zero
+local axisX = { state = 0, releaseAt = nil }
+local axisZ = { state = 0, releaseAt = nil }
 local latestDigital = Vector3.zero
 local latestChord = "-"
 local latestPreferredInput = "?"
-local latestControllerEnabled = nil
-local latestMoveTouchActive = false
+
+local inputConnections = {}
+local jumpConnections = {}
 local keySendErrors = 0
 local moveApplyErrors = 0
-local controllerReenableCount = 0
-local hookInstallCount = 0
+local movementCaptures = 0
+local movementUpdates = 0
+local jumpRequests = 0
+local jumpPulses = 0
+local bufferedJumpCount = 0
 
-local function getControls()
-    if type(controls) == "table" then
-        return controls
-    end
-
-    local scripts = player:FindFirstChild("PlayerScripts")
-    local moduleScript = scripts and scripts:FindFirstChild("PlayerModule")
-    if not moduleScript then
-        return nil
-    end
-
-    local okModule, module = pcall(require, moduleScript)
-    if not okModule or type(module) ~= "table" then
-        return nil
-    end
-
-    local okControls, value = pcall(function()
-        if type(module.GetControls) == "function" then
-            return module:GetControls()
-        end
-        return rawget(module, "controls")
-    end)
-
-    if okControls and type(value) == "table" then
-        controls = value
-        return controls
-    end
-
-    return nil
-end
-
-local function isTouchPreferred()
-    local preferred = UserInputService.TouchEnabled
-    pcall(function()
-        preferred = UserInputService.PreferredInput == Enum.PreferredInput.Touch
-    end)
-    return preferred
-end
-
-local function resolveTouchController()
-    local controlModule = getControls()
-    if type(controlModule) ~= "table" then
-        return nil
-    end
-
-    local candidate = rawget(controlModule, "touchController")
-    if type(candidate) == "table" and type(candidate.GetMoveVector) == "function" then
-        return candidate
-    end
-
-    local active = rawget(controlModule, "activeController")
-    if type(active) == "table" and type(active.GetMoveVector) == "function" then
-        -- On the fixed/classic thumbstick moveTouchObject is nil until the finger
-        -- actually begins. While Touch is preferred, the active controller itself
-        -- is therefore the best pre-touch acquisition source.
-        if rawget(active, "moveTouchObject") ~= nil or isTouchPreferred() then
-            return active
-        end
-    end
-
-    -- Last-resort direct-field scan. This stays inside Controls; it does not scan
-    -- camera objects or hook arbitrary game tables.
-    for _, value in pairs(controlModule) do
-        if type(value) == "table" and type(value.GetMoveVector) == "function" then
-            local name = string.lower(tostring(rawget(value, "name") or rawget(value, "Name") or ""))
-            if string.find(name, "touch", 1, true) or rawget(value, "moveTouchObject") ~= nil then
-                return value
-            end
-        end
-    end
-
-    return nil
-end
+local jumpButton = nil
+local jumpOverlay = nil
+local lastJumpPulse = -math.huge
+local pendingJumpDeadline = nil
+local pendingSpaceReleaseToken = 0
 
 local function sendKey(name, down)
     local keyCode = KEYCODES[name]
@@ -160,7 +111,7 @@ end
 local function applyKeys(desired)
     desired = desired or {}
 
-    -- Release only keys that actually left the chord. W -> W+D keeps W held.
+    -- Release only keys that really left the chord. W -> W+D therefore keeps W held.
     for _, name in ipairs({ "W", "A", "S", "D" }) do
         if pressed[name] and not desired[name] then
             sendKey(name, false)
@@ -168,7 +119,7 @@ local function applyKeys(desired)
         end
     end
 
-    -- Press only newly-entered keys. No repeated key pulses while held.
+    -- Press only newly-entered keys. No key-up/key-down pulses while a direction is held.
     for _, name in ipairs({ "W", "A", "S", "D" }) do
         if desired[name] and not pressed[name] then
             if sendKey(name, true) then
@@ -184,197 +135,397 @@ local function releaseAllKeys()
     applyKeys({})
 end
 
-local function nextAxis(value, state)
-    if state == 0 then
-        if value >= PRESS_THRESHOLD then
-            return 1
-        elseif value <= -PRESS_THRESHOLD then
-            return -1
-        end
-        return 0
-    elseif state == 1 then
-        if value <= -PRESS_THRESHOLD then
-            return -1
-        elseif value < RELEASE_THRESHOLD then
-            return 0
-        end
+local function resetAxis(axis)
+    axis.state = 0
+    axis.releaseAt = nil
+end
+
+local function updateAxis(axis, value, now)
+    -- Opposite direction wins immediately; no sticky delay when intentionally reversing.
+    if value >= PRESS_THRESHOLD then
+        axis.state = 1
+        axis.releaseAt = nil
         return 1
-    elseif state == -1 then
-        if value >= PRESS_THRESHOLD then
-            return 1
-        elseif value > -RELEASE_THRESHOLD then
-            return 0
-        end
+    elseif value <= -PRESS_THRESHOLD then
+        axis.state = -1
+        axis.releaseAt = nil
         return -1
+    end
+
+    if axis.state == 1 then
+        if value >= RELEASE_THRESHOLD then
+            axis.releaseAt = nil
+            return 1
+        end
+        if axis.releaseAt == nil then
+            axis.releaseAt = now + DIRECTION_LATCH_SECONDS
+        end
+        if now < axis.releaseAt then
+            return 1
+        end
+        resetAxis(axis)
+        return 0
+    elseif axis.state == -1 then
+        if value <= -RELEASE_THRESHOLD then
+            axis.releaseAt = nil
+            return -1
+        end
+        if axis.releaseAt == nil then
+            axis.releaseAt = now + DIRECTION_LATCH_SECONDS
+        end
+        if now < axis.releaseAt then
+            return -1
+        end
+        resetAxis(axis)
+        return 0
     end
 
     return 0
 end
 
-local function updateIntent(rawVector)
-    if typeof(rawVector) ~= "Vector3" then
-        rawVector = Vector3.zero
+local function refreshDigitalIntent(now)
+    if movementTouch == nil or not enabled then
+        resetAxis(axisX)
+        resetAxis(axisZ)
+        latestDigital = Vector3.zero
+        releaseAllKeys()
+        return
     end
 
-    latestRaw = rawVector
-    axisX = nextAxis(rawVector.X, axisX)
-    axisZ = nextAxis(rawVector.Z, axisZ)
+    local x = updateAxis(axisX, latestNormalizedX, now)
+    local z = updateAxis(axisZ, latestNormalizedZ, now)
 
-    local desired = {
-        W = axisZ < 0,
-        S = axisZ > 0,
-        A = axisX < 0,
-        D = axisX > 0,
-    }
-    applyKeys(desired)
+    applyKeys({
+        W = z < 0,
+        S = z > 0,
+        A = x < 0,
+        D = x > 0,
+    })
 
-    local digital = Vector3.new(axisX, 0, axisZ)
+    local digital = Vector3.new(x, 0, z)
     if digital.Magnitude > 1 then
         digital = digital.Unit
     end
     latestDigital = digital
 end
 
-local function restoreHook()
-    if type(touchController) == "table" then
-        pcall(function()
-            if hadOwnGetMoveVector then
-                rawset(touchController, "GetMoveVector", previousOwnGetMoveVector)
-            else
-                rawset(touchController, "GetMoveVector", nil)
-            end
-        end)
+local function getTouchControlFrame()
+    local touchGui = playerGui:FindFirstChild("TouchGui")
+    if not touchGui then
+        return nil
     end
-
-    touchController = nil
-    originalGetMoveVector = nil
-    previousOwnGetMoveVector = nil
-    hadOwnGetMoveVector = false
+    return touchGui:FindFirstChild("TouchControlFrame", true)
 end
 
-local function installHook(controller)
-    if controller == touchController and type(originalGetMoveVector) == "function" then
+local function findNativeJoystickFrame(force)
+    local now = os.clock()
+    if not force and joystickFrame and joystickFrame.Parent and now < joystickFrameRefreshAt then
+        return joystickFrame
+    end
+    joystickFrameRefreshAt = now + 0.5
+
+    local touchControlFrame = getTouchControlFrame()
+    if not touchControlFrame then
+        joystickFrame = nil
+        joystickFrameName = "none"
+        return nil
+    end
+
+    local best = nil
+    local bestArea = 0
+    for _, obj in ipairs(touchControlFrame:GetDescendants()) do
+        if obj:IsA("GuiObject") then
+            local lower = string.lower(obj.Name)
+            if string.find(lower, "thumbstick", 1, true) or string.find(lower, "joystick", 1, true) then
+                local size = obj.AbsoluteSize
+                local area = size.X * size.Y
+                if size.X >= 48 and size.Y >= 48 and area > bestArea then
+                    best = obj
+                    bestArea = area
+                end
+            end
+        end
+    end
+
+    joystickFrame = best
+    joystickFrameName = best and best.Name or "fallback-left-bottom"
+    return best
+end
+
+local function pointInsideExpandedFrame(position, frame, padding)
+    if not frame or not frame.Parent then
+        return false
+    end
+    local topLeft = frame.AbsolutePosition - Vector2.new(padding, padding)
+    local bottomRight = frame.AbsolutePosition + frame.AbsoluteSize + Vector2.new(padding, padding)
+    return position.X >= topLeft.X
+        and position.Y >= topLeft.Y
+        and position.X <= bottomRight.X
+        and position.Y <= bottomRight.Y
+end
+
+local function fallbackJoystickHit(position)
+    local camera = workspace.CurrentCamera
+    local viewport = camera and camera.ViewportSize or Vector2.new(1108, 512)
+    -- Fallback is deliberately limited to the normal lower-left movement zone.
+    return position.X <= viewport.X * 0.33 and position.Y >= viewport.Y * 0.48
+end
+
+local function acquireMovementGeometry(inputPosition)
+    local frame = findNativeJoystickFrame(true)
+    if frame and pointInsideExpandedFrame(inputPosition, frame, 18) then
+        local nameLower = string.lower(frame.Name)
+        if string.find(nameLower, "dynamic", 1, true) then
+            movementCenter = inputPosition
+            movementRadius = math.max(52, math.min(frame.AbsoluteSize.X, frame.AbsoluteSize.Y) * 0.24)
+        else
+            movementCenter = frame.AbsolutePosition + frame.AbsoluteSize / 2
+            movementRadius = math.max(46, math.min(frame.AbsoluteSize.X, frame.AbsoluteSize.Y) / 2)
+        end
         return true
     end
 
-    restoreHook()
-    if type(controller) ~= "table" then
-        return false
+    if fallbackJoystickHit(inputPosition) then
+        local camera = workspace.CurrentCamera
+        local viewport = camera and camera.ViewportSize or Vector2.new(1108, 512)
+        movementCenter = inputPosition
+        movementRadius = math.max(52, math.min(viewport.X, viewport.Y) * 0.12)
+        return true
     end
 
-    local resolved
-    local okResolved = pcall(function()
-        resolved = controller.GetMoveVector
-    end)
-    if not okResolved or type(resolved) ~= "function" then
-        return false
-    end
-
-    local own = rawget(controller, "GetMoveVector")
-    hadOwnGetMoveVector = own ~= nil
-    previousOwnGetMoveVector = own
-    originalGetMoveVector = resolved
-    touchController = controller
-
-    rawset(controller, "GetMoveVector", function(self, ...)
-        local rawVector = originalGetMoveVector(self, ...)
-        if typeof(rawVector) == "Vector3" then
-            latestRaw = rawVector
-        end
-
-        if enabled then
-            -- The native classic joystick still owns/updates its touch and visuals,
-            -- but its analog locomotion contribution is removed here.
-            return Vector3.zero
-        end
-        return rawVector
-    end)
-
-    hookInstallCount += 1
-    return true
+    return false
 end
 
-local function refreshController(force)
+local function updateMovementPosition(position)
+    if typeof(position) == "Vector3" then
+        position = Vector2.new(position.X, position.Y)
+    end
+    if typeof(position) ~= "Vector2" or not movementCenter then
+        return
+    end
+
+    latestTouchPosition = position
+    local delta = position - movementCenter
+    local radius = math.max(1, movementRadius)
+    latestNormalizedX = delta.X / radius
+    latestNormalizedZ = delta.Y / radius
+    movementUpdates += 1
+end
+
+local function releaseMovementTouch()
+    movementTouch = nil
+    movementCenter = nil
+    latestTouchPosition = nil
+    latestNormalizedX = 0
+    latestNormalizedZ = 0
+    resetAxis(axisX)
+    resetAxis(axisZ)
+    latestDigital = Vector3.zero
+    releaseAllKeys()
+end
+
+local function getHumanoid()
+    local character = player.Character
+    if not character then
+        return nil
+    end
+    return character:FindFirstChildOfClass("Humanoid")
+end
+
+local function pulseJump()
     local now = os.clock()
-    if not force and now - lastControllerRefresh < CONTROLLER_REFRESH_SECONDS then
-        return
-    end
-    lastControllerRefresh = now
+    lastJumpPulse = now
+    pendingJumpDeadline = nil
+    jumpPulses += 1
 
-    local controller = resolveTouchController()
-    if type(controller) == "table" and controller ~= touchController then
-        installHook(controller)
-    end
-end
-
-local function keepNativeTouchMovementAlive()
-    local touchGui = playerGui:FindFirstChild("TouchGui")
-    if touchGui and touchGui:IsA("ScreenGui") then
-        if previousTouchGuiEnabled == nil then
-            previousTouchGuiEnabled = touchGui.Enabled
-        end
-        -- Keyboard events may make Roblox prefer KeyboardAndMouse. Keep the native
-        -- mobile GUI alive so the fixed thumbstick remains available to the finger.
-        if enabled and not touchGui.Enabled then
-            touchGui.Enabled = true
-        end
-    end
-
-    if type(touchController) ~= "table" then
-        latestControllerEnabled = nil
-        return
-    end
-
-    latestControllerEnabled = rawget(touchController, "enabled")
-    latestMoveTouchActive = rawget(touchController, "moveTouchObject") ~= nil
-
-    -- If the Controls module disabled only the touch movement controller after a
-    -- synthetic keyboard event, re-enable that controller. Its GetMoveVector is
-    -- still hooked to zero, so this cannot add a second locomotion source; it only
-    -- keeps the native joystick receiving/updating its own touch stream.
-    if enabled and latestControllerEnabled == false and type(touchController.Enable) == "function" then
-        local ok = pcall(function()
-            touchController:Enable(true)
+    -- One explicit user tap -> one clean jump request + one PC Space pulse.
+    local humanoid = getHumanoid()
+    if humanoid then
+        pcall(function()
+            humanoid.Jump = true
         end)
-        if ok then
-            controllerReenableCount += 1
-            latestControllerEnabled = rawget(touchController, "enabled")
-        end
     end
+
+    pcall(function()
+        VirtualInputManager:SendKeyEvent(true, Enum.KeyCode.Space, false, game)
+    end)
+
+    pendingSpaceReleaseToken += 1
+    local token = pendingSpaceReleaseToken
+    task.delay(SPACE_PULSE_SECONDS, function()
+        if token ~= pendingSpaceReleaseToken then
+            return
+        end
+        pcall(function()
+            VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.Space, false, game)
+        end)
+    end)
 end
 
-local function pollNativeVector()
-    if type(touchController) ~= "table" or type(originalGetMoveVector) ~= "function" then
-        updateIntent(Vector3.zero)
+local function requestJump()
+    if not enabled then
+        return
+    end
+    jumpRequests += 1
+
+    local now = os.clock()
+    if now - lastJumpPulse >= JUMP_MIN_INTERVAL then
+        pulseJump()
         return
     end
 
-    local rawVector
-    local ok = pcall(function()
-        rawVector = originalGetMoveVector(touchController)
-    end)
-    if not ok or typeof(rawVector) ~= "Vector3" then
-        rawVector = latestRaw
-    end
-
-    updateIntent(rawVector)
+    -- Do not spam two jumps into the same tiny mobile timing window. Keep one
+    -- pending request and fire it as soon as the clean PC-like interval opens.
+    pendingJumpDeadline = now + JUMP_BUFFER_SECONDS
+    bufferedJumpCount += 1
 end
 
-refreshController(true)
+local function findNativeJumpButton()
+    local touchControlFrame = getTouchControlFrame()
+    if not touchControlFrame then
+        return nil
+    end
 
-RunService:BindToRenderStep(BIND_NAME, Enum.RenderPriority.Input.Value + 6, function()
-    refreshController(false)
-    keepNativeTouchMovementAlive()
-    pollNativeVector()
+    local exact = touchControlFrame:FindFirstChild("JumpButton", true)
+    if exact and exact:IsA("GuiObject") then
+        return exact
+    end
 
-    local okMove = pcall(function()
-        -- Locomotion is explicit and therefore does not depend on whichever input
-        -- controller PreferredInput selected this frame. Touch camera stays Touch;
-        -- key events exist only for keyboard-specific game semantics.
-        player:Move(latestDigital, true)
+    for _, obj in ipairs(touchControlFrame:GetDescendants()) do
+        if obj:IsA("GuiObject") and string.find(string.lower(obj.Name), "jump", 1, true) then
+            local size = obj.AbsoluteSize
+            if size.X >= 40 and size.Y >= 40 then
+                return obj
+            end
+        end
+    end
+    return nil
+end
+
+local overlayGui = Instance.new("ScreenGui")
+overlayGui.Name = OVERLAY_GUI_NAME
+overlayGui.ResetOnSpawn = false
+overlayGui.IgnoreGuiInset = true
+overlayGui.DisplayOrder = 10000
+overlayGui.Parent = playerGui
+
+local function disconnectJumpOverlay()
+    for _, connection in ipairs(jumpConnections) do
+        pcall(function()
+            connection:Disconnect()
+        end)
+    end
+    table.clear(jumpConnections)
+
+    if jumpOverlay then
+        pcall(function()
+            jumpOverlay:Destroy()
+        end)
+        jumpOverlay = nil
+    end
+    jumpButton = nil
+end
+
+local function installJumpOverlay(button)
+    if button == jumpButton and jumpOverlay and jumpOverlay.Parent then
+        return
+    end
+
+    disconnectJumpOverlay()
+    if not button or not button.Parent then
+        return
+    end
+
+    jumpButton = button
+    jumpOverlay = Instance.new("TextButton")
+    jumpOverlay.Name = "JumpTimingAssistCapture"
+    jumpOverlay.BackgroundTransparency = 1
+    jumpOverlay.Text = ""
+    jumpOverlay.AutoButtonColor = false
+    jumpOverlay.Active = true
+    jumpOverlay.ZIndex = 100
+    jumpOverlay.Parent = overlayGui
+
+    jumpConnections[#jumpConnections + 1] = jumpOverlay.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.Touch then
+            requestJump()
+        end
     end)
-    if not okMove then
-        moveApplyErrors += 1
+end
+
+local function syncJumpOverlay()
+    local button = findNativeJumpButton()
+    if button ~= jumpButton or not jumpOverlay or not jumpOverlay.Parent then
+        installJumpOverlay(button)
+    end
+
+    if not jumpOverlay or not jumpButton or not jumpButton.Parent then
+        return
+    end
+
+    jumpOverlay.Visible = enabled and jumpButton.Visible
+    jumpOverlay.Position = UDim2.fromOffset(jumpButton.AbsolutePosition.X, jumpButton.AbsolutePosition.Y)
+    jumpOverlay.Size = UDim2.fromOffset(jumpButton.AbsoluteSize.X, jumpButton.AbsoluteSize.Y)
+end
+
+inputConnections[#inputConnections + 1] = UserInputService.InputBegan:Connect(function(input)
+    if not enabled or movementTouch ~= nil then
+        return
+    end
+    if input.UserInputType ~= Enum.UserInputType.Touch then
+        return
+    end
+
+    local position = Vector2.new(input.Position.X, input.Position.Y)
+    if acquireMovementGeometry(position) then
+        movementTouch = input
+        movementCaptures += 1
+        updateMovementPosition(input.Position)
+        refreshDigitalIntent(os.clock())
+    end
+end)
+
+inputConnections[#inputConnections + 1] = UserInputService.InputChanged:Connect(function(input)
+    if enabled and input == movementTouch then
+        updateMovementPosition(input.Position)
+    end
+end)
+
+inputConnections[#inputConnections + 1] = UserInputService.InputEnded:Connect(function(input)
+    if input == movementTouch then
+        releaseMovementTouch()
+    end
+end)
+
+findNativeJoystickFrame(true)
+syncJumpOverlay()
+
+-- PlayerModule is allowed to switch PreferredInput between Touch and Keyboard.
+-- It no longer owns the final locomotion value: this write happens at the end of
+-- PreRender, after the normal ControlModule render step. Camera Touch is untouched.
+RunService:BindToRenderStep(BIND_NAME, Enum.RenderPriority.Last.Value, function()
+    local now = os.clock()
+
+    if enabled then
+        refreshDigitalIntent(now)
+
+        local okMove = pcall(function()
+            player:Move(latestDigital, true)
+        end)
+        if not okMove then
+            moveApplyErrors += 1
+        end
+
+        if pendingJumpDeadline then
+            if now > pendingJumpDeadline then
+                pendingJumpDeadline = nil
+            elseif now - lastJumpPulse >= JUMP_MIN_INTERVAL then
+                pulseJump()
+            end
+        end
+
+        syncJumpOverlay()
+        findNativeJoystickFrame(false)
     end
 
     pcall(function()
@@ -382,19 +533,21 @@ RunService:BindToRenderStep(BIND_NAME, Enum.RenderPriority.Input.Value + 6, func
     end)
 end)
 
-getgenv().PCSelectiveWASD = {
-    Version = "1.0-native-touch-selective-keyboard-semantics",
+getgenv().PCIndependentJoystick = {
+    Version = "4.0-independent-touch-final-move-jump-buffer",
     SetEnabled = function(value)
         enabled = value ~= false
+        overlayGui.Enabled = enabled
         if not enabled then
-            axisX, axisZ = 0, 0
-            latestDigital = Vector3.zero
-            releaseAllKeys()
+            releaseMovementTouch()
+            pendingJumpDeadline = nil
+            pendingSpaceReleaseToken += 1
+            pcall(function()
+                VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.Space, false, game)
+            end)
             pcall(function()
                 player:Move(Vector3.zero, true)
             end)
-        else
-            refreshController(true)
         end
         return enabled
     end,
@@ -403,42 +556,57 @@ getgenv().PCSelectiveWASD = {
     end,
     GetState = function()
         return {
-            rawVector = latestRaw,
-            digitalVector = latestDigital,
             chord = latestChord,
+            digitalVector = latestDigital,
+            normalizedX = latestNormalizedX,
+            normalizedZ = latestNormalizedZ,
+            movementTouchActive = movementTouch ~= nil,
+            joystickFrame = joystickFrameName,
             preferredInput = latestPreferredInput,
-            controllerEnabled = latestControllerEnabled,
-            moveTouchActive = latestMoveTouchActive,
-            hookInstallCount = hookInstallCount,
-            controllerReenableCount = controllerReenableCount,
+            directionLatchSeconds = DIRECTION_LATCH_SECONDS,
+            jumpMinInterval = JUMP_MIN_INTERVAL,
+            movementCaptures = movementCaptures,
+            movementUpdates = movementUpdates,
+            jumpRequests = jumpRequests,
+            jumpPulses = jumpPulses,
+            bufferedJumpCount = bufferedJumpCount,
             keySendErrors = keySendErrors,
             moveApplyErrors = moveApplyErrors,
         }
     end,
 }
 
-getgenv().__PCSelectiveWASDCleanup = function()
+getgenv().__PCIndependentJoystickCleanup = function()
     enabled = false
-    axisX, axisZ = 0, 0
-    latestDigital = Vector3.zero
-    releaseAllKeys()
+    releaseMovementTouch()
+    pendingJumpDeadline = nil
+    pendingSpaceReleaseToken += 1
 
     pcall(function()
         RunService:UnbindFromRenderStep(BIND_NAME)
     end)
     pcall(function()
+        VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.Space, false, game)
+    end)
+    pcall(function()
         player:Move(Vector3.zero, true)
     end)
 
-    restoreHook()
-
-    local touchGui = playerGui:FindFirstChild("TouchGui")
-    if touchGui and touchGui:IsA("ScreenGui") and previousTouchGuiEnabled ~= nil then
+    for _, connection in ipairs(inputConnections) do
         pcall(function()
-            touchGui.Enabled = previousTouchGuiEnabled
+            connection:Disconnect()
+        end)
+    end
+    table.clear(inputConnections)
+
+    disconnectJumpOverlay()
+
+    if overlayGui then
+        pcall(function()
+            overlayGui:Destroy()
         end)
     end
 
-    getgenv().PCSelectiveWASD = nil
-    getgenv().__PCSelectiveWASDCleanup = nil
+    getgenv().PCIndependentJoystick = nil
+    getgenv().__PCIndependentJoystickCleanup = nil
 end

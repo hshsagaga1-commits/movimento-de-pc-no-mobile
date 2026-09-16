@@ -22,8 +22,17 @@ local KEYCODES = {
     D = Enum.KeyCode.D,
 }
 
-if getgenv().__PCClassicNativeKeysV3Cleanup then
-    pcall(getgenv().__PCClassicNativeKeysV3Cleanup)
+-- Kill every older experiment first; V2 kept TouchGui enabled every frame and
+-- would directly fight V3's keyboard-only control path if both survived.
+for _, cleanupName in ipairs({
+    "__PCClassicNativeKeysV3Cleanup",
+    "__PCClassicNativeKeysCleanup",
+    "__PCClassicWASDCleanup",
+}) do
+    local cleanup = getgenv()[cleanupName]
+    if type(cleanup) == "function" then
+        pcall(cleanup)
+    end
 end
 
 local oldGui = playerGui:FindFirstChild(GUI_NAME)

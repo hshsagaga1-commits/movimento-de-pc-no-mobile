@@ -9,9 +9,14 @@ local playerGui = player:WaitForChild("PlayerGui")
 local GUI_NAME = "PCClassicNativeKeys"
 local WATCH_BIND = "__PCClassicNativeKeysWatch"
 
--- Fixed/classic feel: small activation deadzone, then a sticky 8-way keyboard sector.
+-- Fixed/classic feel. The visible stick remains compact, but the invisible touch
+-- owner is larger so a drag can travel through/around the full 8-way circle
+-- without losing ownership when VIM makes KeyboardAndMouse the latest input.
 local BASE_SIZE = 128
 local THUMB_SIZE = 52
+local TOUCH_SIZE = 208
+local BASE_LEFT = 28
+local BASE_BOTTOM = 34
 local ENGAGE_RATIO = 0.22
 local RELEASE_RATIO = 0.13
 local SECTOR_HYSTERESIS_DEG = 8
@@ -60,6 +65,7 @@ local function sendKey(keyName, isDown)
     if not keyCode then
         return false
     end
+
     local ok = pcall(function()
         VirtualInputManager:SendKeyEvent(isDown, keyCode, false, game)
     end)
@@ -69,7 +75,7 @@ end
 local function applyDesiredKeys(desired)
     desired = desired or {}
 
-    -- Release only keys that actually left the chord. W -> W+D therefore keeps W down.
+    -- Release only keys that actually left the chord. W -> W+D keeps W down.
     for _, keyName in ipairs({ "W", "A", "S", "D" }) do
         if pressed[keyName] and not desired[keyName] then
             sendKey(keyName, false)
@@ -77,7 +83,7 @@ local function applyDesiredKeys(desired)
         end
     end
 
-    -- Press only newly-entered keys. No key-up/key-down pulse for keys that remain held.
+    -- Press only newly-entered keys. No pulse for a key that stays held.
     for _, keyName in ipairs({ "W", "A", "S", "D" }) do
         if desired[keyName] and not pressed[keyName] then
             if sendKey(keyName, true) then
@@ -213,7 +219,7 @@ local function refreshTouchController()
         return
     end
 
-    -- Prefer the dedicated touch controller so keyboard key events remain untouched.
+    -- Prefer the dedicated touch controller so synthetic keyboard events remain untouched.
     local candidate = rawget(controlModule, "touchController")
     if type(candidate) ~= "table" then
         local active = rawget(controlModule, "activeController")
@@ -271,13 +277,14 @@ gui.Parent = playerGui
 
 local base = Instance.new("Frame")
 base.Name = "ClassicBase"
-base.Active = true
+base.Active = false
 base.AnchorPoint = Vector2.new(0, 1)
 base.Size = UDim2.fromOffset(BASE_SIZE, BASE_SIZE)
-base.Position = UDim2.new(0, 28, 1, -34)
+base.Position = UDim2.new(0, BASE_LEFT, 1, -BASE_BOTTOM)
 base.BackgroundColor3 = Color3.fromRGB(32, 32, 32)
 base.BackgroundTransparency = 0.42
 base.BorderSizePixel = 0
+base.ZIndex = 10
 base.Parent = gui
 
 local baseCorner = Instance.new("UICorner")
@@ -298,11 +305,32 @@ thumb.Position = UDim2.fromScale(0.5, 0.5)
 thumb.BackgroundColor3 = Color3.fromRGB(210, 210, 210)
 thumb.BackgroundTransparency = 0.28
 thumb.BorderSizePixel = 0
+thumb.ZIndex = 11
 thumb.Parent = base
 
 local thumbCorner = Instance.new("UICorner")
 thumbCorner.CornerRadius = UDim.new(1, 0)
 thumbCorner.Parent = thumb
+
+-- This TextButton is the touch owner. It intentionally follows the pattern from
+-- the working PC-controller reference: InputBegan/Changed/Ended stay attached to
+-- the same GUI touch stream even while VIM emits real keyboard events.
+local touchArea = Instance.new("TextButton")
+touchArea.Name = "TouchSenseLayer"
+touchArea.AnchorPoint = Vector2.new(0.5, 0.5)
+touchArea.Size = UDim2.fromOffset(TOUCH_SIZE, TOUCH_SIZE)
+touchArea.Position = UDim2.new(
+    0,
+    BASE_LEFT + BASE_SIZE / 2,
+    1,
+    -(BASE_BOTTOM + BASE_SIZE / 2)
+)
+touchArea.BackgroundTransparency = 1
+touchArea.Text = ""
+touchArea.AutoButtonColor = false
+touchArea.Active = true
+touchArea.ZIndex = 20
+touchArea.Parent = gui
 
 local function updateFromScreenPosition(screenPos)
     if typeof(screenPos) == "Vector3" then
@@ -353,7 +381,7 @@ local function resetJoystick()
     releaseAllKeys()
 end
 
-connections[#connections + 1] = base.InputBegan:Connect(function(input)
+connections[#connections + 1] = touchArea.InputBegan:Connect(function(input)
     if not enabled or activeTouch ~= nil then
         return
     end
@@ -365,12 +393,20 @@ connections[#connections + 1] = base.InputBegan:Connect(function(input)
     updateFromScreenPosition(input.Position)
 end)
 
-connections[#connections + 1] = UserInputService.InputChanged:Connect(function(input)
-    if input == activeTouch and enabled then
+connections[#connections + 1] = touchArea.InputChanged:Connect(function(input)
+    if enabled and input == activeTouch then
         updateFromScreenPosition(input.Position)
     end
 end)
 
+connections[#connections + 1] = touchArea.InputEnded:Connect(function(input)
+    if input == activeTouch then
+        resetJoystick()
+    end
+end)
+
+-- Global InputEnded is only a safety net. Movement itself is intentionally NOT
+-- read from the global InputChanged stream anymore.
 connections[#connections + 1] = UserInputService.InputEnded:Connect(function(input)
     if input == activeTouch then
         resetJoystick()
@@ -381,8 +417,8 @@ RunService:BindToRenderStep(WATCH_BIND, Enum.RenderPriority.Input.Value + 1, fun
     refreshTouchController()
     hideNativeThumbstickVisuals()
 
-    -- Key events can make Roblox consider keyboard the latest input. Keep the mobile
-    -- controls container alive so jump/other native touch buttons do not disappear.
+    -- Real key events can make Roblox consider keyboard the latest input. Keep
+    -- the rest of the native touch buttons alive; only movement is replaced.
     local touchGui = playerGui:FindFirstChild("TouchGui")
     if touchGui and touchGui:IsA("ScreenGui") and enabled then
         touchGui.Enabled = true
@@ -390,7 +426,7 @@ RunService:BindToRenderStep(WATCH_BIND, Enum.RenderPriority.Input.Value + 1, fun
 end)
 
 getgenv().PCClassicNativeKeys = {
-    Version = "2.0-persistent-real-wasd",
+    Version = "2.1-owned-touch-stream",
     SetEnabled = function(value)
         enabled = value ~= false
         gui.Enabled = enabled
@@ -412,6 +448,7 @@ getgenv().PCClassicNativeKeys = {
             S = pressed.S,
             D = pressed.D,
             sector = currentSector,
+            touchActive = activeTouch ~= nil,
         }
     end,
 }

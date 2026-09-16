@@ -4,10 +4,12 @@ local UserInputService = game:GetService("UserInputService")
 
 local player = Players.LocalPlayer
 
--- Tuned for a fixed/classic thumbstick: small deadzone, then full digital axes.
-local PRESS_THRESHOLD = 0.34
-local RELEASE_THRESHOLD = 0.22
-local STOP_MAGNITUDE = 0.08
+-- Rigid 8-way keyboard-like snapping for the native/classic thumbstick.
+-- The Roblox joystick UI stays native; only its movement vector is quantized.
+local ENGAGE_MAGNITUDE = 0.22
+local RELEASE_MAGNITUDE = 0.14
+local DIAGONAL_ENTER_RATIO = 0.68
+local DIAGONAL_RELEASE_RATIO = 0.52
 
 if getgenv().__PCClassicWASDCleanup then
     pcall(getgenv().__PCClassicWASDCleanup)
@@ -20,8 +22,18 @@ local originalGetMoveVector
 local previousOwnGetMoveVector
 local hadOwnGetMoveVector = false
 local watchConnection
-local latchedX, latchedZ = 0, 0
 local enabled = true
+local engaged = false
+local snapMode = "none"
+
+local function sign(value)
+    if value > 0 then
+        return 1
+    elseif value < 0 then
+        return -1
+    end
+    return 0
+end
 
 local function getControls()
     if type(controls) == "table" then
@@ -56,49 +68,58 @@ local function getControls()
     return nil
 end
 
-local function nextAxis(value, state)
-    if state == 0 then
-        if value >= PRESS_THRESHOLD then
-            return 1
-        elseif value <= -PRESS_THRESHOLD then
-            return -1
-        end
-        return 0
-    elseif state == 1 then
-        if value <= -PRESS_THRESHOLD then
-            return -1
-        elseif value < RELEASE_THRESHOLD then
-            return 0
-        end
-        return 1
-    elseif state == -1 then
-        if value >= PRESS_THRESHOLD then
-            return 1
-        elseif value > -RELEASE_THRESHOLD then
-            return 0
-        end
-        return -1
-    end
-
-    return 0
+local function resetSnapState()
+    engaged = false
+    snapMode = "none"
 end
 
 local function quantize(rawVector)
     if typeof(rawVector) ~= "Vector3" then
-        latchedX, latchedZ = 0, 0
+        resetSnapState()
         return rawVector
     end
 
-    if rawVector.Magnitude < STOP_MAGNITUDE then
-        latchedX, latchedZ = 0, 0
+    local magnitude = rawVector.Magnitude
+
+    if not engaged then
+        if magnitude < ENGAGE_MAGNITUDE then
+            snapMode = "none"
+            return Vector3.zero
+        end
+        engaged = true
+    elseif magnitude < RELEASE_MAGNITUDE then
+        resetSnapState()
         return Vector3.zero
     end
 
-    local nextX = nextAxis(rawVector.X, latchedX)
-    local nextZ = nextAxis(rawVector.Z, latchedZ)
-    latchedX, latchedZ = nextX, nextZ
+    local x = rawVector.X
+    local z = rawVector.Z
+    local absX = math.abs(x)
+    local absZ = math.abs(z)
+    local dominant = math.max(absX, absZ)
 
-    return Vector3.new(nextX, 0, nextZ)
+    if dominant <= 1e-6 then
+        resetSnapState()
+        return Vector3.zero
+    end
+
+    local ratio = math.min(absX, absZ) / dominant
+    local diagonalThreshold = snapMode == "diag"
+        and DIAGONAL_RELEASE_RATIO
+        or DIAGONAL_ENTER_RATIO
+
+    if ratio >= diagonalThreshold then
+        snapMode = "diag"
+        return Vector3.new(sign(x), 0, sign(z))
+    end
+
+    if absX > absZ then
+        snapMode = "x"
+        return Vector3.new(sign(x), 0, 0)
+    end
+
+    snapMode = "z"
+    return Vector3.new(0, 0, sign(z))
 end
 
 local function restoreHook()
@@ -116,7 +137,7 @@ local function restoreHook()
     originalGetMoveVector = nil
     previousOwnGetMoveVector = nil
     hadOwnGetMoveVector = false
-    latchedX, latchedZ = 0, 0
+    resetSnapState()
 end
 
 local function installHook(controller)
@@ -147,7 +168,7 @@ local function installHook(controller)
     rawset(controller, "GetMoveVector", function(self, ...)
         local rawVector = originalGetMoveVector(self, ...)
         if not enabled or not UserInputService.TouchEnabled then
-            latchedX, latchedZ = 0, 0
+            resetSnapState()
             return rawVector
         end
         return quantize(rawVector)
@@ -176,19 +197,30 @@ refreshController()
 watchConnection = RunService.RenderStepped:Connect(refreshController)
 
 getgenv().PCClassicWASD = {
-    Version = "1.0-classic-native-ui-vector-quantizer",
+    Version = "1.1-rigid-8way-native-classic",
     SetEnabled = function(value)
         enabled = value ~= false
         if not enabled then
-            latchedX, latchedZ = 0, 0
+            resetSnapState()
         end
         return enabled
     end,
     IsEnabled = function()
         return enabled
     end,
-    GetThresholds = function()
-        return PRESS_THRESHOLD, RELEASE_THRESHOLD, STOP_MAGNITUDE
+    GetTuning = function()
+        return {
+            engageMagnitude = ENGAGE_MAGNITUDE,
+            releaseMagnitude = RELEASE_MAGNITUDE,
+            diagonalEnterRatio = DIAGONAL_ENTER_RATIO,
+            diagonalReleaseRatio = DIAGONAL_RELEASE_RATIO,
+        }
+    end,
+    GetState = function()
+        return {
+            engaged = engaged,
+            snapMode = snapMode,
+        }
     end,
 }
 

@@ -89,6 +89,14 @@ local function getControls()
     return nil
 end
 
+local function isTouchPreferred()
+    local preferred = UserInputService.TouchEnabled
+    pcall(function()
+        preferred = UserInputService.PreferredInput == Enum.PreferredInput.Touch
+    end)
+    return preferred
+end
+
 local function resolveTouchController()
     local controlModule = getControls()
     if type(controlModule) ~= "table" then
@@ -102,8 +110,10 @@ local function resolveTouchController()
 
     local active = rawget(controlModule, "activeController")
     if type(active) == "table" and type(active.GetMoveVector) == "function" then
-        local moveTouch = rawget(active, "moveTouchObject")
-        if moveTouch ~= nil then
+        -- On the fixed/classic thumbstick moveTouchObject is nil until the finger
+        -- actually begins. While Touch is preferred, the active controller itself
+        -- is therefore the best pre-touch acquisition source.
+        if rawget(active, "moveTouchObject") ~= nil or isTouchPreferred() then
             return active
         end
     end

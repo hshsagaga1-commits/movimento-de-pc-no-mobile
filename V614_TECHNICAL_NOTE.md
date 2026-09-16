@@ -1,4 +1,4 @@
-# V614 — Controlled Yaw/Pitch Segment Matching
+# V614 — Controlled Yaw/Pitch Segment Matching — Acquisition R2
 
 ## Escopo
 
@@ -13,6 +13,63 @@ V604 OnMouseMoved(same real Touch UserInputObject)
 ```
 
 Não existe alegação de MouseMovement PC nativo.
+
+## Revisão Acquisition R2 — auditoria do primeiro teste V614
+
+O primeiro runtime V614 foi estruturalmente limpo (`frameCorrelationErrors=0`,
+`callbackErrors=0`, `controllerErrors=0`), mas terminou com 48 segmentos Touch,
+6 relay e somente 3 pares. A reconstrução dos 3.475 samples aceitos reproduziu
+exatamente todos os contadores do relatório.
+
+```text
+Touch accepted span: 31,999188 s
+Touch target reaches: 359
+Touch eligible: 48 = 1,500038 eligible/s
+
+Relay accepted span: 35,633830 s
+Relay target reaches: 69
+Relay eligible: 6 = 0,168379 eligible/s
+```
+
+Relay não recebeu menos tempo: B1 e B2 tiveram aproximadamente `17,48 s` e
+`18,15 s` de samples aceitos. A diferença foi a formação dos segmentos:
+
+- 71 candidatos relay fecharam `short`, todos ainda abaixo de 60°;
+- esses 71 vieram de 35 trocas de direção, 34 gaps de mais de três frames,
+  uma troca de fase e um fim de coleta;
+- 69 candidatos chegaram a 60°;
+- 63/69 foram rejeitados pelo pitch já predefinido;
+- 60 tinham `abs(netPitch)>2°`, 49 excediam o limite de pitch absoluto e 46
+  falhavam ambos;
+- somente seis ficaram elegíveis.
+
+Assim, a causa primária por contagem foi fragmentação antes de 60° (`short=71`),
+agravada pelo menor yaw/frame do relay. A causa secundária, quase total entre os
+segmentos que alcançaram o alvo, foi pitch (`63/69`). Nenhum threshold foi
+recalculado a partir desses números.
+
+## Aquisição controlada R2
+
+O matching permanece idêntico. A revisão muda somente painel e encerramento de
+fase. O alvo foi fixado antes do novo resultado em 16 segmentos elegíveis por
+janela ABBA:
+
+```text
+A1 Touch: 16
+B1 relay: 16
+B2 relay: 16
+A2 Touch: 16
+```
+
+Isso produz 32 elegíveis por rota. Aplicando apenas como planejamento a antiga
+compatibilidade descritiva de 3/6, a expectativa é 16 pares, quatro de margem
+sobre os 12 exigidos. O valor não altera input, segmento nem matching.
+
+Ao atingir o alvo, cada janela — inclusive A2 — vira `complete` e deixa de
+aceitar novos samples. A próxima janela é recusada enquanto a atual não estiver
+completa. `potentialPairs` é recalculado após cada segmento elegível pelos
+calipers originais e informa separadamente se os 12 pares foram alcançados; ele
+não reabre nem prolonga uma janela que já atingiu os 16 segmentos predefinidos.
 
 ## Auditoria decisiva da V613
 
@@ -169,15 +226,28 @@ CI = 95%
 Frames adjacentes não são tratados como IID. Sem 12 pares,
 `statisticalEvidence = unproved`.
 
-## Referência PC externa
+## Corpus visual externo PC × mobile
 
-O trecho aproximadamente `20,0s–24,0s` do vídeo PC Legacy continua apenas como
-referência qualitativa de uma região Head/upper-torso visualmente estável em
-rotações grandes. Ele não define pivot, subject, threshold ou equivalência PC.
+Foram revisados oito vídeos completos por amostragem ao longo de cada arquivo:
+cinco PC e três mobile. O trecho aproximadamente `20,0s–24,0s` da referência
+PC Legacy e os demais vídeos são usados somente para caracterização qualitativa.
+O corpus é compatível com maior rigidez perceptual da região Head/upper-torso
+no PC e maior “folga” no mobile, mas não prova pivot, subject, mecanismo,
+causalidade nem equivalência PC. Diferenças de crop, FOV, escala, resolução,
+edição e estado do personagem impedem comparar pixels absolutos entre arquivos.
+Nenhum valor visual foi usado para calibrar a probe.
 
 ```text
 externalPCReferenceUsed = true
 externalPCReferenceWindow = approximately 20.0s-24.0s
+externalPCVideosReviewed = 5
+externalMobileVideosReviewed = 3
+externalVideoRole = qualitative-only
+absoluteVideoPixelsUsedForCalibration = false
+videoEvidenceChangedV614Thresholds = false
+videoEvidenceChangedMatching = false
+headMechanismClaimed = false
+pcEquivalenceClaimed = false
 pcEquivalenceClaimAllowed = false
 ```
 
@@ -185,14 +255,15 @@ pcEquivalenceClaimAllowed = false
 
 O painel mostra em tempo real:
 
-- phase/window e state;
-- validSamples;
-- pitchValidSamples pertencentes a segmentos elegíveis;
-- usableMatchedSamples;
-- yawCoverage Touch/relay;
-- matchingCoverage;
+- phase, route e state;
+- `currentSegmentYawDeg` e pitch líquido/absoluto;
+- elegíveis na janela e totais Touch/relay;
+- `matchedPairsAvailable` e `targetPairs=12`;
 - correlationErrors e uiErrors;
-- orientação qualitativa de cobertura.
+- instruções `GIRE MAIS`, `CONTINUE`, `MANTENHA HORIZONTAL`, `PITCH ALTO`,
+  `DIREÇÃO QUEBROU`, `GAP QUEBROU`, `SEGMENTO VÁLIDO`, `MUDE A DIREÇÃO`,
+  `COBERTURA RELAY BAIXA`, `FASE COMPLETA` e
+  `COBERTURA SUFICIENTE`.
 
 Ele não pede pixels e não transforma input.
 
@@ -201,15 +272,16 @@ Ele não pede pixels e não transforma input.
 1. Execute `Loader.lua` no Delta.
 2. Toque **INICIAR**.
 3. Toque **1 • A1 TOUCH**; espere `active`.
-4. Parado e sem joystick, faça rotações principalmente horizontais por ~15 s.
-5. Toque **2 • B1 RELAY** e repita após `active`.
-6. Toque **3 • B2 RELAY** e repita após `active`.
-7. Toque **4 • A2 TOUCH** e repita após `active`.
-8. Observe `usableMatchedSamples`; a meta mínima é 12.
-9. Se o painel pedir “mais lento”, reduza apenas naturalmente a velocidade do
-   gesto; o script não muda o input.
-10. Toque **PARAR**.
-11. Toque **COPIAR REPORT COMPLETO** e só saia após `REPORT COPIADO`.
+4. Parado e sem joystick, gire principalmente na horizontal até
+   **FASE COMPLETA**; não conte segundos.
+5. Toque **2 • B1 RELAY** e siga a GUI até **FASE COMPLETA**.
+6. Toque **3 • B2 RELAY** e siga a GUI até **FASE COMPLETA**.
+7. Toque **4 • A2 TOUCH** e siga até **FASE COMPLETA**.
+8. Confirme `matchedPairsAvailable >= 12` e **COBERTURA SUFICIENTE**. Se a
+   aquisição terminar abaixo de 12, não altere o teste: pare e copie o relatório
+   insuficiente para auditoria.
+9. Toque **PARAR**.
+10. Toque **COPIAR REPORT COMPLETO** e só saia após `REPORT COPIADO`.
 
 ## Segurança
 
@@ -220,3 +292,22 @@ RotationType ou AutoRotate. Não usa `UpdateMouseBehavior`, VirtualInput,
 
 V604 ownership/relay e V500 fail-open são preservados. V20, V500 e V604 devem
 permanecer byte-identical.
+
+## Validação pré-publicação
+
+```text
+LuauValidation = pass: luau-compile
+LoaderValidation = pass: luau-compile plus cache-busted V614 R2 URL
+StateTransitionValidation = pass: ABBA order, early-advance rejection, freeze at 16 per window, no 17th sample, 32 per route
+ProhibitedWriteAudit = pass: no prohibited property writes or input APIs added
+
+V20 SHA-256  = 634ca4312a96ebb3b0ce556d083264a67817f0066cab4168c0256b7b95d542ef
+V500 SHA-256 = 5f3b04fccab7e26c322b431162d764a08f17ea29bf566643dd47a4ca6616d096
+V604 SHA-256 = 19b80d8241b367808a8b815d3c8ef6668a0c4e53454569b9652e2bbae132a571
+
+matchingCriteriaChanged = false
+calipersChanged = false
+gainChanged = false
+cameraCorrectionAdded = false
+v615Created = false
+```

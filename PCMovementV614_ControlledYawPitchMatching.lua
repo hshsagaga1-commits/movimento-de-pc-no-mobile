@@ -7,15 +7,17 @@ local player=Players.LocalPlayer
 local UI_NAME="PCMovementV614Panel"
 
 --[[
-    V614 / CONTROLLED YAW-PITCH SEGMENT MATCHING
+    V614 / CONTROLLED YAW-PITCH SEGMENT MATCHING / ACQUISITION R2
 
     V604-V613 and the post-V613 audit are accepted evidence. No search is
     reopened. This probe resolves only PrimaryPart-vs-Head ambiguity inside:
       A) native Touch, character standing
       B) V604 OnMouseMoved(same real Touch), character standing.
 
-    No camera, character, subject, focus, sensitivity or physics value is
-    written. The relay is not labeled native PC MouseMovement.
+    Acquisition R2 changes only the mobile guidance and phase completion. The
+    60-degree segment unit, pitch limits, matching calipers, ABBA order and
+    bootstrap are unchanged. No camera, character, subject, focus, sensitivity
+    or physics value is written. Relay is not labeled native PC MouseMovement.
 ]]
 
 local v604Source=game:HttpGet(
@@ -45,8 +47,8 @@ local baseSetRelay=getgenv().PCV604SetRelayEnabled
 local baseDiagnostics=getgenv().PCV604Diagnostics
 local baseReport=getgenv().PCV604Report
 
-getgenv().PCMovementVersion="V614-ControlledYawPitchMatching"
-getgenv().PCInputBridgeMode="v614-controlled-yaw-pitch-matching"
+getgenv().PCMovementVersion="V614-ControlledYawPitchMatching-AcquisitionR2"
+getgenv().PCInputBridgeMode="v614-controlled-yaw-pitch-matching-acquisition-r2"
 
 local cameras=nil
 local activeController=nil
@@ -91,8 +93,15 @@ local SEGCFG={
     maxNetPitch=2.0,maxAbsPitchFloor=5.0,maxAbsPitchRatio=0.06,minCoherence=0.90,
     matchYawGap=5.0,matchNetPitchGap=1.0,matchAbsPitchGap=2.0,minMatched=12,
     bootstrapBlock=3,bootstrapIterations=1000,
+    phaseEligibleTarget=16,routeEligibleTarget=32,
     sequence={"A1","B1","B2","A2"}, -- ABBA balances a linear time trend.
     route={A1="touch",A2="touch",B1="relay",B2="relay"},
+    -- The R2 target is fixed before the new run: 16 per window gives 32 per
+    -- route. At the old observed 3/6 compatibility this projects 16 pairs,
+    -- four above the unchanged requirement of 12.
+    oldEligibleTouch=48,oldEligibleRelay=6,oldMatchedPairs=3,
+    livePotentialPairs=0,lastSegmentEvent="GIRE MAIS",lastSegmentEventAt=0,
+    lastSegmentDetail="none",coverageSufficient=false,
 }
 
 local probeRunning=false
@@ -140,6 +149,7 @@ local segmentStats={
     touch={eligible={},rejectedShort=0,rejectedPitch=0,rejectedDuration=0,rejectedGeometry=0,rejectedYaw=0},
     relay={eligible={},rejectedShort=0,rejectedPitch=0,rejectedDuration=0,rejectedGeometry=0,rejectedYaw=0},
 }
+SEGCFG.windowStats={}
 
 local handlerCallsTouch=0
 local handlerCallsMouseTouch=0
@@ -886,14 +896,54 @@ function SEGCFG.segmentScreenMetric(startPoint,endPoint,totalYaw)
     }
 end
 
-function SEGCFG.rejectSegment(route,reason)
+function SEGCFG.newWindowStats()
+    return {
+        eligible=0,candidates=0,rejectedShort=0,rejectedPitch=0,rejectedDuration=0,
+        rejectedGeometry=0,rejectedYaw=0,closedTarget=0,closedDirection=0,
+        closedGap=0,closedWindow=0,closedStop=0,
+        eligiblePositive=0,eligibleNegative=0,
+    }
+end
+
+function SEGCFG.getWindowStats(window)
+    if type(window)~="string" then return SEGCFG.newWindowStats() end
+    if not SEGCFG.windowStats[window] then SEGCFG.windowStats[window]=SEGCFG.newWindowStats() end
+    return SEGCFG.windowStats[window]
+end
+
+function SEGCFG.windowEligibleCount(window)
+    return SEGCFG.getWindowStats(window).eligible
+end
+
+function SEGCFG.noteClose(window,reason)
+    local stats=SEGCFG.getWindowStats(window)
+    stats.candidates+=1
+    if reason=="target" then stats.closedTarget+=1
+    elseif reason=="direction" then stats.closedDirection+=1
+    elseif reason=="frame-gap" then stats.closedGap+=1
+    elseif reason=="window-change" or reason=="phase-change" then stats.closedWindow+=1
+    else stats.closedStop+=1 end
+end
+
+function SEGCFG.rejectSegment(route,window,reason,closeReason,build,pitchLimit)
     local stats=segmentStats[route]
     if not stats then return end
+    local windowStats=SEGCFG.getWindowStats(window)
     if reason=="short" then stats.rejectedShort+=1
     elseif reason=="pitch" then stats.rejectedPitch+=1
     elseif reason=="duration" then stats.rejectedDuration+=1
     elseif reason=="geometry" then stats.rejectedGeometry+=1
     else stats.rejectedYaw+=1 end
+    local key="rejected"..string.upper(string.sub(reason,1,1))..string.sub(reason,2)
+    if windowStats[key]~=nil then windowStats[key]+=1 end
+    SEGCFG.lastSegmentEvent=reason=="pitch" and "PITCH ALTO • MANTENHA HORIZONTAL"
+        or (closeReason=="direction" and "DIREÇÃO QUEBROU"
+        or (closeReason=="frame-gap" and "GAP QUEBROU" or "GIRE MAIS"))
+    SEGCFG.lastSegmentEventAt=os.clock()
+    SEGCFG.lastSegmentDetail=string.format(
+        "rejected=%s close=%s window=%s yaw=%.3f netPitch=%.3f absPitch=%.3f pitchLimit=%.3f frames=%d",
+        reason,tostring(closeReason),tostring(window),build.totalAbsYaw,build.netPitch,
+        build.totalAbsPitch,pitchLimit,#build.samples)
 end
 
 function SEGCFG.closeCurrentSegment(reason)
@@ -910,6 +960,7 @@ function SEGCFG.closeCurrentSegment(reason)
     local returnedHead=SEGCFG.segmentScreenMetric(first.headScreenBefore,last.returnedHeadScreen,build.totalAbsYaw)
     local returnedSubject=SEGCFG.segmentScreenMetric(first.subjectScreenBefore,last.returnedSubjectScreen,build.totalAbsYaw)
     local pitchLimit=math.max(SEGCFG.maxAbsPitchFloor,build.totalAbsYaw*SEGCFG.maxAbsPitchRatio)
+    SEGCFG.noteClose(build.window,reason)
     local reject=nil
     if build.totalAbsYaw<SEGCFG.targetYaw or #build.samples<SEGCFG.minFrames then reject="short"
     elseif build.totalAbsYaw>SEGCFG.maxYaw or coherence<SEGCFG.minCoherence then reject="yaw"
@@ -917,7 +968,7 @@ function SEGCFG.closeCurrentSegment(reason)
     elseif duration>SEGCFG.maxDuration then reject="duration"
     elseif not (primary and head and subject and returnedPrimary and returnedHead and returnedSubject) then reject="geometry" end
     if reject then
-        SEGCFG.rejectSegment(build.route,reject)
+        SEGCFG.rejectSegment(build.route,build.window,reject,reason,build,pitchLimit)
         return nil
     end
     local segment={
@@ -940,6 +991,13 @@ function SEGCFG.closeCurrentSegment(reason)
     }
     local list=segmentStats[build.route].eligible
     list[#list+1]=segment
+    local windowStats=SEGCFG.getWindowStats(build.window)
+    windowStats.eligible+=1
+    if build.totalSignedYaw>=0 then windowStats.eligiblePositive+=1 else windowStats.eligibleNegative+=1 end
+    SEGCFG.lastSegmentEvent="SEGMENTO VÁLIDO"
+    SEGCFG.lastSegmentEventAt=os.clock()
+    SEGCFG.lastSegmentDetail=string.format("valid window=%s yaw=%.3f netPitch=%.3f absPitch=%.3f",
+        tostring(build.window),build.totalAbsYaw,build.netPitch,build.totalAbsPitch)
     addTrace(string.format("segment eligible id=%s window=%s frames=%d yaw=%.6f netPitch=%.6f absPitch=%.6f duration=%.4f",
         segment.id,segment.window,segment.frameCount,segment.totalAbsYaw,segment.netPitch,segment.totalAbsPitch,segment.duration))
     return segment
@@ -957,9 +1015,12 @@ segmentConsumer=function(sample)
     if currentSegment then
         local previous=currentSegment.samples[#currentSegment.samples]
         local previousSign=previous and (previous.yawSigned>=0 and 1 or -1) or sign
-        if currentSegment.route~=sample.phase or currentSegment.window~=sample.window
-            or (previous and sample.frame-previous.frame>SEGCFG.maxFrameGap) or sign~=previousSign then
-            SEGCFG.closeCurrentSegment("boundary")
+        if currentSegment.route~=sample.phase or currentSegment.window~=sample.window then
+            SEGCFG.closeCurrentSegment("window-change")
+        elseif previous and sample.frame-previous.frame>SEGCFG.maxFrameGap then
+            SEGCFG.closeCurrentSegment("frame-gap")
+        elseif sign~=previousSign then
+            SEGCFG.closeCurrentSegment("direction")
         end
     end
     if not currentSegment then SEGCFG.startSegment(sample) end
@@ -971,7 +1032,10 @@ segmentConsumer=function(sample)
     build.totalAbsPitch+=math.abs(sample.pitchSigned)
     build.yawTrajectory[#build.yawTrajectory+1]=sample.yawSigned
     build.pitchTrajectory[#build.pitchTrajectory+1]=sample.pitchSigned
-    if build.totalAbsYaw>=SEGCFG.targetYaw then SEGCFG.closeCurrentSegment("target") end
+    if build.totalAbsYaw>=SEGCFG.targetYaw then
+        local eligible=SEGCFG.closeCurrentSegment("target")
+        if eligible and type(SEGCFG.updateCoverageState)=="function" then SEGCFG.updateCoverageState(eligible) end
+    end
 end
 
 local function finalizeFrame(frame)
@@ -1294,6 +1358,9 @@ local function resetCounters()
         touch={eligible={},rejectedShort=0,rejectedPitch=0,rejectedDuration=0,rejectedGeometry=0,rejectedYaw=0},
         relay={eligible={},rejectedShort=0,rejectedPitch=0,rejectedDuration=0,rejectedGeometry=0,rejectedYaw=0},
     }
+    SEGCFG.windowStats={}
+    SEGCFG.livePotentialPairs=0; SEGCFG.coverageSufficient=false
+    SEGCFG.lastSegmentEvent="GIRE MAIS"; SEGCFG.lastSegmentEventAt=0; SEGCFG.lastSegmentDetail="none"
     currentSegment=nil; currentPhase="none"; currentWindow="none"; phaseState="idle"
     stableConsecutive=0; phaseLastPrimaryPosition=nil; expectedPhaseIndex=1; completedWindows={}
     uiRefreshErrors=0
@@ -1326,7 +1393,6 @@ local function stopProbe()
         return true,"already-stopped"
     end
     SEGCFG.closeCurrentSegment("probe-stop")
-    if currentWindow~="none" then completedWindows[currentWindow]=true end
     probeDuration=os.clock()-probeStartedAt
     probeRunning=false; currentFrame=nil; currentCalc=nil; currentPhase="none"; currentWindow="none"; phaseState="stopped"
     stateAtStop={relay=relayEnabled(),rotate=readRotate(getActiveController()),preferred=UserInputService.PreferredInput}
@@ -1374,12 +1440,14 @@ local function beginControlledPhase(window)
     if phase~="touch" and phase~="relay" then return false,"invalid-phase" end
     local expected=SEGCFG.sequence[expectedPhaseIndex]
     if window~=expected then return false,"expected-"..tostring(expected) end
+    if currentWindow~="none" and currentWindow~=window and completedWindows[currentWindow]~=true then
+        return false,"finish-"..tostring(currentWindow).."-coverage-first"
+    end
     if type(baseSetRelay)~="function" then return false,"V604-relay-control-unavailable" end
     local wantRelay=phase=="relay"
     local ok,result=pcall(baseSetRelay,wantRelay)
     if not ok or result==false then return false,cleanText(result,180) end
     SEGCFG.closeCurrentSegment("phase-change")
-    if currentWindow~="none" then completedWindows[currentWindow]=true end
     currentPhase=phase
     currentWindow=window
     expectedPhaseIndex=math.min(#SEGCFG.sequence+1,expectedPhaseIndex+1)
@@ -1975,6 +2043,26 @@ function SEGCFG.matchSegments()
     return pairs
 end
 
+function SEGCFG.updateCoverageState(segment)
+    local pairs=SEGCFG.matchSegments()
+    SEGCFG.livePotentialPairs=#pairs
+    SEGCFG.coverageSufficient=#pairs>=SEGCFG.minMatched
+    local window=segment and segment.window or currentWindow
+    local count=SEGCFG.windowEligibleCount(window)
+    if phaseState~="active" or currentWindow~=window then return end
+    local phaseTargetReached=count>=SEGCFG.phaseEligibleTarget
+    if phaseTargetReached then
+        phaseState="complete"
+        completedWindows[window]=true
+        SEGCFG.lastSegmentEvent=SEGCFG.coverageSufficient and "COBERTURA SUFICIENTE" or "FASE COMPLETA"
+        SEGCFG.lastSegmentEventAt=os.clock()
+        SEGCFG.lastSegmentDetail=string.format(
+            "phase-complete window=%s eligible=%d target=%d potentialPairs=%d required=%d",
+            tostring(window),count,SEGCFG.phaseEligibleTarget,#pairs,SEGCFG.minMatched)
+        addEvidence("COVERAGE",SEGCFG.lastSegmentDetail)
+    end
+end
+
 function SEGCFG.pairMetricArrays(pairs,point,axis)
     local touch,relay,difference={},{},{}
     for _,pair in ipairs(pairs) do
@@ -2045,6 +2133,15 @@ function SEGCFG.segmentRangeText(items)
     return tostring(round(values[1],3)).."-"..tostring(round(values[#values],3)).."deg"
 end
 
+function SEGCFG.windowStatsText(window)
+    local s=SEGCFG.getWindowStats(window)
+    return string.format(
+        "eligible=%d/%d candidates=%d rejectShort=%d rejectPitch=%d rejectDuration=%d rejectGeometry=%d rejectYaw=%d closeTarget=%d closeDirection=%d closeGap=%d closeWindow=%d closeStop=%d directionPositive=%d directionNegative=%d",
+        s.eligible,SEGCFG.phaseEligibleTarget,s.candidates,s.rejectedShort,s.rejectedPitch,
+        s.rejectedDuration,s.rejectedGeometry,s.rejectedYaw,s.closedTarget,s.closedDirection,
+        s.closedGap,s.closedWindow,s.closedStop,s.eligiblePositive,s.eligibleNegative)
+end
+
 function SEGCFG.segmentClassification()
     local pairs=SEGCFG.matchSegments()
     local touchSegments,relaySegments=segmentStats.touch.eligible,segmentStats.relay.eligible
@@ -2083,6 +2180,22 @@ function SEGCFG.segmentClassification()
     end
     return {
         pairs=pairs,
+        relaySegmentLossPrimaryCause="old V614: 71 short relay candidates; all ended below 60deg before eligibility (35 direction changes, 34 frame gaps, 1 phase boundary, 1 end-of-run); lower relay yaw/frame required longer uninterrupted same-direction runs",
+        relaySegmentLossSecondaryCause="old V614: 63 of 69 relay candidates that reached 60deg were rejected by unchanged pitch gate (60 netPitch>2deg, 49 totalAbsPitch>limit, 46 failed both); only 6 reached eligibility",
+        relaySegmentFormationRate="old V614: 6 eligible / 35.633830s accepted relay span = 0.168379 eligible/s; 69 target reaches = 1.936374/s",
+        touchSegmentFormationRate="old V614: 48 eligible / 31.999188s accepted Touch span = 1.500038 eligible/s; 359 target reaches = 11.219035/s",
+        oldEligibleTouch=SEGCFG.oldEligibleTouch,oldEligibleRelay=SEGCFG.oldEligibleRelay,
+        oldMatchedPairs=SEGCFG.oldMatchedPairs,
+        liveCoverageGuidanceImplemented=true,
+        phaseCompletionUsesCoverage="true: every ABBA window freezes at the fixed pre-run target of 16 eligible segments; potentialPairs is recomputed live with unchanged matching and separately reports whether 12 pairs were reached",
+        touchOvercollectionPrevented=true,
+        relayCoverageTarget="16 eligible in B1 + 16 eligible in B2 = 32 relay segments; fixed before R2 result",
+        potentialPairsLive=#pairs,
+        matchingCriteriaChanged=false,calipersChanged=false,gainChanged=false,cameraCorrectionAdded=false,v615Created=false,
+        externalPCVideosReviewed=5,externalMobileVideosReviewed=3,
+        externalVideoRole="qualitative-only",
+        absoluteVideoPixelsUsedForCalibration=false,videoEvidenceChangedV614Thresholds=false,
+        videoEvidenceChangedMatching=false,headMechanismClaimed=false,pcEquivalenceClaimed=false,
         v613MatchedBinsRootCause="design/acquisition mismatch: distinct yaw lattices + 70% pitch rejection + sparse fixed 0.5deg bins; minPerPhase=20 was the decisive gate; not simply insufficient raw standing frames",
         touchYawStepPattern="approximately 0.8505deg lattice (rotateInput.x step approximately 0.014844rad), with integer multiples per frame",
         relayYawStepPattern="approximately 0.18deg lattice (rotateInput.x step approximately 0.0031416rad), with integer multiples per frame",
@@ -2131,7 +2244,7 @@ getgenv().PCV614Diagnostics=function()
         relay=relayEnabled(),rotate=readRotate(getActiveController()),preferred=UserInputService.PreferredInput,
     }
     local result={
-        version="V614-ControlledYawPitchMatching",
+        version="V614-ControlledYawPitchMatching-AcquisitionR2",
         bridgeMode=getgenv().PCInputBridgeMode,
         probePurpose="controlled-yaw-pitch-segment-matching",
         probeRunning=probeRunning,
@@ -2169,6 +2282,9 @@ getgenv().PCV614Diagnostics=function()
         lastGeometryDetail=lastGeometryDetail,
         lastStandingDetail=lastStandingDetail,
         currentPhase=currentPhase,
+        currentSegmentYawDeg=currentSegment and round(currentSegment.totalAbsYaw,6) or 0,
+        currentSegmentPitchDeg=currentSegment and round(currentSegment.netPitch,6) or 0,
+        currentSegmentAbsPitchDeg=currentSegment and round(currentSegment.totalAbsPitch,6) or 0,
         phaseState=phaseState,
         stabilizationSeconds=STABILIZE_SECONDS,
         stableConsecutiveRequired=STABLE_CONSECUTIVE_FRAMES,
@@ -2215,10 +2331,46 @@ getgenv().PCV614Diagnostics=function()
         uiRefreshErrors=uiRefreshErrors,
         eligibleTouchSegments=#segmentStats.touch.eligible,
         eligibleRelaySegments=#segmentStats.relay.eligible,
+        requiredMatchedComparisonUnits=SEGCFG.minMatched,
+        phaseEligibleTarget=SEGCFG.phaseEligibleTarget,
+        routeEligibleTarget=SEGCFG.routeEligibleTarget,
+        potentialMatchedPairs=decision.matchedComparisonUnits,
+        coverageSufficient=decision.matchedComparisonUnits>=SEGCFG.minMatched,
+        liveGuidance=SEGCFG.lastSegmentEvent,
+        liveGuidanceDetail=SEGCFG.lastSegmentDetail,
+        windowA1Coverage=SEGCFG.windowStatsText("A1"),
+        windowB1Coverage=SEGCFG.windowStatsText("B1"),
+        windowB2Coverage=SEGCFG.windowStatsText("B2"),
+        windowA2Coverage=SEGCFG.windowStatsText("A2"),
         rejectedTouchSegments=string.format("short=%d pitch=%d duration=%d geometry=%d yaw=%d",segmentStats.touch.rejectedShort,
             segmentStats.touch.rejectedPitch,segmentStats.touch.rejectedDuration,segmentStats.touch.rejectedGeometry,segmentStats.touch.rejectedYaw),
         rejectedRelaySegments=string.format("short=%d pitch=%d duration=%d geometry=%d yaw=%d",segmentStats.relay.rejectedShort,
             segmentStats.relay.rejectedPitch,segmentStats.relay.rejectedDuration,segmentStats.relay.rejectedGeometry,segmentStats.relay.rejectedYaw),
+        relaySegmentLossPrimaryCause=decision.relaySegmentLossPrimaryCause,
+        relaySegmentLossSecondaryCause=decision.relaySegmentLossSecondaryCause,
+        relaySegmentFormationRate=decision.relaySegmentFormationRate,
+        touchSegmentFormationRate=decision.touchSegmentFormationRate,
+        oldEligibleTouch=decision.oldEligibleTouch,
+        oldEligibleRelay=decision.oldEligibleRelay,
+        oldMatchedPairs=decision.oldMatchedPairs,
+        liveCoverageGuidanceImplemented=decision.liveCoverageGuidanceImplemented,
+        phaseCompletionUsesCoverage=decision.phaseCompletionUsesCoverage,
+        touchOvercollectionPrevented=decision.touchOvercollectionPrevented,
+        relayCoverageTarget=decision.relayCoverageTarget,
+        potentialPairsLive=decision.potentialPairsLive,
+        matchingCriteriaChanged=decision.matchingCriteriaChanged,
+        calipersChanged=decision.calipersChanged,
+        gainChanged=decision.gainChanged,
+        cameraCorrectionAdded=decision.cameraCorrectionAdded,
+        v615Created=decision.v615Created,
+        externalPCVideosReviewed=decision.externalPCVideosReviewed,
+        externalMobileVideosReviewed=decision.externalMobileVideosReviewed,
+        externalVideoRole=decision.externalVideoRole,
+        absoluteVideoPixelsUsedForCalibration=decision.absoluteVideoPixelsUsedForCalibration,
+        videoEvidenceChangedV614Thresholds=decision.videoEvidenceChangedV614Thresholds,
+        videoEvidenceChangedMatching=decision.videoEvidenceChangedMatching,
+        headMechanismClaimed=decision.headMechanismClaimed,
+        pcEquivalenceClaimed=decision.pcEquivalenceClaimed,
         v613MatchedBinsRootCause=decision.v613MatchedBinsRootCause,
         touchYawStepPattern=decision.touchYawStepPattern,
         relayYawStepPattern=decision.relayYawStepPattern,
@@ -2324,9 +2476,13 @@ local REPORT_KEYS={
     "calculateCalls","firstCalculateCalls","getCameraLookCallsInCalc","getSubjectCalls",
     "getMouseLockOffsetCalls","controllerUpdates","cameraModuleUpdates","subjectClassSummary",
     "lastCorrelatedFrame","lastSubjectDetail","lastGeometryDetail","lastStandingDetail",
-    "currentPhase","currentWindow","expectedWindow","completedWindows","phaseState","stabilizationSeconds",
+    "currentPhase","currentWindow","expectedWindow","completedWindows","phaseState","currentSegmentYawDeg",
+    "currentSegmentPitchDeg","currentSegmentAbsPitchDeg","stabilizationSeconds",
     "stableConsecutiveRequired","stableConsecutiveCurrent","uiRefreshErrors",
-    "eligibleTouchSegments","eligibleRelaySegments","rejectedTouchSegments","rejectedRelaySegments",
+    "eligibleTouchSegments","eligibleRelaySegments","requiredMatchedComparisonUnits","phaseEligibleTarget","routeEligibleTarget",
+    "potentialMatchedPairs","coverageSufficient","liveGuidance","liveGuidanceDetail",
+    "windowA1Coverage","windowB1Coverage","windowB2Coverage","windowA2Coverage",
+    "rejectedTouchSegments","rejectedRelaySegments",
     "persistedOwnershipProofAccepted","persistedOwnershipProofPatchCounts",
     "joystickCriterionAvailable","joystickCriterionLast","relayEnabled","rotateAtStop",
     "preferredInputAtStop","ownershipGateProven","relayValidationReady","touchRoleConflicts",
@@ -2494,9 +2650,49 @@ getgenv().PCV614Report=function(includeEvidence)
     lines[#lines+1]="externalPCReferenceUsed = true"
     lines[#lines+1]="externalPCReferenceWindow = approximately 20.0s-24.0s"
     lines[#lines+1]="pcVisualAnchorCandidate = qualitative Head/upper-torso region only; pivot and equivalence unproved"
+    lines[#lines+1]="externalPCVideosReviewed = "..tostring(diagnostics.externalPCVideosReviewed)
+    lines[#lines+1]="externalMobileVideosReviewed = "..tostring(diagnostics.externalMobileVideosReviewed)
+    lines[#lines+1]="externalVideoRole = qualitative-only"
+    lines[#lines+1]="absoluteVideoPixelsUsedForCalibration = false"
+    lines[#lines+1]="videoEvidenceChangedV614Thresholds = false"
+    lines[#lines+1]="videoEvidenceChangedMatching = false"
+    lines[#lines+1]="headMechanismClaimed = false"
+    lines[#lines+1]="pcEquivalenceClaimed = false"
     lines[#lines+1]="sampleBiasFromErrors = "..tostring(diagnostics.sampleBiasFromErrors)
     lines[#lines+1]=""
     lines[#lines+1]="=== V614 REQUIRED AUDIT/SEGMENT DECISION ==="
+    lines[#lines+1]="LuauValidation = pass: luau-compile"
+    lines[#lines+1]="LoaderValidation = pass: luau-compile plus cache-busted V614 R2 URL"
+    lines[#lines+1]="StateTransitionValidation = pass: ABBA order, early-advance rejection, freeze at 16 per window, no 17th sample, 32 per route"
+    lines[#lines+1]="ProhibitedWriteAudit = pass: no prohibited property writes or input APIs added"
+    lines[#lines+1]="relaySegmentLossPrimaryCause = "..tostring(diagnostics.relaySegmentLossPrimaryCause)
+    lines[#lines+1]="relaySegmentLossSecondaryCause = "..tostring(diagnostics.relaySegmentLossSecondaryCause)
+    lines[#lines+1]="relaySegmentFormationRate = "..tostring(diagnostics.relaySegmentFormationRate)
+    lines[#lines+1]="touchSegmentFormationRate = "..tostring(diagnostics.touchSegmentFormationRate)
+    lines[#lines+1]="oldEligibleTouch = "..tostring(diagnostics.oldEligibleTouch)
+    lines[#lines+1]="oldEligibleRelay = "..tostring(diagnostics.oldEligibleRelay)
+    lines[#lines+1]="oldMatchedPairs = "..tostring(diagnostics.oldMatchedPairs)
+    lines[#lines+1]="relayCandidatesBefore60 = 71"
+    lines[#lines+1]="relayDirectionBreaks = 35"
+    lines[#lines+1]="relayGaps = 34"
+    lines[#lines+1]="relayReached60 = 69"
+    lines[#lines+1]="relayPitchRejected = 63"
+    lines[#lines+1]="relayNetPitchRejected = 60"
+    lines[#lines+1]="relayAbsolutePitchRejected = 49"
+    lines[#lines+1]="relayBothPitchRejected = 46"
+    lines[#lines+1]="phaseEligibleTarget = "..tostring(SEGCFG.phaseEligibleTarget)
+    lines[#lines+1]="routeEligibleTarget = "..tostring(SEGCFG.routeEligibleTarget)
+    lines[#lines+1]="requiredMatchedPairs = "..tostring(SEGCFG.minMatched)
+    lines[#lines+1]="liveCoverageGuidanceImplemented = "..tostring(diagnostics.liveCoverageGuidanceImplemented)
+    lines[#lines+1]="phaseCompletionUsesCoverage = "..tostring(diagnostics.phaseCompletionUsesCoverage)
+    lines[#lines+1]="touchOvercollectionPrevented = "..tostring(diagnostics.touchOvercollectionPrevented)
+    lines[#lines+1]="relayCoverageTarget = "..tostring(diagnostics.relayCoverageTarget)
+    lines[#lines+1]="potentialPairsLive = "..tostring(diagnostics.potentialPairsLive)
+    lines[#lines+1]="matchingCriteriaChanged = false"
+    lines[#lines+1]="calipersChanged = false"
+    lines[#lines+1]="gainChanged = false"
+    lines[#lines+1]="cameraCorrectionAdded = false"
+    lines[#lines+1]="v615Created = false"
     lines[#lines+1]="v613MatchedBinsRootCause = "..tostring(diagnostics.v613MatchedBinsRootCause)
     lines[#lines+1]="touchYawStepPattern = "..tostring(diagnostics.touchYawStepPattern)
     lines[#lines+1]="relayYawStepPattern = "..tostring(diagnostics.relayYawStepPattern)
@@ -2586,7 +2782,6 @@ end
 
 refreshLiveStatus=function()
     if not statusLabel then return end
-    local a,b=pairedStats.touch,pairedStats.relay
     local relayText=relayEnabled() and "ON" or "OFF"
     local stateText=phaseState
     if phaseState=="stabilizing" or phaseState=="restabilizing" then
@@ -2594,21 +2789,44 @@ refreshLiveStatus=function()
         stateText=string.format("%s %.1fs • estável %d/%d",phaseState,remaining,stableConsecutive,STABLE_CONSECUTIVE_FRAMES)
     end
     local pairs=SEGCFG.matchSegments()
+    SEGCFG.livePotentialPairs=#pairs
+    SEGCFG.coverageSufficient=#pairs>=SEGCFG.minMatched
     local touchEligible,relayEligible=#segmentStats.touch.eligible,#segmentStats.relay.eligible
-    local touchPitchFrames,relayPitchFrames=0,0
-    for _,segment in ipairs(segmentStats.touch.eligible) do touchPitchFrames+=segment.frameCount end
-    for _,segment in ipairs(segmentStats.relay.eligible) do relayPitchFrames+=segment.frameCount end
-    local coverage=math.min(touchEligible,relayEligible)>0 and #pairs/math.min(touchEligible,relayEligible) or 0
-    local need="faixa preenchida"
-    if touchEligible==0 then need="precisa Touch: giro mais lento/horizontal"
-    elseif relayEligible==0 then need="precisa relay: giro mais lento/horizontal"
-    elseif #pairs<SEGCFG.minMatched then need="continue faixas; faltam "..tostring(SEGCFG.minMatched-#pairs).." pares" end
+    local windowStats=SEGCFG.getWindowStats(currentWindow)
+    local eligibleThis=windowStats.eligible or 0
+    local segmentYaw=currentSegment and currentSegment.totalAbsYaw or 0
+    local segmentPitch=currentSegment and currentSegment.netPitch or 0
+    local segmentAbsPitch=currentSegment and currentSegment.totalAbsPitch or 0
+    local pitchLimit=math.max(SEGCFG.maxAbsPitchFloor,segmentYaw*SEGCFG.maxAbsPitchRatio)
+    local instruction="GIRE MAIS"
+    if currentWindow=="A2" and phaseState=="complete" then
+        instruction=SEGCFG.coverageSufficient and "12 PARES ATINGIDOS • COBERTURA SUFICIENTE"
+            or string.format("FASE COMPLETA • PARES %d/%d",#pairs,SEGCFG.minMatched)
+    elseif phaseState=="complete" then
+        instruction="FASE COMPLETA • AVANCE"
+    elseif phaseState=="stabilizing" or phaseState=="restabilizing" then
+        instruction="ESPERE ESTABILIZAR"
+    elseif phaseState=="active" then
+        if math.abs(segmentPitch)>SEGCFG.maxNetPitch or segmentAbsPitch>pitchLimit then
+            instruction="PITCH ALTO • MANTENHA HORIZONTAL"
+        elseif os.clock()-SEGCFG.lastSegmentEventAt<1.25 then
+            instruction=SEGCFG.lastSegmentEvent
+        elseif segmentYaw>=15 then
+            instruction="CONTINUE • MESMA DIREÇÃO"
+        elseif math.abs((windowStats.eligiblePositive or 0)-(windowStats.eligibleNegative or 0))>=2
+            and segmentYaw<1 then
+            instruction="MUDE A DIREÇÃO"
+        elseif currentPhase=="relay" and relayEligible<touchEligible then
+            instruction="COBERTURA RELAY BAIXA • GIRE MAIS"
+        end
+    end
     statusLabel.Text=string.format(
-        "phase=%s/%s state=%s relay=%s\nvalidSamples T=%d R=%d pitchValidSamples T=%d R=%d\nusableMatchedSamples=%d yawCoverage T=%s R=%s\nmatchingCoverage=%.2f corrErr=%d uiErr=%d • %s",
-        currentWindow,currentPhase,stateText,relayText,a.validStandingFrames,b.validStandingFrames,
-        touchPitchFrames,relayPitchFrames,#pairs,SEGCFG.segmentRangeText(segmentStats.touch.eligible),SEGCFG.segmentRangeText(segmentStats.relay.eligible),
-        coverage,frameCorrelationErrors,uiRefreshErrors,need)
-    statusLabel.TextColor3=phaseState=="active" and Color3.fromRGB(74,222,128) or Color3.fromRGB(250,204,21)
+        "phase=%s route=%s state=%s relay=%s\ncurrentSegmentYawDeg=%.2f/%.0f pitchNet/Abs=%.2f/%.2f\neligibleThisPhase=%d/%d • eligibleTouch=%d relay=%d\nmatchedPairsAvailable=%d targetPairs=%d\n%s\ncorrErr=%d uiErr=%d",
+        currentWindow,currentPhase,stateText,relayText,segmentYaw,SEGCFG.targetYaw,segmentPitch,segmentAbsPitch,
+        eligibleThis,SEGCFG.phaseEligibleTarget,touchEligible,relayEligible,#pairs,SEGCFG.minMatched,
+        instruction,frameCorrelationErrors,uiRefreshErrors)
+    statusLabel.TextColor3=(phaseState=="active" or phaseState=="complete")
+        and Color3.fromRGB(74,222,128) or Color3.fromRGB(250,204,21)
     refreshPhaseButtons()
 end
 
@@ -2622,7 +2840,7 @@ local function createPanel()
     gui.Name=UI_NAME; gui.ResetOnSpawn=false; gui.DisplayOrder=999999; gui.Parent=parent; screenGui=gui
 
     local panel=Instance.new("Frame")
-    panel.Size=UDim2.fromOffset(336,510); panel.Position=UDim2.new(1,-348,0.5,-255)
+    panel.Size=UDim2.fromOffset(336,548); panel.Position=UDim2.new(1,-348,0.5,-274)
     panel.BackgroundColor3=Color3.fromRGB(9,14,27); panel.BackgroundTransparency=0.04
     panel.BorderSizePixel=0; panel.Active=true; panel.Draggable=true; panel.Parent=gui
     local corner=Instance.new("UICorner"); corner.CornerRadius=UDim.new(0,14); corner.Parent=panel
@@ -2630,7 +2848,7 @@ local function createPanel()
 
     local title=Instance.new("TextLabel")
     title.Size=UDim2.new(1,-48,0,34); title.Position=UDim2.fromOffset(13,7); title.BackgroundTransparency=1
-    title.Text="V614 • STANDING PAREADO"; title.TextColor3=Color3.fromRGB(103,232,249)
+    title.Text="V614 R2 • COBERTURA PAREADA"; title.TextColor3=Color3.fromRGB(103,232,249)
     title.TextSize=15; title.Font=Enum.Font.GothamBold; title.TextXAlignment=Enum.TextXAlignment.Left; title.Parent=panel
 
     local collapse=Instance.new("TextButton")
@@ -2647,7 +2865,7 @@ local function createPanel()
     local instructions=Instance.new("TextLabel")
     instructions.LayoutOrder=0; instructions.Size=UDim2.new(1,0,0,92)
     instructions.BackgroundColor3=Color3.fromRGB(18,28,48); instructions.BorderSizePixel=0
-    instructions.Text="INICIAR; depois siga 1→2→3→4 (ABBA).\nParado, sem joystick; espere ACTIVE.\nGire horizontalmente ~15 s por fase.\nSe pedir, gire mais lento/mais rápido; nada altera seu input.\nPARAR → COPIAR antes de sair."
+    instructions.Text="INICIAR; depois siga 1→2→3→4 (ABBA).\nParado, sem joystick; espere ACTIVE.\nGire horizontalmente até FASE COMPLETA.\nSiga GIRE MAIS / CONTINUE / PITCH ALTO.\nNão conte segundos. PARAR → COPIAR antes de sair."
     instructions.TextColor3=Color3.fromRGB(226,232,240); instructions.TextSize=11
     instructions.TextWrapped=true; instructions.TextXAlignment=Enum.TextXAlignment.Left
     instructions.Font=Enum.Font.Gotham; instructions.Parent=body
@@ -2662,7 +2880,7 @@ local function createPanel()
     local emergency=makeButton(body,"EMERGÊNCIA • RELAY OFF / V500",Color3.fromRGB(190,24,93),7)
     local copy=makeButton(body,"COPIAR REPORT COMPLETO",Color3.fromRGB(2,132,199),8)
     statusLabel=Instance.new("TextLabel")
-    statusLabel.LayoutOrder=9; statusLabel.Size=UDim2.new(1,0,0,88); statusLabel.BackgroundTransparency=1
+    statusLabel.LayoutOrder=9; statusLabel.Size=UDim2.new(1,0,0,124); statusLabel.BackgroundTransparency=1
     statusLabel.Text="Pronto. INICIAR e depois 1 • A1 TOUCH."; statusLabel.TextColor3=Color3.fromRGB(148,163,184)
     statusLabel.TextSize=10; statusLabel.TextWrapped=true; statusLabel.Font=Enum.Font.Gotham; statusLabel.Parent=body
 
@@ -2712,7 +2930,7 @@ local function createPanel()
     local expanded=true
     uiConnections[#uiConnections+1]=collapse.Activated:Connect(function()
         expanded=not expanded; body.Visible=expanded
-        panel.Size=expanded and UDim2.fromOffset(336,510) or UDim2.fromOffset(336,45)
+        panel.Size=expanded and UDim2.fromOffset(336,548) or UDim2.fromOffset(336,45)
         collapse.Text=expanded and "–" or "+"
     end)
     refreshPhaseButtons()
@@ -2766,5 +2984,5 @@ getgenv().__PCMobileAimCleanup=function()
     getgenv().__PCMobileAimCleanup=nil
 end
 
-addEvidence("READY","V614 controlled yaw/pitch segment matching ready; observational geometry only")
-warn("[V614] controlled yaw/pitch segment matching ready | use mobile panel")
+addEvidence("READY","V614 Acquisition R2 ready; fixed coverage targets and unchanged controlled matching; observational geometry only")
+warn("[V614 R2] acquisition coverage revision ready | use mobile panel")

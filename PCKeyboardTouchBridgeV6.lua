@@ -135,39 +135,60 @@ local BACK_DIAGONAL_MIN_RATIO=0.65
 local BACK_DIAGONAL_MAX_RATIO=1.54
 local SIDE_SWEEP_MAX_ABS_Z=0.24
 local SIDE_SWAP_X=0.06
+local SIDE_SWEEP_CENTER_GRACE=0.12
 local lateralLatch=nil
+local lateralLatchCenterDeadline=nil
 
-local function chooseDigitalChord(x,z)
+local function chooseDigitalChord(x,z,now)
     local ax=math.abs(x)
     local az=math.abs(z)
     local radius=math.sqrt(x*x+z*z)
-
-    if radius<PRESS_THRESHOLD then
-        lateralLatch=nil
-        return {}
-    end
-
     local horizontalKey=x<0 and "A" or "D"
     local inSideSweepCorridor=az<=SIDE_SWEEP_MAX_ABS_Z
 
-    -- A fast lateral sweep behaves like a keyboard handoff: keep the current
-    -- side through the center and swap directly once the thumb crosses slightly
-    -- into the opposite side. No W/WA/WD chord is emitted in between.
+    -- Preserve a lateral keyboard handoff while the thumb crosses the physical
+    -- center. A short grace window prevents the joystick deadzone from emitting
+    -- neutral/W between A and D, but still lets a deliberate held center become
+    -- neutral after 120 ms.
     if lateralLatch then
         if not inSideSweepCorridor then
             lateralLatch=nil
+            lateralLatchCenterDeadline=nil
         else
             if lateralLatch=="A" and x>=SIDE_SWAP_X then
                 lateralLatch="D"
+                lateralLatchCenterDeadline=nil
+                return {D=true}
             elseif lateralLatch=="D" and x<=-SIDE_SWAP_X then
                 lateralLatch="A"
+                lateralLatchCenterDeadline=nil
+                return {A=true}
             end
-            return {[lateralLatch]=true}
+
+            if radius>=PRESS_THRESHOLD then
+                lateralLatchCenterDeadline=nil
+                return {[lateralLatch]=true}
+            end
+
+            if lateralLatchCenterDeadline==nil then
+                lateralLatchCenterDeadline=now+SIDE_SWEEP_CENTER_GRACE
+            end
+            if now<=lateralLatchCenterDeadline then
+                return {[lateralLatch]=true}
+            end
+
+            lateralLatch=nil
+            lateralLatchCenterDeadline=nil
         end
+    end
+
+    if radius<PRESS_THRESHOLD then
+        return {}
     end
 
     if az<=0.0001 then
         lateralLatch=horizontalKey
+        lateralLatchCenterDeadline=nil
         return {[horizontalKey]=true}
     end
 
@@ -187,7 +208,10 @@ local function chooseDigitalChord(x,z)
         end
 
         if ratio>FORWARD_DIAGONAL_MAX_RATIO then
-            if inSideSweepCorridor then lateralLatch=horizontalKey end
+            if inSideSweepCorridor then
+                lateralLatch=horizontalKey
+                lateralLatchCenterDeadline=nil
+            end
             return {[horizontalKey]=true}
         end
 
@@ -196,7 +220,10 @@ local function chooseDigitalChord(x,z)
         if ratio<=1 then
             return {W=true}
         end
-        if inSideSweepCorridor then lateralLatch=horizontalKey end
+        if inSideSweepCorridor then
+            lateralLatch=horizontalKey
+            lateralLatchCenterDeadline=nil
+        end
         return {[horizontalKey]=true}
     end
 
@@ -209,7 +236,10 @@ local function chooseDigitalChord(x,z)
     if ratio<BACK_DIAGONAL_MIN_RATIO then
         return {S=true}
     elseif ratio>BACK_DIAGONAL_MAX_RATIO then
-        if inSideSweepCorridor then lateralLatch=horizontalKey end
+        if inSideSweepCorridor then
+            lateralLatch=horizontalKey
+            lateralLatchCenterDeadline=nil
+        end
         return {[horizontalKey]=true}
     end
 
@@ -219,13 +249,14 @@ end
 local function refreshKeys(now)
     if not enabled or movementTouch==nil then
         lateralLatch=nil
+        lateralLatchCenterDeadline=nil
         resetAxis(axisX)
         resetAxis(axisZ)
         releaseKeys()
         return
     end
 
-    applyKeys(chooseDigitalChord(latestX,latestZ))
+    applyKeys(chooseDigitalChord(latestX,latestZ,now))
 end
 ]]
 source=replaceOncePlain(source,oldRefresh,newRefresh,"2D joystick zones")
@@ -249,6 +280,7 @@ local function releaseMovement()
     latestX=0
     latestZ=0
     lateralLatch=nil
+    lateralLatchCenterDeadline=nil
     resetAxis(axisX)
     resetAxis(axisZ)
     releaseKeys()

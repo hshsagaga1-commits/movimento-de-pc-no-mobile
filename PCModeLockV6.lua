@@ -15,7 +15,8 @@ local baseChunk,baseError=loadstring(baseSource)
 if not baseChunk then error(baseError) end
 baseChunk()
 
--- Replace only the movement bridge with the experimental V6.1 mapping/jump route.
+-- Replace only the movement bridge with V6.2 joystick mapping while keeping the
+-- proven V5.9 Space jump path.
 local visualCleanup=getgenv().__PCRobloxNativeVisualV5Cleanup
 if type(visualCleanup)=="function" then pcall(visualCleanup) end
 local bridgeCleanup=getgenv().__PCKeyboardTouchBridgeV52Cleanup
@@ -44,7 +45,7 @@ local newVisualCleanup=getgenv().__PCRobloxNativeVisualV5Cleanup
 local newCrouchCleanup=getgenv().__PCCrouchToggleV59Cleanup
 
 if type(getgenv().PCModeLock)=="table" then
-    getgenv().PCModeLock.Version="6.1-mobile-hud-2d-zones-native-mobile-jump"
+    getgenv().PCModeLock.Version="6.2-mobile-hud-2d-zones-space-jump"
 end
 
 getgenv().__PCModeLockCleanup=function()

@@ -13,9 +13,9 @@ local baseChunk,baseError=loadstring(baseSource)
 if not baseChunk then error(baseError) end
 baseChunk()
 
--- Replace only the keyboard-touch bridge. V5.9 currently uses a temporary
--- diagnostic 2000 ms Space hold (0 ms added response delay) and a wider pure-W
--- forward sector so small lateral finger drift does not add A/D.
+-- Replace only the keyboard-touch bridge. One tap starts immediately and then
+-- repeats short Space down/up pulses for 2 seconds. Movement keeps the W-biased
+-- forward sector so slight lateral finger drift does not add A/D.
 local visualCleanup=getgenv().__PCRobloxNativeVisualV5Cleanup
 if type(visualCleanup)=="function" then pcall(visualCleanup) end
 
@@ -33,7 +33,8 @@ local visualChunk,visualError=loadstring(visualSource)
 if not visualChunk then error(visualError) end
 visualChunk()
 
--- Crouch remains isolated from movement/jump.
+-- Crouch stays native: no clone and no replacement of Evade's toggle behavior.
+-- The helper only adds the short PC-like pressed visual while the finger is down.
 local crouchSource=game:HttpGet(ROOT.."PCCrouchToggleV5_9.lua?_cb="..HttpService:GenerateGUID(false),true)
 local crouchChunk,crouchError=loadstring(crouchSource)
 if not crouchChunk then error(crouchError) end
@@ -45,7 +46,7 @@ local newVisualCleanup=getgenv().__PCRobloxNativeVisualV5Cleanup
 local newCrouchCleanup=getgenv().__PCCrouchToggleV59Cleanup
 
 if type(getgenv().PCModeLock)=="table" then
-    getgenv().PCModeLock.Version="5.9-test-zero-delay-2000ms-space-hold-forward-W-bias-crouch-toggle"
+    getgenv().PCModeLock.Version="5.9-zero-delay-2s-repeat-burst-forward-W-bias-native-crouch"
 end
 
 getgenv().__PCModeLockCleanup=function()

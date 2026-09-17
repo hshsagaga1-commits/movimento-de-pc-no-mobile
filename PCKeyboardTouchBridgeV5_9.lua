@@ -13,8 +13,10 @@ local function replaceOncePlain(text,needle,replacement,label)
     return text:sub(1,first-1)..replacement..text:sub(last+1)
 end
 
--- Keep the proven short Space pulse. A tap now starts a 2 second repeat burst:
--- first pulse is immediate, then fresh down/up pulses repeat every 110 ms.
+-- One tap = immediate jump, then repeated short Space down/up pulses for 2 s.
+-- We intentionally keep the proven 55 ms pulse length; only the burst duration
+-- is 2000 ms. This avoids the Evade behavior where a single held Space waits
+-- for key-up before producing the useful jump action.
 local oldJumpState=[[
 local lastJumpPulse=-math.huge
 local pendingJumpDeadline=nil
@@ -53,11 +55,11 @@ local function requestJump()
     local token=jumpBurstToken
     local deadline=os.clock()+JUMP_BURST_SECONDS
 
-    -- 0 ms response: first jump pulse happens immediately on touch.
+    -- 0 ms added delay: first pulse is sent directly from InputBegan.
     pulseJump()
 
     task.spawn(function()
-        while enabled and token==jumpBurstToken and os.clock()<deadline do
+        while enabled and token==jumpBurstToken do
             task.wait(JUMP_BURST_INTERVAL)
             if not enabled or token~=jumpBurstToken or os.clock()>=deadline then break end
             pulseJump()
@@ -68,7 +70,7 @@ end
 source=replaceOncePlain(source,oldRequest,newRequest,"requestJump burst behavior")
 
 -- W-biased forward sector. Small sideways finger drift no longer adds A/D while
--- forward clearly dominates; intentional diagonals still pass at >60% lateral.
+-- forward clearly dominates; deliberate diagonals still work past 60% lateral.
 local oldRefresh=[[
     local x=updateAxis(axisX,latestX,now)
     local z=updateAxis(axisZ,latestZ,now)
@@ -90,14 +92,24 @@ local newRefresh=[[
 ]]
 source=replaceOncePlain(source,oldRefresh,newRefresh,"refreshKeys forward mapping")
 
-local oldCleanupLine=[[
+local oldCleanup=[[
+getgenv().__PCKeyboardTouchBridgeV52Cleanup=function()
+    enabled=false
+    releaseMovement()
+    pendingJumpDeadline=nil
     pendingSpaceReleaseToken+=1
+    pcall(function() RunService:UnbindFromRenderStep(BIND_NAME) end)
 ]]
-local newCleanupLine=[[
+local newCleanup=[[
+getgenv().__PCKeyboardTouchBridgeV52Cleanup=function()
+    enabled=false
+    releaseMovement()
+    pendingJumpDeadline=nil
     jumpBurstToken+=1
     pendingSpaceReleaseToken+=1
+    pcall(function() RunService:UnbindFromRenderStep(BIND_NAME) end)
 ]]
-source=replaceOncePlain(source,oldCleanupLine,newCleanupLine,"cleanup burst cancellation")
+source=replaceOncePlain(source,oldCleanup,newCleanup,"cleanup burst cancellation")
 
 local chunk,loadError=loadstring(source)
 if not chunk then error(loadError) end

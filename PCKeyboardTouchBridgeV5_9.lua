@@ -13,10 +13,10 @@ local function replaceOncePlain(text,needle,replacement,label)
     return text:sub(1,first-1)..replacement..text:sub(last+1)
 end
 
--- One tap = immediate jump, then repeated short Space down/up pulses for 2 s.
--- We intentionally keep the proven 55 ms pulse length; only the burst duration
--- is 2000 ms. This avoids the Evade behavior where a single held Space waits
--- for key-up before producing the useful jump action.
+-- One tap = immediate jump attempt, then a fresh Space up/down transition on
+-- every Heartbeat for 200 ms. This acts as a short jump buffer: as soon as the
+-- game allows jumping after landing, the next frame already carries a new
+-- Space-down event instead of waiting for a coarse 110 ms retry interval.
 local oldJumpState=[[
 local lastJumpPulse=-math.huge
 local pendingJumpDeadline=nil
@@ -28,8 +28,7 @@ local lastJumpPulse=-math.huge
 local pendingJumpDeadline=nil
 local pendingSpaceReleaseToken=0
 local jumpBurstToken=0
-local JUMP_BURST_SECONDS=2.000
-local JUMP_BURST_INTERVAL=0.110
+local JUMP_BURST_SECONDS=0.200
 local movementCaptures=0
 ]]
 source=replaceOncePlain(source,oldJumpState,newJumpState,"jump burst state")
@@ -55,19 +54,38 @@ local function requestJump()
     local token=jumpBurstToken
     local deadline=os.clock()+JUMP_BURST_SECONDS
 
-    -- 0 ms added delay: first pulse is sent directly from InputBegan.
-    pulseJump()
+    local function burstPulse()
+        if not enabled or token~=jumpBurstToken then return end
+        lastJumpPulse=os.clock()
+        pendingJumpDeadline=nil
+        jumpPulses+=1
+        pcall(function()
+            -- Force a fresh edge every attempt. The key-up immediately before
+            -- key-down prevents the game from seeing one long held Space.
+            VirtualInputManager:SendKeyEvent(false,Enum.KeyCode.Space,false,game)
+            VirtualInputManager:SendKeyEvent(true,Enum.KeyCode.Space,false,game)
+        end)
+    end
+
+    -- 0 ms added response delay on the original touch.
+    burstPulse()
 
     task.spawn(function()
-        while enabled and token==jumpBurstToken do
-            task.wait(JUMP_BURST_INTERVAL)
+        while enabled and token==jumpBurstToken and os.clock()<deadline do
+            RunService.Heartbeat:Wait()
             if not enabled or token~=jumpBurstToken or os.clock()>=deadline then break end
-            pulseJump()
+            burstPulse()
+        end
+
+        if token==jumpBurstToken then
+            pcall(function()
+                VirtualInputManager:SendKeyEvent(false,Enum.KeyCode.Space,false,game)
+            end)
         end
     end)
 end
 ]]
-source=replaceOncePlain(source,oldRequest,newRequest,"requestJump burst behavior")
+source=replaceOncePlain(source,oldRequest,newRequest,"requestJump frame-buffer behavior")
 
 -- W-biased forward sector. Small sideways finger drift no longer adds A/D while
 -- forward clearly dominates; deliberate diagonals still work past 60% lateral.
@@ -116,5 +134,5 @@ if not chunk then error(loadError) end
 chunk()
 
 if type(getgenv().PCKeyboardTouchBridgeV52)=="table" then
-    getgenv().PCKeyboardTouchBridgeV52.Version="5.9-zero-delay-2s-repeat-burst-forward-W-bias"
+    getgenv().PCKeyboardTouchBridgeV52.Version="5.9-zero-delay-200ms-frame-buffer-forward-W-bias"
 end

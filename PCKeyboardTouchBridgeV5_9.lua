@@ -16,7 +16,7 @@ end
 -- One tap = immediate jump attempt, then a fresh Space up/down transition on
 -- every Heartbeat for 200 ms. This acts as a short jump buffer: as soon as the
 -- game allows jumping after landing, the next frame already carries a new
--- Space-down event instead of waiting for a coarse 110 ms retry interval.
+-- Space-down event instead of waiting for a coarse retry interval.
 local oldJumpState=[[
 local lastJumpPulse=-math.huge
 local pendingJumpDeadline=nil
@@ -60,14 +60,11 @@ local function requestJump()
         pendingJumpDeadline=nil
         jumpPulses+=1
         pcall(function()
-            -- Force a fresh edge every attempt. The key-up immediately before
-            -- key-down prevents the game from seeing one long held Space.
             VirtualInputManager:SendKeyEvent(false,Enum.KeyCode.Space,false,game)
             VirtualInputManager:SendKeyEvent(true,Enum.KeyCode.Space,false,game)
         end)
     end
 
-    -- 0 ms added response delay on the original touch.
     burstPulse()
 
     task.spawn(function()
@@ -87,28 +84,54 @@ end
 ]]
 source=replaceOncePlain(source,oldRequest,newRequest,"requestJump frame-buffer behavior")
 
--- W-biased forward sector. Small sideways finger drift no longer adds A/D while
--- forward clearly dominates; deliberate diagonals still work past 60% lateral.
+-- PC-style digital sectors. The joystick position only chooses a keyboard chord;
+-- once a sector is selected, A/D/W/S are full digital key presses, not analog force.
+-- Diagonal sectors are intentionally narrow so W, A and D dominate most of the ring.
 local oldRefresh=[[
     local x=updateAxis(axisX,latestX,now)
     local z=updateAxis(axisZ,latestZ,now)
     applyKeys({W=z<0,S=z>0,A=x<0,D=x>0})
 ]]
 local newRefresh=[[
-    local z=updateAxis(axisZ,latestZ,now)
-    local forwardStrength=math.max(0,-latestZ)
-    local lateralStrength=math.abs(latestX)
-    local preferPureW=(z<0 and forwardStrength>=PRESS_THRESHOLD and lateralStrength<=forwardStrength*0.60)
-    local x
-    if preferPureW then
-        resetAxis(axisX)
-        x=0
-    else
-        x=updateAxis(axisX,latestX,now)
+    local DIGITAL_DIAGONAL_MIN_RATIO=0.82
+    local DIGITAL_DIAGONAL_MAX_RATIO=1.22
+
+    local function chooseDigitalChord(x,z)
+        local ax=math.abs(x)
+        local az=math.abs(z)
+        local strongest=math.max(ax,az)
+
+        if strongest<PRESS_THRESHOLD then
+            resetAxis(axisX)
+            resetAxis(axisZ)
+            return {}
+        end
+
+        local verticalKey=z<0 and "W" or "S"
+        local horizontalKey=x<0 and "A" or "D"
+
+        if az<=0.0001 then
+            return {[horizontalKey]=true}
+        end
+
+        if ax<=0.0001 then
+            return {[verticalKey]=true}
+        end
+
+        local lateralToVertical=ax/az
+
+        if lateralToVertical<DIGITAL_DIAGONAL_MIN_RATIO then
+            return {[verticalKey]=true}
+        elseif lateralToVertical>DIGITAL_DIAGONAL_MAX_RATIO then
+            return {[horizontalKey]=true}
+        end
+
+        return {[verticalKey]=true,[horizontalKey]=true}
     end
-    applyKeys({W=z<0,S=z>0,A=x<0,D=x>0})
+
+    applyKeys(chooseDigitalChord(latestX,latestZ))
 ]]
-source=replaceOncePlain(source,oldRefresh,newRefresh,"refreshKeys forward mapping")
+source=replaceOncePlain(source,oldRefresh,newRefresh,"refreshKeys digital sector mapping")
 
 local oldCleanup=[[
 getgenv().__PCKeyboardTouchBridgeV52Cleanup=function()
@@ -134,5 +157,5 @@ if not chunk then error(loadError) end
 chunk()
 
 if type(getgenv().PCKeyboardTouchBridgeV52)=="table" then
-    getgenv().PCKeyboardTouchBridgeV52.Version="5.9-zero-delay-200ms-frame-buffer-forward-W-bias"
+    getgenv().PCKeyboardTouchBridgeV52.Version="5.9-zero-delay-200ms-frame-buffer-digital-sectors-narrow-diagonals"
 end

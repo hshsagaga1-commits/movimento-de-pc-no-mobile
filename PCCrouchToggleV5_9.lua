@@ -14,7 +14,8 @@ local pressed=false
 local originalButton=nil
 local cloneButton=nil
 local pressScale=nil
-local connections={}
+local buttonConnections={}
+local globalConnections={}
 
 local function fireCrouch(down)
     local scripts=player:FindFirstChild("PlayerScripts")
@@ -55,8 +56,8 @@ local function findNativeCrouch()
 end
 
 local function disconnectButton()
-    for _,c in ipairs(connections) do pcall(function() c:Disconnect() end) end
-    table.clear(connections)
+    for _,c in ipairs(buttonConnections) do pcall(function() c:Disconnect() end) end
+    table.clear(buttonConnections)
     if cloneButton then pcall(function() cloneButton:Destroy() end) end
     cloneButton=nil
     pressScale=nil
@@ -85,7 +86,7 @@ local function bindButton(button)
     cloneButton=clone
     button.Visible=false
 
-    connections[#connections+1]=clone.InputBegan:Connect(function(input)
+    buttonConnections[#buttonConnections+1]=clone.InputBegan:Connect(function(input)
         if not enabled or pressed then return end
         if input.UserInputType~=Enum.UserInputType.Touch and input.UserInputType~=Enum.UserInputType.MouseButton1 then return end
         pressed=true
@@ -94,13 +95,13 @@ local function bindButton(button)
         fireCrouch(crouched)
     end)
 
-    connections[#connections+1]=clone.InputEnded:Connect(function(input)
+    buttonConnections[#buttonConnections+1]=clone.InputEnded:Connect(function(input)
         if input.UserInputType~=Enum.UserInputType.Touch and input.UserInputType~=Enum.UserInputType.MouseButton1 then return end
         pressed=false
         setPressedVisual(false)
     end)
 
-    connections[#connections+1]=clone.AncestryChanged:Connect(function(_,parent)
+    buttonConnections[#buttonConnections+1]=clone.AncestryChanged:Connect(function(_,parent)
         if not parent then
             cloneButton=nil
             pressScale=nil
@@ -120,7 +121,7 @@ task.spawn(function()
     end
 end)
 
-connections[#connections+1]=player.CharacterAdded:Connect(function()
+globalConnections[#globalConnections+1]=player.CharacterAdded:Connect(function()
     crouched=false
     pressed=false
     setPressedVisual(false)
@@ -139,6 +140,8 @@ env.__PCCrouchToggleV59Cleanup=function()
     if crouched then pcall(function() fireCrouch(false) end) end
     crouched=false
     disconnectButton()
+    for _,c in ipairs(globalConnections) do pcall(function() c:Disconnect() end) end
+    table.clear(globalConnections)
     env.PCCrouchToggleV59=nil
     env.__PCCrouchToggleV59Cleanup=nil
 end

@@ -4,7 +4,9 @@ local ROOT="https://raw.githubusercontent.com/hshsagaga1-commits/movimento-de-pc
 local oldCleanup=getgenv().__PCModeLockCleanup
 if type(oldCleanup)=="function" then pcall(oldCleanup) end
 
-local lockSource=game:HttpGet(ROOT.."PCModeLockV5.lua?_cb="..HttpService:GenerateGUID(false),true)
+-- Bootstrap ControlModule as PC, then expose the real mobile/touch identity back
+-- to game HUD scripts while keeping the keyboard movement controller locked.
+local lockSource=game:HttpGet(ROOT.."PCModeLockV5_HUDMobile.lua?_cb="..HttpService:GenerateGUID(false),true)
 local lockChunk,lockError=loadstring(lockSource)
 if not lockChunk then error(lockError) end
 lockChunk()
@@ -23,7 +25,7 @@ local lockCleanup=getgenv().__PCModeLockCleanup
 local bridgeCleanup=getgenv().__PCKeyboardTouchBridgeV52Cleanup
 
 if type(getgenv().PCModeLock)=="table" then
-    getgenv().PCModeLock.Version="5.2-pc-lock-visible-joystick"
+    getgenv().PCModeLock.Version="5.2-mobile-hud-pc-movement-visible-joystick"
 end
 
 getgenv().__PCModeLockCleanup=function()

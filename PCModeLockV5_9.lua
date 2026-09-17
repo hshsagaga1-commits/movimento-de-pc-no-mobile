@@ -6,17 +6,17 @@ if type(oldCleanup)=="function" then pcall(oldCleanup) end
 local oldCrouchCleanup=getgenv().__PCCrouchToggleV59Cleanup
 if type(oldCrouchCleanup)=="function" then pcall(oldCrouchCleanup) end
 
--- Start from the current working V5.7 stack (PC lock + controller wake +
--- right-half camera gate + exact Roblox visual).
+-- V5.7 now bootstraps ControlModule as keyboard/PC, then exposes the real touch
+-- identity back to game HUD scripts. Overhaul can keep its mobile buttons while
+-- movement remains locked to the keyboard controller.
 local baseSource=game:HttpGet(ROOT.."PCModeLockV5_7.lua?_cb="..HttpService:GenerateGUID(false),true)
 local baseChunk,baseError=loadstring(baseSource)
 if not baseChunk then error(baseError) end
 baseChunk()
 
--- Replace only the keyboard-touch bridge. One tap jumps immediately, then the
--- bridge sends a fresh Space edge every Heartbeat for 200 ms so landing can be
--- caught on the earliest frame. Movement is mapped to PC-style digital sectors:
--- broad W/A/D/S zones and deliberately narrow diagonal W+A/W+D zones.
+-- Replace only the keyboard-touch bridge. Jump keeps the immediate 200 ms frame
+-- buffer. Movement uses full digital keys, wider W+A/W+D sectors, and an upper-
+-- arc A/D latch so sweeping around the circular joystick swaps laterals dry.
 local visualCleanup=getgenv().__PCRobloxNativeVisualV5Cleanup
 if type(visualCleanup)=="function" then pcall(visualCleanup) end
 
@@ -47,7 +47,7 @@ local newVisualCleanup=getgenv().__PCRobloxNativeVisualV5Cleanup
 local newCrouchCleanup=getgenv().__PCCrouchToggleV59Cleanup
 
 if type(getgenv().PCModeLock)=="table" then
-    getgenv().PCModeLock.Version="5.9-zero-delay-200ms-digital-sectors-narrow-diagonals-native-crouch"
+    getgenv().PCModeLock.Version="5.9-mobile-hud-pc-movement-200ms-wider-diagonals-lateral-latch-native-crouch"
 end
 
 getgenv().__PCModeLockCleanup=function()

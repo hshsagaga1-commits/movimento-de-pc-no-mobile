@@ -15,9 +15,8 @@ baseChunk()
 
 -- Replace only the keyboard-touch bridge. One tap jumps immediately, then the
 -- bridge sends a fresh Space edge every Heartbeat for 200 ms so landing can be
--- caught on the earliest frame instead of waiting for a 110 ms retry interval.
--- Movement keeps the W-biased forward sector so slight lateral finger drift
--- does not add A/D.
+-- caught on the earliest frame. Movement is mapped to PC-style digital sectors:
+-- broad W/A/D/S zones and deliberately narrow diagonal W+A/W+D zones.
 local visualCleanup=getgenv().__PCRobloxNativeVisualV5Cleanup
 if type(visualCleanup)=="function" then pcall(visualCleanup) end
 
@@ -48,7 +47,7 @@ local newVisualCleanup=getgenv().__PCRobloxNativeVisualV5Cleanup
 local newCrouchCleanup=getgenv().__PCCrouchToggleV59Cleanup
 
 if type(getgenv().PCModeLock)=="table" then
-    getgenv().PCModeLock.Version="5.9-zero-delay-200ms-frame-buffer-forward-W-bias-native-crouch"
+    getgenv().PCModeLock.Version="5.9-zero-delay-200ms-digital-sectors-narrow-diagonals-native-crouch"
 end
 
 getgenv().__PCModeLockCleanup=function()

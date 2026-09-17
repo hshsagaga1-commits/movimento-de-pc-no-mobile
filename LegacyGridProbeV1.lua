@@ -42,6 +42,12 @@ local function fmt(v)
     return tostring(v)
 end
 
+local function safeProperty(inst,name,fallback)
+    if not inst then return fallback end
+    local ok,value=pcall(function() return inst[name] end)
+    return ok and tostring(value) or fallback
+end
+
 local function bindCharacter(char)
     character=char
     humanoid=char and char:FindFirstChildOfClass("Humanoid") or nil
@@ -119,7 +125,7 @@ end
 
 bindCharacter(player.Character)
 charConn=player.CharacterAdded:Connect(bindCharacter)
-table.insert(lines,"HEADER\tversion=1.0 duration="..DURATION.." contactRadius="..CONTACT_RADIUS)
+table.insert(lines,"HEADER\tversion=1.1 duration="..DURATION.." contactRadius="..CONTACT_RADIUS)
 table.insert(lines,"FIELDS\tt,chord,moveDirection,velocity,horizontalSpeed,speedDelta,cameraLook,cameraRight,hitName,hitClass,hitMaterial,hitCanCollide,hitTransparency,hitNormal,hitDistance,rayDirection,crouch,hipHeight,walkSpeed")
 safeNotify("15s: usa a grade como no PC; em pé, agachado e ao contrário se der.")
 
@@ -159,9 +165,9 @@ connection=RunService.Heartbeat:Connect(function()
         local inst=near.hit.Instance
         hitName=inst and inst:GetFullName() or "?"
         hitClass=inst and inst.ClassName or "?"
-        hitMaterial=inst and tostring(inst.Material) or "?"
-        hitCanCollide=inst and tostring(inst.CanCollide) or "?"
-        hitTransparency=inst and tostring(inst.Transparency) or "?"
+        hitMaterial=tostring(near.hit.Material)
+        hitCanCollide=safeProperty(inst,"CanCollide","n/a")
+        hitTransparency=safeProperty(inst,"Transparency","n/a")
         hitNormal=near.hit.Normal
         hitDistance=near.distance
         rayDirection=near.direction
@@ -192,7 +198,7 @@ connection=RunService.Heartbeat:Connect(function()
 end)
 
 getgenv().LegacyGridProbeV1={
-    Version="1.0-contact-normal-speed-trend",
+    Version="1.1-safe-surface-properties",
     Stop=function() finish("manual") end,
     GetReport=function() return table.concat(lines,"\n") end,
 }

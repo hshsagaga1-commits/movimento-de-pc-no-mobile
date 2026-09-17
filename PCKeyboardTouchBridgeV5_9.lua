@@ -84,17 +84,21 @@ end
 ]]
 source=replaceOncePlain(source,oldRequest,newRequest,"requestJump frame-buffer behavior")
 
--- PC-style digital sectors. The joystick position only chooses a keyboard chord;
--- once a sector is selected, A/D/W/S are full digital key presses, not analog force.
--- Diagonal sectors are intentionally narrow so W, A and D dominate most of the ring.
+-- PC-style digital sectors. A/D/W/S are always full digital key presses.
+-- W+A/W+D are wider than the previous build, but W and pure A/D still own most
+-- of the ring. A lateral latch makes an A->D or D->A sweep across the upper arc
+-- behave like a keyboard swap instead of walking through W while the thumb
+-- physically travels around the circular joystick.
 local oldRefresh=[[
     local x=updateAxis(axisX,latestX,now)
     local z=updateAxis(axisZ,latestZ,now)
     applyKeys({W=z<0,S=z>0,A=x<0,D=x>0})
 ]]
 local newRefresh=[[
-    local DIGITAL_DIAGONAL_MIN_RATIO=0.82
-    local DIGITAL_DIAGONAL_MAX_RATIO=1.22
+    local DIGITAL_DIAGONAL_MIN_RATIO=0.65
+    local DIGITAL_DIAGONAL_MAX_RATIO=1.54
+    local LATERAL_LATCH_MAX_Z=0.20
+    local lateralLatch=nil
 
     local function chooseDigitalChord(x,z)
         local ax=math.abs(x)
@@ -102,6 +106,7 @@ local newRefresh=[[
         local strongest=math.max(ax,az)
 
         if strongest<PRESS_THRESHOLD then
+            lateralLatch=nil
             resetAxis(axisX)
             resetAxis(axisZ)
             return {}
@@ -109,8 +114,25 @@ local newRefresh=[[
 
         local verticalKey=z<0 and "W" or "S"
         local horizontalKey=x<0 and "A" or "D"
+        local upperOrSideArc=z<=LATERAL_LATCH_MAX_Z
+
+        -- Once pure A or D is entered on the upper/side arc, keep that digital
+        -- key held while the thumb sweeps around the circle. As soon as the
+        -- opposite horizontal side is reached, swap in one update: A up/D down
+        -- or D up/A down. Re-centering clears the latch.
+        if lateralLatch and upperOrSideArc then
+            if lateralLatch=="A" and x>=PRESS_THRESHOLD then
+                lateralLatch="D"
+            elseif lateralLatch=="D" and x<=-PRESS_THRESHOLD then
+                lateralLatch="A"
+            end
+            return {[lateralLatch]=true}
+        elseif lateralLatch and not upperOrSideArc then
+            lateralLatch=nil
+        end
 
         if az<=0.0001 then
+            if upperOrSideArc then lateralLatch=horizontalKey end
             return {[horizontalKey]=true}
         end
 
@@ -123,6 +145,7 @@ local newRefresh=[[
         if lateralToVertical<DIGITAL_DIAGONAL_MIN_RATIO then
             return {[verticalKey]=true}
         elseif lateralToVertical>DIGITAL_DIAGONAL_MAX_RATIO then
+            if upperOrSideArc then lateralLatch=horizontalKey end
             return {[horizontalKey]=true}
         end
 
@@ -157,5 +180,5 @@ if not chunk then error(loadError) end
 chunk()
 
 if type(getgenv().PCKeyboardTouchBridgeV52)=="table" then
-    getgenv().PCKeyboardTouchBridgeV52.Version="5.9-zero-delay-200ms-frame-buffer-digital-sectors-narrow-diagonals"
+    getgenv().PCKeyboardTouchBridgeV52.Version="5.9-zero-delay-200ms-digital-sectors-wider-diagonals-lateral-latch"
 end

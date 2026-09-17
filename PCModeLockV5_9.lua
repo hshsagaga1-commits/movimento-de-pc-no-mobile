@@ -7,14 +7,15 @@ local oldCrouchCleanup=getgenv().__PCCrouchToggleV59Cleanup
 if type(oldCrouchCleanup)=="function" then pcall(oldCrouchCleanup) end
 
 -- Start from the current working V5.7 stack (PC lock + controller wake +
--- right-half camera gate + exact Roblox visual). Movement remains untouched.
+-- right-half camera gate + exact Roblox visual).
 local baseSource=game:HttpGet(ROOT.."PCModeLockV5_7.lua?_cb="..HttpService:GenerateGUID(false),true)
 local baseChunk,baseError=loadstring(baseSource)
 if not baseChunk then error(baseError) end
 baseChunk()
 
--- Replace only the keyboard-touch bridge so a normal single jump sends
--- Space-down immediately and releases Space 200 ms later.
+-- Replace only the keyboard-touch bridge. V5.9 currently uses a temporary
+-- diagnostic 2000 ms Space hold (0 ms added response delay) and a wider pure-W
+-- forward sector so small lateral finger drift does not add A/D.
 local visualCleanup=getgenv().__PCRobloxNativeVisualV5Cleanup
 if type(visualCleanup)=="function" then pcall(visualCleanup) end
 
@@ -32,8 +33,7 @@ local visualChunk,visualError=loadstring(visualSource)
 if not visualChunk then error(visualError) end
 visualChunk()
 
--- Crouch is isolated from movement/jump: it clones the game's native crouch button,
--- sends Evade's PC Crouch key state, and keeps mobile tap-to-toggle semantics.
+-- Crouch remains isolated from movement/jump.
 local crouchSource=game:HttpGet(ROOT.."PCCrouchToggleV5_9.lua?_cb="..HttpService:GenerateGUID(false),true)
 local crouchChunk,crouchError=loadstring(crouchSource)
 if not crouchChunk then error(crouchError) end
@@ -45,7 +45,7 @@ local newVisualCleanup=getgenv().__PCRobloxNativeVisualV5Cleanup
 local newCrouchCleanup=getgenv().__PCCrouchToggleV59Cleanup
 
 if type(getgenv().PCModeLock)=="table" then
-    getgenv().PCModeLock.Version="5.9-zero-delay-200ms-space-hold-crouch-toggle"
+    getgenv().PCModeLock.Version="5.9-test-zero-delay-2000ms-space-hold-forward-W-bias-crouch-toggle"
 end
 
 getgenv().__PCModeLockCleanup=function()

@@ -19,6 +19,7 @@ local lastSample=-math.huge
 local lastSpeed=nil
 local lines={}
 local connection=nil
+local charConn=nil
 local character=nil
 local humanoid=nil
 local root=nil
@@ -97,6 +98,7 @@ local function finish(reason)
     if not running then return end
     running=false
     if connection then pcall(function() connection:Disconnect() end) end
+    if charConn then pcall(function() charConn:Disconnect() end) end
     table.insert(lines,"END\treason="..tostring(reason))
     local report=table.concat(lines,"\n")
     getgenv().LegacyGridProbeReport=report
@@ -116,7 +118,7 @@ if game.PlaceId~=LEGACY_PLACE_ID then
 end
 
 bindCharacter(player.Character)
-local charConn=player.CharacterAdded:Connect(bindCharacter)
+charConn=player.CharacterAdded:Connect(bindCharacter)
 table.insert(lines,"HEADER\tversion=1.0 duration="..DURATION.." contactRadius="..CONTACT_RADIUS)
 table.insert(lines,"FIELDS\tt,chord,moveDirection,velocity,horizontalSpeed,speedDelta,cameraLook,cameraRight,hitName,hitClass,hitMaterial,hitCanCollide,hitTransparency,hitNormal,hitDistance,rayDirection,crouch,hipHeight,walkSpeed")
 safeNotify("15s: usa a grade como no PC; em pé, agachado e ao contrário se der.")
@@ -125,7 +127,6 @@ connection=RunService.Heartbeat:Connect(function()
     if not running then return end
     local now=os.clock()
     if now-started>=DURATION then
-        pcall(function() charConn:Disconnect() end)
         finish("duration")
         return
     end

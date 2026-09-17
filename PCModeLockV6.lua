@@ -15,7 +15,7 @@ local baseChunk,baseError=loadstring(baseSource)
 if not baseChunk then error(baseError) end
 baseChunk()
 
--- Replace only the movement bridge with V6 sector mapping.
+-- Replace only the movement bridge with the experimental V6.1 mapping/jump route.
 local visualCleanup=getgenv().__PCRobloxNativeVisualV5Cleanup
 if type(visualCleanup)=="function" then pcall(visualCleanup) end
 local bridgeCleanup=getgenv().__PCKeyboardTouchBridgeV52Cleanup
@@ -44,7 +44,7 @@ local newVisualCleanup=getgenv().__PCRobloxNativeVisualV5Cleanup
 local newCrouchCleanup=getgenv().__PCCrouchToggleV59Cleanup
 
 if type(getgenv().PCModeLock)=="table" then
-    getgenv().PCModeLock.Version="6.0-mobile-hud-pc-movement-20w-30diag-50lateral"
+    getgenv().PCModeLock.Version="6.1-mobile-hud-2d-zones-native-mobile-jump"
 end
 
 getgenv().__PCModeLockCleanup=function()

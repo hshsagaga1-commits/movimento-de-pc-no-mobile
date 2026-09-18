@@ -4,6 +4,10 @@ local FEATURE="https://raw.githubusercontent.com/hshsagaga1-commits/movimento-de
 
 local oldCleanup=getgenv().__PCModeLockCleanup
 if type(oldCleanup)=="function" then pcall(oldCleanup) end
+
+-- Remove the old crouch helper if a previous build installed it. Evade's native
+-- mobile crouch already has its own pressed visual, so stacking our UIScale on
+-- top made one tap look like a double press.
 local oldCrouchCleanup=getgenv().__PCCrouchToggleV59Cleanup
 if type(oldCrouchCleanup)=="function" then pcall(oldCrouchCleanup) end
 
@@ -33,23 +37,17 @@ local visualChunk,visualError=loadstring(visualSource)
 if not visualChunk then error(visualError) end
 visualChunk()
 
--- Crouch remains Evade-native; helper adds only the pressed visual feedback.
-local crouchSource=game:HttpGet(STABLE.."PCCrouchToggleV5_9.lua?_cb="..HttpService:GenerateGUID(false),true)
-local crouchChunk,crouchError=loadstring(crouchSource)
-if not crouchChunk then error(crouchError) end
-crouchChunk()
-
+-- Crouch is intentionally left 100% Evade-native. No extra press scale and no
+-- synthetic crouch input: one physical tap gets exactly one native visual.
 local baseCleanup=getgenv().__PCModeLockCleanup
 local newBridgeCleanup=getgenv().__PCKeyboardTouchBridgeV52Cleanup
 local newVisualCleanup=getgenv().__PCRobloxNativeVisualV5Cleanup
-local newCrouchCleanup=getgenv().__PCCrouchToggleV59Cleanup
 
 if type(getgenv().PCModeLock)=="table" then
-    getgenv().PCModeLock.Version="6.2-mobile-hud-2d-zones-space-jump"
+    getgenv().PCModeLock.Version="6.3-mobile-hud-2d-zones-space-jump-native-crouch-visual"
 end
 
 getgenv().__PCModeLockCleanup=function()
-    if type(newCrouchCleanup)=="function" then pcall(newCrouchCleanup) end
     if type(newVisualCleanup)=="function" then pcall(newVisualCleanup) end
     if type(newBridgeCleanup)=="function" then pcall(newBridgeCleanup) end
     if type(baseCleanup)=="function" then pcall(baseCleanup) end

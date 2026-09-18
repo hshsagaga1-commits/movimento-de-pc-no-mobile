@@ -1,4 +1,6 @@
-local HttpService=game:GetService("HttpService")\nlocal Players=game:GetService("Players")\nlocal playerGui=Players.LocalPlayer:WaitForChild("PlayerGui")
+local HttpService=game:GetService("HttpService")
+local Players=game:GetService("Players")
+local playerGui=Players.LocalPlayer:WaitForChild("PlayerGui")
 local STABLE="https://raw.githubusercontent.com/hshsagaga1-commits/movimento-de-pc-no-mobile/classic-wasd-experiment/"
 local FEATURE="https://raw.githubusercontent.com/hshsagaga1-commits/movimento-de-pc-no-mobile/feature/pc-camera-grid-v6/"
 

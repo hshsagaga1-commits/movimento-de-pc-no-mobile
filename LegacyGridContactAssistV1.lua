@@ -253,25 +253,30 @@ local function applyAssist(contact,desired)
     local horizontal=flat(velocity)
     local normal=contact.normal
 
-    -- Remove the component that peels away from/through the contacted edge.
-    local normalSpeed=horizontal:Dot(normal)
-    local tangentVelocity=horizontal-normal*normalSpeed
+    -- Same motor for every supported chord. W is camera-forward; A/D are that
+    -- exact same behavior rotated 90 degrees; WA/WD are the normalized diagonal.
+    -- Do not project A/D onto the grid tangent: that was the bug that could turn
+    -- pure side input into almost zero movement.
+    local speed=horizontal.Magnitude
+    local walkSeed=math.max(0,humanoid.WalkSpeed*SEED_SPEED_FACTOR)
+    if speed<walkSeed then speed=walkSeed end
 
-    -- If collision killed most horizontal speed, seed only the surface-tangent
-    -- component from the current W/A/D chord. Fast trimp velocity is preserved.
-    local projectedDesired=desired-normal*desired:Dot(normal)
-    if projectedDesired.Magnitude>=MIN_PROJECTED_INPUT then
-        projectedDesired=projectedDesired.Unit
-        local walkSeed=math.max(0,humanoid.WalkSpeed*SEED_SPEED_FACTOR)
-        if tangentVelocity.Magnitude<walkSeed then
-            local sign=1
-            if tangentVelocity.Magnitude>0.10 and tangentVelocity:Dot(projectedDesired)<0 then sign=-1 end
-            tangentVelocity=projectedDesired*walkSeed*sign
-        end
+    local drive=Vector3.zero
+    if desired.Magnitude>=MIN_PROJECTED_INPUT then
+        drive=desired.Unit*speed
+    elseif horizontal.Magnitude>0.05 then
+        drive=horizontal
     end
 
     local inward=(contact.mode=="edge") and EDGE_INWARD_SPEED or WALL_INWARD_SPEED
-    local corrected=tangentVelocity-normal*inward
+
+    -- Keep the requested direction intact and add only contact pressure.
+    -- Therefore:
+    -- W   = forward motor + hold
+    -- A   = same motor rotated left + hold
+    -- D   = same motor rotated right + hold
+    -- WA/WD = same motor on the diagonal + hold
+    local corrected=drive-normal*inward
 
     pcall(function()
         root.AssemblyLinearVelocity=Vector3.new(corrected.X,velocity.Y,corrected.Z)
@@ -305,7 +310,7 @@ heartbeatConnection=RunService.Heartbeat:Connect(function()
 end)
 
 env.LegacyGridContactAssistV1={
-    Version="3.0-wall-plus-ledge-W-A-D-WA-WD-standing-crouched",
+    Version="3.1-same-motor-rotated-W-A-D-WA-WD",
     Enabled=enabled,
     GetState=function()
         return {

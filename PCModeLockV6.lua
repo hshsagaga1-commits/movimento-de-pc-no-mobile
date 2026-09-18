@@ -29,7 +29,7 @@ if not baseChunk then error(baseError) end
 baseChunk()
 removeOldCrouchPressArtifacts()
 
--- Replace only the movement bridge with V6.4 joystick mapping while keeping the
+-- Replace only the movement bridge with V6.5 direct joystick bridge while keeping the
 -- proven V5.9 Space jump path.
 local visualCleanup=getgenv().__PCRobloxNativeVisualV5Cleanup
 if type(visualCleanup)=="function" then pcall(visualCleanup) end
@@ -54,7 +54,7 @@ local newBridgeCleanup=getgenv().__PCKeyboardTouchBridgeV52Cleanup
 local newVisualCleanup=getgenv().__PCRobloxNativeVisualV5Cleanup
 
 if type(getgenv().PCModeLock)=="table" then
-    getgenv().PCModeLock.Version="6.4-mobile-hud-controller-jump-native-crouch-clean"
+    getgenv().PCModeLock.Version="6.5-direct-bridge-native-crouch-clean"
 end
 
 getgenv().__PCModeLockCleanup=function()

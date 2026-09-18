@@ -1,4 +1,4 @@
-local HttpService=game:GetService("HttpService")
+local HttpService=game:GetService("HttpService")\nlocal Players=game:GetService("Players")\nlocal playerGui=Players.LocalPlayer:WaitForChild("PlayerGui")
 local STABLE="https://raw.githubusercontent.com/hshsagaga1-commits/movimento-de-pc-no-mobile/classic-wasd-experiment/"
 local FEATURE="https://raw.githubusercontent.com/hshsagaga1-commits/movimento-de-pc-no-mobile/feature/pc-camera-grid-v6/"
 
@@ -11,6 +11,15 @@ if type(oldCleanup)=="function" then pcall(oldCleanup) end
 local oldCrouchCleanup=getgenv().__PCCrouchToggleV59Cleanup
 if type(oldCrouchCleanup)=="function" then pcall(oldCrouchCleanup) end
 
+local function removeOldCrouchPressArtifacts()
+    for _,obj in ipairs(playerGui:GetDescendants()) do
+        if obj:IsA("UIScale") and obj.Name=="PCCrouchPressVisualV59" then
+            pcall(function() obj:Destroy() end)
+        end
+    end
+end
+removeOldCrouchPressArtifacts()
+
 -- Base movement stack only: bootstrap keyboard controller, restore real mobile
 -- HUD identity, keep camera touch off the joystick half, and wake the selected
 -- keyboard controller. No body-view or sensitivity module is loaded here.
@@ -18,8 +27,9 @@ local baseSource=game:HttpGet(STABLE.."PCModeLockV5_7.lua?_cb="..HttpService:Gen
 local baseChunk,baseError=loadstring(baseSource)
 if not baseChunk then error(baseError) end
 baseChunk()
+removeOldCrouchPressArtifacts()
 
--- Replace only the movement bridge with V6.2 joystick mapping while keeping the
+-- Replace only the movement bridge with V6.4 joystick mapping while keeping the
 -- proven V5.9 Space jump path.
 local visualCleanup=getgenv().__PCRobloxNativeVisualV5Cleanup
 if type(visualCleanup)=="function" then pcall(visualCleanup) end
@@ -44,7 +54,7 @@ local newBridgeCleanup=getgenv().__PCKeyboardTouchBridgeV52Cleanup
 local newVisualCleanup=getgenv().__PCRobloxNativeVisualV5Cleanup
 
 if type(getgenv().PCModeLock)=="table" then
-    getgenv().PCModeLock.Version="6.3-mobile-hud-2d-zones-space-jump-native-crouch-visual"
+    getgenv().PCModeLock.Version="6.4-mobile-hud-controller-jump-native-crouch-clean"
 end
 
 getgenv().__PCModeLockCleanup=function()

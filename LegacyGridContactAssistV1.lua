@@ -5,11 +5,13 @@ local Workspace=game:GetService("Workspace")
 local player=Players.LocalPlayer
 local LEGACY_PLACE_ID=96537472072550
 local BIND_NAME="__LegacyGridContactAssistV1"
-local CONTACT_RADIUS=2.60
+local CONTACT_RADIUS=3.00
 local VERTICAL_NORMAL_Y_MAX=0.38
-local PRESSURE_MIN=0.28
+local PRESSURE_MIN=0.34
 local AWAY_THRESHOLD=0.12
 local MIN_TANGENT=0.40
+local CONTACT_GRACE_SECONDS=0.16
+local RAY_HEIGHT_OFFSETS={-0.35,0.10,0.55,1.00}
 
 local oldCleanup=getgenv().__LegacyGridContactAssistV1Cleanup
 if type(oldCleanup)=="function" then pcall(oldCleanup) end
@@ -28,6 +30,10 @@ local lastHitName="-"
 local lastHitNormal=Vector3.zero
 local lastInput=Vector3.zero
 local lastOutput=Vector3.zero
+local heldContactNormal=Vector3.zero
+local heldContactUntil=-math.huge
+local heldContactName="-"
+local heldContactHeight=0
 
 local rayParams=RaycastParams.new()
 rayParams.FilterType=Enum.RaycastFilterType.Exclude
@@ -62,38 +68,68 @@ local function flatUnit(v)
     return flat.Unit
 end
 
-local function chooseSurface(origin,intended)
+local function chooseSurface(rootPosition,intended)
     local best=nil
-    for i=0,15 do
-        local angle=(math.pi*2)*(i/16)
-        local rayDir=Vector3.new(math.cos(angle),0,math.sin(angle))*CONTACT_RADIUS
-        local hit=nil
-        pcall(function() hit=Workspace:Raycast(origin,rayDir,rayParams) end)
-        if hit and math.abs(hit.Normal.Y)<=VERTICAL_NORMAL_Y_MAX then
-            local normal=flatUnit(hit.Normal)
-            if normal.Magnitude>0 then
-                local dot=intended:Dot(normal)
-                local tangent=intended-normal*dot
-                local tangentMagnitude=tangent.Magnitude
-                if dot<=AWAY_THRESHOLD and tangentMagnitude>=MIN_TANGENT then
-                    local distance=(hit.Position-origin).Magnitude
-                    local score=distance-(math.min(1,tangentMagnitude)*0.18)
-                    if not best or score<best.score then
-                        best={
-                            hit=hit,
-                            normal=normal,
-                            dot=dot,
-                            tangent=tangent,
-                            tangentMagnitude=tangentMagnitude,
-                            distance=distance,
-                            score=score,
-                        }
+
+    -- A single chest-height ray is unreliable on the Legacy grid: the ray can
+    -- pass through a gap between bars, and prone/crouched poses shift the body
+    -- relative to the fence. Sample several heights so standing and lying use
+    -- the same contact rule.
+    for _,heightOffset in ipairs(RAY_HEIGHT_OFFSETS) do
+        local origin=rootPosition+Vector3.new(0,heightOffset,0)
+        for i=0,15 do
+            local angle=(math.pi*2)*(i/16)
+            local rayDir=Vector3.new(math.cos(angle),0,math.sin(angle))*CONTACT_RADIUS
+            local hit=nil
+            pcall(function() hit=Workspace:Raycast(origin,rayDir,rayParams) end)
+            if hit and math.abs(hit.Normal.Y)<=VERTICAL_NORMAL_Y_MAX then
+                local normal=flatUnit(hit.Normal)
+                if normal.Magnitude>0 then
+                    local dot=intended:Dot(normal)
+                    local tangent=intended-normal*dot
+                    local tangentMagnitude=tangent.Magnitude
+                    if dot<=AWAY_THRESHOLD and tangentMagnitude>=MIN_TANGENT then
+                        local distance=(hit.Position-origin).Magnitude
+                        local score=distance-(math.min(1,tangentMagnitude)*0.18)
+                        if not best or score<best.score then
+                            best={
+                                hit=hit,
+                                normal=normal,
+                                dot=dot,
+                                tangent=tangent,
+                                tangentMagnitude=tangentMagnitude,
+                                distance=distance,
+                                score=score,
+                                heightOffset=heightOffset,
+                                held=false,
+                            }
+                        end
                     end
                 end
             end
         end
     end
     return best
+end
+
+local function heldSurface(intended,now)
+    if heldContactNormal.Magnitude<=0 or now>heldContactUntil then return nil end
+    local normal=heldContactNormal
+    local dot=intended:Dot(normal)
+    local tangent=intended-normal*dot
+    local tangentMagnitude=tangent.Magnitude
+    if dot>AWAY_THRESHOLD or tangentMagnitude<MIN_TANGENT then return nil end
+    return {
+        hit=nil,
+        normal=normal,
+        dot=dot,
+        tangent=tangent,
+        tangentMagnitude=tangentMagnitude,
+        distance=CONTACT_RADIUS,
+        score=CONTACT_RADIUS,
+        heightOffset=heldContactHeight,
+        held=true,
+    }
 end
 
 local function assistedDirection(intended,candidate)
@@ -127,15 +163,27 @@ RunService:BindToRenderStep(BIND_NAME,Enum.RenderPriority.Input.Value+12,functio
     local intended=rawMove.Unit
     lastInput=intended
 
-    local origin=root.Position+Vector3.new(0,0.65,0)
-    local candidate=chooseSurface(origin,intended)
+    local now=os.clock()
+    local candidate=chooseSurface(root.Position,intended)
+
+    -- The fence has gaps. Keep the last valid normal for a very short window so
+    -- crossing a gap does not drop all inward pressure for one or two frames.
+    if candidate then
+        heldContactNormal=candidate.normal
+        heldContactUntil=now+CONTACT_GRACE_SECONDS
+        heldContactName=candidate.hit.Instance and candidate.hit.Instance:GetFullName() or "?"
+        heldContactHeight=candidate.heightOffset or 0
+    else
+        candidate=heldSurface(intended,now)
+    end
+
     if not candidate then
         noContactFrames+=1
         lastHitName="-"
         return
     end
 
-    lastHitName=candidate.hit.Instance and candidate.hit.Instance:GetFullName() or "?"
+    lastHitName=candidate.hit and candidate.hit.Instance and candidate.hit.Instance:GetFullName() or heldContactName
     lastHitNormal=candidate.normal
 
     local adjusted,reason=assistedDirection(intended,candidate)
@@ -153,7 +201,7 @@ RunService:BindToRenderStep(BIND_NAME,Enum.RenderPriority.Input.Value+12,functio
 end)
 
 getgenv().LegacyGridContactAssistV1={
-    Version="1.0-contact-normal-command-bias-no-speed-boost",
+    Version="1.1-multiheight-grid-gap-hold-standing-prone",
     Enabled=enabled,
     GetState=function()
         return {
@@ -168,6 +216,9 @@ getgenv().LegacyGridContactAssistV1={
             lastOutput=lastOutput,
             pressureMin=PRESSURE_MIN,
             contactRadius=CONTACT_RADIUS,
+            contactGraceSeconds=CONTACT_GRACE_SECONDS,
+            heldContactActive=os.clock()<=heldContactUntil,
+            heldContactHeight=heldContactHeight,
         }
     end,
 }

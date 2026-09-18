@@ -51,7 +51,6 @@ local jumpBurstToken=0
 local JUMP_BURST_SECONDS=0.200
 local lateralLatch=nil
 local lateralLatchCenterDeadline=nil
-local pcControls=nil
 local movementCaptures=0
 local movementUpdates=0
 local keyEvents=0
@@ -352,41 +351,6 @@ local function releaseMovement()
     knob.Position=UDim2.fromScale(0.5,0.5)
 end
 
-local function getPCControls()
-    if type(pcControls)=="table" then return pcControls end
-    pcall(function()
-        local scripts=player:FindFirstChild("PlayerScripts")
-        local moduleScript=scripts and scripts:FindFirstChild("PlayerModule")
-        local module=moduleScript and require(moduleScript)
-        if type(module)=="table" then
-            if type(module.GetControls)=="function" then pcControls=module:GetControls() end
-            if type(pcControls)~="table" then pcControls=rawget(module,"controls") end
-        end
-    end)
-    return pcControls
-end
-
-local function setControllerJump(value)
-    local controls=getPCControls()
-    local controller=type(controls)=="table" and rawget(controls,"activeController") or nil
-    if type(controller)~="table" then return false end
-    return pcall(function() controller.isJumping=value end)
-end
-
-local function fallbackJump()
-    local character=player.Character
-    local humanoid=character and character:FindFirstChildOfClass("Humanoid")
-    if not humanoid then return end
-    pcall(function() humanoid:ChangeState(Enum.HumanoidStateType.Jumping) end)
-end
-
-local function pulseJump()
-    lastJumpPulse=os.clock()
-    pendingJumpDeadline=nil
-    jumpPulses+=1
-    if not setControllerJump(true) then fallbackJump() end
-end
-
 local function requestJump()
     if not enabled then return end
     jumpRequests+=1
@@ -394,16 +358,30 @@ local function requestJump()
     local token=jumpBurstToken
     local deadline=os.clock()+JUMP_BURST_SECONDS
 
-    pulseJump()
+    local function burstPulse()
+        if not enabled or token~=jumpBurstToken then return end
+        lastJumpPulse=os.clock()
+        pendingJumpDeadline=nil
+        jumpPulses+=1
+        pcall(function()
+            VirtualInputManager:SendKeyEvent(false,Enum.KeyCode.Space,false,game)
+            VirtualInputManager:SendKeyEvent(true,Enum.KeyCode.Space,false,game)
+        end)
+    end
+
+    burstPulse()
 
     task.spawn(function()
         while enabled and token==jumpBurstToken and os.clock()<deadline do
             RunService.Heartbeat:Wait()
             if not enabled or token~=jumpBurstToken or os.clock()>=deadline then break end
-            pulseJump()
+            burstPulse()
         end
+
         if token==jumpBurstToken then
-            setControllerJump(false)
+            pcall(function()
+                VirtualInputManager:SendKeyEvent(false,Enum.KeyCode.Space,false,game)
+            end)
         end
     end)
 end
@@ -455,7 +433,7 @@ RunService:BindToRenderStep(BIND_NAME,Enum.RenderPriority.Input.Value+8,function
 end)
 
 getgenv().PCKeyboardTouchBridgeV52={
-    Version="6.5-direct-2d-zones-controller-jump",
+    Version="6.6-direct-2d-zones-space-jump",
     GetState=function()
         return {
             chord=latestChord,
@@ -479,8 +457,8 @@ getgenv().__PCKeyboardTouchBridgeV52Cleanup=function()
     pendingJumpDeadline=nil
     jumpBurstToken+=1
     pendingSpaceReleaseToken+=1
-    setControllerJump(false)
     pcall(function() RunService:UnbindFromRenderStep(BIND_NAME) end)
+    pcall(function() VirtualInputManager:SendKeyEvent(false,Enum.KeyCode.Space,false,game) end)
     for _,c in ipairs(connections) do pcall(function() c:Disconnect() end) end
     table.clear(connections)
     pcall(function() gui:Destroy() end)

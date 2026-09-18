@@ -1,7 +1,7 @@
 local HttpService=game:GetService("HttpService")
 local ROOT="https://raw.githubusercontent.com/hshsagaga1-commits/movimento-de-pc-no-mobile/classic-wasd-experiment/"
 
--- V6.2 keeps the proven V5.9 Space jump path and changes only joystick mapping.
+-- V6.4 keeps PC locomotion, but jump is written directly into the active keyboard controller so no synthetic Space reaches Evade.
 local source=game:HttpGet(
     ROOT.."PCKeyboardTouchBridgeV5_2.lua?_cb="..HttpService:GenerateGUID(false),
     true
@@ -9,8 +9,8 @@ local source=game:HttpGet(
 
 local function replaceOncePlain(text,needle,replacement,label)
     local first,last=text:find(needle,1,true)
-    if not first then error("V6.2 patch failed: missing "..label) end
-    if text:find(needle,last+1,true) then error("V6.2 patch failed: duplicate "..label) end
+    if not first then error("V6.4 patch failed: missing "..label) end
+    if text:find(needle,last+1,true) then error("V6.4 patch failed: duplicate "..label) end
     return text:sub(1,first-1)..replacement..text:sub(last+1)
 end
 
@@ -27,7 +27,37 @@ local pendingJumpDeadline=nil
 local pendingSpaceReleaseToken=0
 local jumpBurstToken=0
 local JUMP_BURST_SECONDS=0.200
+local pcControls=nil
 local movementCaptures=0
+
+local function getPCControls()
+    if type(pcControls)=="table" then return pcControls end
+    pcall(function()
+        local scripts=player:FindFirstChild("PlayerScripts")
+        local moduleScript=scripts and scripts:FindFirstChild("PlayerModule")
+        local module=moduleScript and require(moduleScript)
+        if type(module)=="table" then
+            if type(module.GetControls)=="function" then pcControls=module:GetControls() end
+            if type(pcControls)~="table" then pcControls=rawget(module,"controls") end
+        end
+    end)
+    return pcControls
+end
+
+local function setControllerJump(value)
+    local controls=getPCControls()
+    local controller=type(controls)=="table" and rawget(controls,"activeController") or nil
+    if type(controller)~="table" then return false end
+    local ok=pcall(function() controller.isJumping=value end)
+    return ok
+end
+
+local function fallbackMobileJump()
+    local character=player.Character
+    local humanoid=character and character:FindFirstChildOfClass("Humanoid")
+    if not humanoid then return end
+    pcall(function() humanoid:ChangeState(Enum.HumanoidStateType.Jumping) end)
+end
 ]]
 source=replaceOncePlain(source,oldJumpState,newJumpState,"jump burst state")
 
@@ -51,31 +81,27 @@ local function requestJump()
     jumpBurstToken+=1
     local token=jumpBurstToken
     local deadline=os.clock()+JUMP_BURST_SECONDS
+    lastJumpPulse=os.clock()
+    pendingJumpDeadline=nil
 
-    local function burstPulse()
-        if not enabled or token~=jumpBurstToken then return end
-        lastJumpPulse=os.clock()
-        pendingJumpDeadline=nil
-        jumpPulses+=1
-        pcall(function()
-            VirtualInputManager:SendKeyEvent(false,Enum.KeyCode.Space,false,game)
-            VirtualInputManager:SendKeyEvent(true,Enum.KeyCode.Space,false,game)
-        end)
-    end
-
-    burstPulse()
+    local controllerRoute=setControllerJump(true)
+    if not controllerRoute then fallbackMobileJump() end
+    jumpPulses+=1
 
     task.spawn(function()
         while enabled and token==jumpBurstToken and os.clock()<deadline do
             RunService.Heartbeat:Wait()
             if not enabled or token~=jumpBurstToken or os.clock()>=deadline then break end
-            burstPulse()
+            if controllerRoute then
+                setControllerJump(true)
+            else
+                fallbackMobileJump()
+            end
+            jumpPulses+=1
         end
 
         if token==jumpBurstToken then
-            pcall(function()
-                VirtualInputManager:SendKeyEvent(false,Enum.KeyCode.Space,false,game)
-            end)
+            setControllerJump(false)
         end
     end)
 end
@@ -247,6 +273,7 @@ getgenv().__PCKeyboardTouchBridgeV52Cleanup=function()
     pendingJumpDeadline=nil
     jumpBurstToken+=1
     pendingSpaceReleaseToken+=1
+    setControllerJump(false)
     pcall(function() RunService:UnbindFromRenderStep(BIND_NAME) end)
 ]]
 source=replaceOncePlain(source,oldCleanup,newCleanup,"cleanup burst cancellation")
@@ -256,5 +283,5 @@ if not chunk then error(loadError) end
 chunk()
 
 if type(getgenv().PCKeyboardTouchBridgeV52)=="table" then
-    getgenv().PCKeyboardTouchBridgeV52.Version="6.2-2d-zones-dry-side-sweep-space-jump"
+    getgenv().PCKeyboardTouchBridgeV52.Version="6.4-2d-zones-dry-side-sweep-controller-jump"
 end

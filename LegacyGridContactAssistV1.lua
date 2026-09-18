@@ -4,10 +4,10 @@ local Workspace=game:GetService("Workspace")
 
 local player=Players.LocalPlayer
 local EVADE_GAME_ID=3647333358
-local CONTACT_RADIUS=3.10
+local CONTACT_RADIUS=3.35
 local VERTICAL_NORMAL_Y_MAX=0.42
-local HOLD_INWARD_SPEED=1.20
-local CONTACT_GRACE_SECONDS=0.18
+local HOLD_INWARD_SPEED=3.20
+local CONTACT_GRACE_SECONDS=0.24
 local RAY_HEIGHT_OFFSETS={-0.45,0.00,0.45,0.90}
 
 local env=getgenv()
@@ -165,7 +165,7 @@ heartbeatConnection=RunService.Heartbeat:Connect(function()
 end)
 
 env.LegacyGridContactAssistV1={
-    Version="2.1-grid-hold-no-joystick-write",
+    Version="2.2-strong-grid-hold-no-joystick-write",
     Enabled=enabled,
     GetState=function()
         return {

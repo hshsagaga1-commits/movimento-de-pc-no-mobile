@@ -6,10 +6,8 @@ local player=Players.LocalPlayer
 local EVADE_GAME_ID=3647333358
 local CONTACT_RADIUS=3.10
 local VERTICAL_NORMAL_Y_MAX=0.42
-local INPUT_PRESSURE=0.36
 local HOLD_INWARD_SPEED=1.20
 local CONTACT_GRACE_SECONDS=0.18
-local MIN_TANGENT_INPUT=0.20
 local RAY_HEIGHT_OFFSETS={-0.45,0.00,0.45,0.90}
 
 local env=getgenv()
@@ -130,25 +128,6 @@ local function getContact(now)
     return nil
 end
 
-local function applyInputPressure(contact)
-    local move=flat(humanoid.MoveDirection)
-    if move.Magnitude<=0.05 then return end
-
-    local intended=move.Unit
-    local normal=contact.normal
-    local normalAmount=intended:Dot(normal)
-    local tangent=intended-normal*normalAmount
-
-    if tangent.Magnitude<MIN_TANGENT_INPUT then return end
-
-    local output=tangent.Unit-normal*INPUT_PRESSURE
-    if output.Magnitude>1 then output=output.Unit end
-
-    pcall(function()
-        player:Move(output,false)
-    end)
-end
-
 local function applyPhysicalHold(contact)
     local velocity=root.AssemblyLinearVelocity
     local horizontal=flat(velocity)
@@ -182,12 +161,11 @@ heartbeatConnection=RunService.Heartbeat:Connect(function()
     end
 
     contactFrames+=1
-    applyInputPressure(contact)
     applyPhysicalHold(contact)
 end)
 
 env.LegacyGridContactAssistV1={
-    Version="2.0-direct-physical-grid-hold-standing-prone",
+    Version="2.1-grid-hold-no-joystick-write",
     Enabled=enabled,
     GetState=function()
         return {
@@ -198,7 +176,6 @@ env.LegacyGridContactAssistV1={
             lastHitName=lastHitName,
             lastNormal=lastNormal,
             contactRadius=CONTACT_RADIUS,
-            inputPressure=INPUT_PRESSURE,
             holdInwardSpeed=HOLD_INWARD_SPEED,
             contactGraceSeconds=CONTACT_GRACE_SECONDS,
             lastHeight=lastHeight,

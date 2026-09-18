@@ -29,8 +29,7 @@ if not baseChunk then error(baseError) end
 baseChunk()
 removeOldCrouchPressArtifacts()
 
--- Replace only the movement bridge with V6.5 direct joystick bridge while keeping the
--- proven V5.9 Space jump path.
+-- Replace only the movement bridge with the V6.5 direct joystick/controller-jump bridge.
 local visualCleanup=getgenv().__PCRobloxNativeVisualV5Cleanup
 if type(visualCleanup)=="function" then pcall(visualCleanup) end
 local bridgeCleanup=getgenv().__PCKeyboardTouchBridgeV52Cleanup

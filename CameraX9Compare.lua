@@ -919,6 +919,9 @@ if stopButton then
 end
 
 initialSnapshot()
+-- Start the timed capture only after static architecture discovery completes.
+startClock=os.clock()
+lastSample=-1e9
 bindPhases()
 notify("Camera X9",
     string.format("%.0fs: só gire a câmera normalmente. Não precisa correr.",duration),

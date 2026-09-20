@@ -329,6 +329,7 @@ local cameraTypeConnection = nil
 local currentCameraConnection = nil
 local characterConnection = nil
 local humanoidConnections = {}
+local behaviorConnections = {}
 
 local frames = 0
 local reconcileCount = 0
@@ -772,7 +773,7 @@ local reconciling = false
 local function bindStateObjectSignals()
     local newShift, newOffset = findLegacyStateObjects()
 
-    if newShift ~= shiftObject then
+    if newShift ~= shiftObject or shiftConnection == nil then
         if shiftConnection then
             pcall(function()
                 shiftConnection:Disconnect()
@@ -792,7 +793,7 @@ local function bindStateObjectSignals()
         end
     end
 
-    if newOffset ~= offsetObject then
+    if newOffset ~= offsetObject or offsetConnection == nil then
         if offsetConnection then
             pcall(function()
                 offsetConnection:Disconnect()
@@ -1000,7 +1001,7 @@ if userGameSettings then
                 requestReconcile("rotation-type-changed")
             end
         end)
-        humanoidConnections[#humanoidConnections + 1] = connection
+        behaviorConnections[#behaviorConnections + 1] = connection
     end)
 end
 
@@ -1010,7 +1011,7 @@ pcall(function()
             requestReconcile("mouse-behavior-changed")
         end
     end)
-    humanoidConnections[#humanoidConnections + 1] = connection
+    behaviorConnections[#behaviorConnections + 1] = connection
 end)
 
 -- V5.9's right-half BaseCamera gate watches at Camera-6.
@@ -1358,6 +1359,13 @@ local function cleanup(stopJoystick)
     end
 
     disconnectHumanoidConnections()
+    for _, connection in ipairs(behaviorConnections) do
+        pcall(function()
+            connection:Disconnect()
+        end)
+    end
+    table.clear(behaviorConnections)
+
     restoreOwnedState()
 
     for _, connection in ipairs(uiConnections) do

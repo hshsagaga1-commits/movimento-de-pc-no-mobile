@@ -285,6 +285,12 @@ end
 local function burstJump()
     if not enabled then return end
 
+    local character=player.Character
+    local humanoid=character and character:FindFirstChildOfClass("Humanoid")
+    if humanoid and humanoid.Health>0 then
+        pcall(function() humanoid.Jump=true end)
+    end
+
     jumpRequests+=1
     jumpToken+=1
 

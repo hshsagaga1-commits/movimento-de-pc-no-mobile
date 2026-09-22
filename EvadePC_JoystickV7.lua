@@ -24,9 +24,10 @@ local player=Players.LocalPlayer
 local playerGui=player:WaitForChild("PlayerGui")
 local ENV=(type(getgenv)=="function" and getgenv()) or _G
 
-local VERSION="EvadePC-Joystick-V7.4.1-ad-plus-1pct"
+local VERSION="EvadePC-Joystick-V7.5-controller-jump-pulse"
 local BIND_NAME="__EvadePCJoystickV7"
 local LEGACY_BIND_NAME="__EvadePCJoystickV7LegacyKeyboardWake"
+local JUMP_BIND_NAME="__EvadePCJoystickV7JumpPulse"
 local GUI_NAME="EvadePCJoystickV7Gui"
 local EVADE_GAME_ID=3647333358
 local LEGACY_PLACE_ID=96537472072550
@@ -93,8 +94,11 @@ local bridgeDeadline=-math.huge
 local connections={}
 local cameraViewportConnection=nil
 local jumpEpoch=0
+local jumpBursts={}
 local activeJumpBursts=0
 local jumpPulseCount=0
+local jumpPulsePhase=false
+local jumpForcePulse=false
 
 local keyEvents=0
 local movementCaptures=0
@@ -488,9 +492,33 @@ local function locateSharedControls()
     return ok and type(sharedControls)=="table"
 end
 
-local function setTouchJumpState(value)
+local function setNativeJumpState(value)
     locateSharedControls()
 
+    local wrote=false
+    local activeController=nil
+
+    if type(sharedControls)=="table" then
+        activeController=rawget(sharedControls,"activeController")
+    end
+
+    -- Primary route: the active keyboard controller itself.
+    -- Roblox ControlModule reads activeController:GetIsJumping() every render
+    -- step, so this is the same internal jump state Space would drive, but
+    -- WITHOUT generating a Space key event (important for emotes).
+    if type(activeController)=="table" then
+        local ok=pcall(function()
+            rawset(activeController,"isJumping",value==true)
+        end)
+        if ok then
+            wrote=true
+            jumpRoute="activeController"
+            jumpBridgeHits+=1
+        end
+    end
+
+    -- Also mirror into TouchJump if Roblox created one. This keeps the route
+    -- compatible with PlayerModule variants that OR both controller states.
     local controller=touchJumpController
     if type(controller)~="table" and type(sharedControls)=="table" then
         controller=rawget(sharedControls,"touchJumpController")
@@ -499,54 +527,26 @@ local function setTouchJumpState(value)
         end
     end
 
-    if type(controller)~="table" then
-        return false
-    end
-
-    local ok=pcall(function()
-        -- Roblox ControlModule checks touchJumpController:GetIsJumping()
-        -- even while the keyboard controller owns movement. Setting the
-        -- controller's own jump state therefore follows the native mobile
-        -- jump path without synthesizing Space and without stealing WASD.
-        rawset(controller,"isJumping",value==true)
-    end)
-
-    if ok then
-        jumpRoute="touchJumpController"
-        jumpBridgeHits+=1
-        return true
-    end
-    return false
-end
-
-local function pulseJumpRequest()
-    -- Keep Roblox's native TouchJump state hot when available.
-    local bridged=setTouchJumpState(true)
-
-    -- Also pulse Humanoid.Jump every frame. The false->true edge is deliberate:
-    -- a held true state can be consumed once and then stop retriggering. This
-    -- creates repeated jump requests without synthesizing Space.
-    local character=player.Character
-    local humanoid=character and character:FindFirstChildOfClass("Humanoid")
-
-    if humanoid and humanoid.Health>0 then
+    if type(controller)=="table" then
         local ok=pcall(function()
-            humanoid.Jump=false
-            humanoid.Jump=true
+            rawset(controller,"isJumping",value==true)
         end)
-
         if ok then
-            jumpPulseCount+=1
-            if not bridged then
-                jumpFallbackHits+=1
-                jumpRoute="humanoid-pulse"
+            wrote=true
+            if jumpRoute~="activeController" then
+                jumpRoute="touchJumpController"
             else
-                jumpRoute="touchjump+humanoid-pulse"
+                jumpRoute="activeController+touchJump"
             end
         end
     end
 
-    return bridged
+    if not wrote then
+        jumpFallbackHits+=1
+        jumpRoute="controller-missing"
+    end
+
+    return wrote
 end
 
 local function burstJump()
@@ -554,30 +554,60 @@ local function burstJump()
 
     jumpRequests+=1
 
-    -- IMPORTANT: every tap owns its own 200 ms request burst.
-    -- New taps DO NOT cancel, wait for, or restart older bursts.
-    -- Several bursts may overlap, so rapid tapping has zero cooldown.
-    local epoch=jumpEpoch
-    local deadline=os.clock()+JUMP_BURST
-    activeJumpBursts+=1
+    -- One tap opens its own 200 ms request window. Windows overlap freely:
+    -- tapping again never waits for, cancels or restarts an older tap.
+    jumpBursts[#jumpBursts+1]=os.clock()+JUMP_BURST
+    activeJumpBursts=#jumpBursts
 
-    -- Fire immediately on touch-down so there is no first-frame latency.
-    pulseJumpRequest()
-
-    task.spawn(function()
-        while enabled and epoch==jumpEpoch and os.clock()<deadline do
-            pulseJumpRequest()
-            RunService.Heartbeat:Wait()
-        end
-
-        activeJumpBursts=math.max(0,activeJumpBursts-1)
-
-        -- Release native TouchJump only after the LAST overlapping burst ends.
-        if epoch==jumpEpoch and activeJumpBursts==0 then
-            setTouchJumpState(false)
-        end
-    end)
+    -- Force a TRUE pulse immediately. The render-step pulser below then flips
+    -- false/true on following frames so ControlModule sees repeated jump
+    -- requests instead of one held boolean.
+    jumpForcePulse=true
+    jumpPulsePhase=true
+    if setNativeJumpState(true) then
+        jumpPulseCount+=1
+    end
 end
+
+-- Pulse BEFORE Roblox's ControlModule consumes GetIsJumping().
+-- While any 200 ms window exists, output alternates TRUE/FALSE every render
+-- frame. This gives repeated jump edges with zero cooldown, and overlapping
+-- taps simply keep the pulse train alive.
+RunService:BindToRenderStep(
+    JUMP_BIND_NAME,
+    Enum.RenderPriority.Input.Value-2,
+    function()
+        if not enabled then
+            jumpPulsePhase=false
+            setNativeJumpState(false)
+            return
+        end
+
+        local now=os.clock()
+        for i=#jumpBursts,1,-1 do
+            if jumpBursts[i]<=now then
+                table.remove(jumpBursts,i)
+            end
+        end
+        activeJumpBursts=#jumpBursts
+
+        if activeJumpBursts>0 then
+            if jumpForcePulse then
+                jumpPulsePhase=true
+                jumpForcePulse=false
+            else
+                jumpPulsePhase=not jumpPulsePhase
+            end
+
+            if setNativeJumpState(jumpPulsePhase) and jumpPulsePhase then
+                jumpPulseCount+=1
+            end
+        else
+            jumpPulsePhase=false
+            setNativeJumpState(false)
+        end
+    end
+)
 
 connections[#connections+1]=joystick.InputBegan:Connect(function(input)
     if not enabled or movementTouch~=nil then return end
@@ -790,6 +820,7 @@ local api={
             jumpRequests=jumpRequests,
             activeJumpBursts=activeJumpBursts,
             jumpPulseCount=jumpPulseCount,
+            jumpPulsePhase=jumpPulsePhase,
             jumpBurstSeconds=JUMP_BURST,
             jumpCooldownSeconds=0,
             overlappingJumpBursts=true,
@@ -831,8 +862,11 @@ ENV.EvadePCJoystickV7=api
 ENV.__EvadePCJoystickV7Cleanup=function()
     enabled=false
     jumpEpoch+=1
+    table.clear(jumpBursts)
     activeJumpBursts=0
-    pcall(function() setTouchJumpState(false) end)
+    jumpPulsePhase=false
+    jumpForcePulse=false
+    pcall(function() setNativeJumpState(false) end)
     releaseMovement()
 
     pcall(function()
@@ -840,6 +874,9 @@ ENV.__EvadePCJoystickV7Cleanup=function()
     end)
     pcall(function()
         RunService:UnbindFromRenderStep(LEGACY_BIND_NAME)
+    end)
+    pcall(function()
+        RunService:UnbindFromRenderStep(JUMP_BIND_NAME)
     end)
 
     if cameraViewportConnection then

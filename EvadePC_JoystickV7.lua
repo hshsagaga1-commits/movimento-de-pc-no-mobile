@@ -16,6 +16,7 @@
 
 local Players=game:GetService("Players")
 local RunService=game:GetService("RunService")
+local ContextActionService=game:GetService("ContextActionService")
 local UserInputService=game:GetService("UserInputService")
 local VirtualInputManager=game:GetService("VirtualInputManager")
 local Workspace=game:GetService("Workspace")
@@ -24,7 +25,7 @@ local player=Players.LocalPlayer
 local playerGui=player:WaitForChild("PlayerGui")
 local ENV=(type(getgenv)=="function" and getgenv()) or _G
 
-local VERSION="EvadePC-Joystick-V7.5.1-ad-58deg-upshift"
+local VERSION="EvadePC-Joystick-V7.6-cas-jump-ad-upshift"
 local BIND_NAME="__EvadePCJoystickV7"
 local LEGACY_BIND_NAME="__EvadePCJoystickV7LegacyKeyboardWake"
 local JUMP_BIND_NAME="__EvadePCJoystickV7JumpPulse"
@@ -45,9 +46,9 @@ local JUMP_SHEET="rbxasset://textures/ui/Input/TouchControlsSheetV2.png"
 --   0 deg = W, +90 = D, -90 = A, +/-180 = S.
 local PRESS_RADIUS=0.18
 local W_HALF_DEG=28       -- W total width: 56 deg
-local DIAG_END_DEG=100    -- WA/WD end sooner so pure A/D starts closer to W
-local SIDE_END_DEG=158    -- each A/D: 58 deg; trims the A/D area near S
-                            -- S gets the remaining 44 deg total
+local DIAG_END_DEG=88     -- A/D begins almost horizontal, matching the reference (~88 deg)
+local SIDE_END_DEG=146    -- pure A/D width stays 58 deg, but the whole sector shifts toward W
+                            -- S begins earlier, so D->S/A->S area is smaller
 
 -- Dry diagonal swap is only a short transition bridge, never a permanent latch.
 -- If the finger stays in W, W takes over after this tiny grace period.
@@ -495,58 +496,48 @@ end
 local function setNativeJumpState(value)
     locateSharedControls()
 
-    local wrote=false
-    local activeController=nil
+    -- PRIMARY ROUTE:
+    -- Call the exact action that Roblox Keyboard.lua binds for CharacterJump.
+    -- This runs the controller's own handleJumpAction and updates
+    -- jumpRequested/isJumping WITHOUT synthesizing Space, so emotes do not get
+    -- cancelled merely by a fake keyboard Space event.
+    local state=value and Enum.UserInputState.Begin or Enum.UserInputState.End
+    local called=false
 
-    if type(sharedControls)=="table" then
-        activeController=rawget(sharedControls,"activeController")
+    local ok=pcall(function()
+        ContextActionService:CallFunction("jumpAction",state,nil)
+    end)
+
+    if ok then
+        called=true
+        jumpRoute="contextaction-jumpAction"
+        jumpBridgeHits+=1
     end
 
-    -- Primary route: the active keyboard controller itself.
-    -- Roblox ControlModule reads activeController:GetIsJumping() every render
-    -- step, so this is the same internal jump state Space would drive, but
-    -- WITHOUT generating a Space key event (important for emotes).
-    if type(activeController)=="table" then
-        local ok=pcall(function()
-            rawset(activeController,"isJumping",value==true)
-        end)
-        if ok then
-            wrote=true
-            jumpRoute="activeController"
-            jumpBridgeHits+=1
-        end
-    end
-
-    -- Also mirror into TouchJump if Roblox created one. This keeps the route
-    -- compatible with PlayerModule variants that OR both controller states.
-    local controller=touchJumpController
-    if type(controller)~="table" and type(sharedControls)=="table" then
-        controller=rawget(sharedControls,"touchJumpController")
-        if type(controller)=="table" then
-            touchJumpController=controller
-        end
-    end
-
-    if type(controller)=="table" then
-        local ok=pcall(function()
-            rawset(controller,"isJumping",value==true)
-        end)
-        if ok then
-            wrote=true
-            if jumpRoute~="activeController" then
-                jumpRoute="touchJumpController"
-            else
-                jumpRoute="activeController+touchJump"
+    -- Fallback for PlayerModule variants/executors where CallFunction is not
+    -- exposed. Write the controller state directly so ControlModule can still
+    -- consume GetIsJumping() on its render step.
+    if not called and type(sharedControls)=="table" then
+        local activeController=rawget(sharedControls,"activeController")
+        if type(activeController)=="table" then
+            local wrote=pcall(function()
+                rawset(activeController,"jumpRequested",value==true)
+                rawset(activeController,"isJumping",value==true)
+            end)
+            if wrote then
+                called=true
+                jumpRoute="activeController-fallback"
+                jumpBridgeHits+=1
             end
         end
     end
 
-    if not wrote then
+    if not called then
         jumpFallbackHits+=1
-        jumpRoute="controller-missing"
+        jumpRoute="jump-route-missing"
     end
 
-    return wrote
+    return called
 end
 
 local function burstJump()

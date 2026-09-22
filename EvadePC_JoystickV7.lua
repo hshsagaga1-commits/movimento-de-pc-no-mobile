@@ -24,10 +24,9 @@ local player=Players.LocalPlayer
 local playerGui=player:WaitForChild("PlayerGui")
 local ENV=(type(getgenv)=="function" and getgenv()) or _G
 
-local VERSION="EvadePC-Joystick-V7.14-original-touchjump-repeat-200ms"
+local VERSION="EvadePC-Joystick-V7.15-original-button-real-repeat-taps-200ms"
 local BIND_NAME="__EvadePCJoystickV7"
 local LEGACY_BIND_NAME="__EvadePCJoystickV7LegacyKeyboardWake"
-local JUMP_PULSE_BIND_NAME="__EvadePCJoystickV7JumpPulse"
 local JUMP_MAINTAIN_BIND_NAME="__EvadePCJoystickV7JumpMaintain"
 local GUI_NAME="EvadePCJoystickV7Gui"
 local EVADE_GAME_ID=3647333358
@@ -120,6 +119,9 @@ local nativeJumpTouchModule=nil
 local nativeJumpOriginalController=nil
 local nativeJumpOriginalCaptured=false
 local nativeJumpMaintains=0
+local nativeRepeatLoopRunning=false
+local nativeSyntheticDispatch=false
+local nativeSyntheticTouchId=9100
 
 local legacyControls=nil
 local legacyWakeAttempts=0
@@ -537,9 +539,6 @@ local function findTouchControlFrame()
         return found
     end
 
-    -- On a real mobile client this normally already exists. If PC Identity
-    -- caused Roblox to skip lazy creation, ask ControlModule to create its
-    -- ORIGINAL TouchGui container, then use that.
     if type(sharedControls.CreateTouchGuiContainer)=="function" then
         pcall(function()
             sharedControls:CreateTouchGuiContainer()
@@ -562,9 +561,7 @@ local function getNativeTouchJumpClass()
     local playerModuleScript=scripts and scripts:FindFirstChild("PlayerModule")
     local controlModuleScript=playerModuleScript and playerModuleScript:FindFirstChild("ControlModule")
     local touchModuleScript=controlModuleScript and controlModuleScript:FindFirstChild("TouchJump")
-    if not touchModuleScript then
-        return nil
-    end
+    if not touchModuleScript then return nil end
 
     local ok,result=pcall(require,touchModuleScript)
     if ok and type(result)=="table" and type(result.new)=="function" then
@@ -574,7 +571,10 @@ local function getNativeTouchJumpClass()
     return nil
 end
 
-local function ensureOriginalTouchJump()
+local ensureOriginalTouchJump
+local startNativeRepeatLoop
+
+ensureOriginalTouchJump=function()
     if not locateSharedControls() then
         jumpRoute="original-touchjump-controls-missing"
         return nil,nil
@@ -599,16 +599,13 @@ local function ensureOriginalTouchJump()
         nativeJumpOriginalCaptured=true
     end
 
-    -- Reuse Roblox's own controller from its controller cache whenever possible.
     local controllers=rawget(sharedControls,"controllers")
     if type(controller)~="table" and type(controllers)=="table" then
         controller=controllers[TouchJump]
     end
 
     if type(controller)~="table" then
-        local ok,created=pcall(function()
-            return TouchJump.new()
-        end)
+        local ok,created=pcall(function() return TouchJump.new() end)
         if ok and type(created)=="table" then
             controller=created
             if type(controllers)=="table" then
@@ -623,7 +620,6 @@ local function ensureOriginalTouchJump()
         return nil,nil
     end
 
-    -- Keyboard remains the movement owner. Only TouchJump is kept alive beside it.
     pcall(function()
         rawset(sharedControls,"touchJumpController",controller)
         controller:Enable(true,frame)
@@ -637,13 +633,11 @@ local function ensureOriginalTouchJump()
         pcall(function() controller:Create() end)
         button=rawget(controller,"jumpButton")
     end
-
     if not button or not button.Parent then
         jumpRoute="original-touchjump-button-missing"
         return controller,nil
     end
 
-    -- Keep Roblox's ORIGINAL button/style/position. No fake PCJump overlay.
     button.Visible=true
 
     if button~=nativeJumpButton then
@@ -651,21 +645,17 @@ local function ensureOriginalTouchJump()
         nativeJumpButton=button
 
         nativeJumpButtonConnection=button.InputBegan:Connect(function(input)
-            if not enabled then return end
+            if not enabled or nativeSyntheticDispatch then return end
             if input.UserInputType~=Enum.UserInputType.Touch
                 or input.UserInputState~=Enum.UserInputState.Begin then
                 return
             end
 
             jumpRequests+=1
-
-            -- The native InputBegan handler has already/also set isJumping=true.
-            -- We add ONLY this: a 200ms window that repeatedly produces
-            -- distinct TRUE/FALSE/TRUE/FALSE jump clicks.
             jumpBursts[#jumpBursts+1]=os.clock()+JUMP_BURST
             activeJumpBursts=#jumpBursts
-            jumpForcePulse=true
-            jumpRoute="original-touchjump+200ms-repeat"
+            jumpRoute="original-button+real-repeat-taps"
+            startNativeRepeatLoop()
         end)
     end
 
@@ -673,8 +663,87 @@ local function ensureOriginalTouchJump()
     return controller,button
 end
 
--- Run after PC Identity's Last-1 keeper. If ControlModule disables TouchJump
--- because keyboard owns movement, this turns ONLY the original TouchJump back on.
+local function sendSyntheticNativeTap(controller,button)
+    if type(controller)~="table" or not button or not button.Parent then
+        return false
+    end
+
+    -- Free the original physical touch after Roblox had one render frame to
+    -- sample it. Otherwise TouchJump intentionally ignores any second touch.
+    pcall(function()
+        if rawget(controller,"touchObject")~=nil and type(controller._reset)=="function" then
+            controller:_reset()
+        end
+    end)
+
+    nativeSyntheticTouchId+=1
+    local touchId=nativeSyntheticTouchId
+    local pos=button.AbsolutePosition+(button.AbsoluteSize/2)
+
+    nativeSyntheticDispatch=true
+    local began=pcall(function()
+        VirtualInputManager:SendTouchEvent(touchId,0,pos.X,pos.Y)
+        if type(VirtualInputManager.WaitForInputEventsProcessed)=="function" then
+            VirtualInputManager:WaitForInputEventsProcessed()
+        end
+    end)
+    nativeSyntheticDispatch=false
+
+    if not began then
+        jumpFallbackHits+=1
+        jumpRoute="native-repeat-touch-start-failed"
+        return false
+    end
+
+    jumpPulsePhase=true
+    jumpPulseCount+=1
+    jumpBridgeHits+=1
+
+    -- One full frame pressed = one genuine mobile jump click sampled by ControlModule.
+    RunService.RenderStepped:Wait()
+
+    nativeSyntheticDispatch=true
+    pcall(function()
+        VirtualInputManager:SendTouchEvent(touchId,2,pos.X,pos.Y)
+        if type(VirtualInputManager.WaitForInputEventsProcessed)=="function" then
+            VirtualInputManager:WaitForInputEventsProcessed()
+        end
+    end)
+    nativeSyntheticDispatch=false
+
+    jumpPulsePhase=false
+
+    -- One full released frame before the next click.
+    RunService.RenderStepped:Wait()
+    return true
+end
+
+startNativeRepeatLoop=function()
+    if nativeRepeatLoopRunning then return end
+    nativeRepeatLoopRunning=true
+
+    task.spawn(function()
+        -- Let the USER'S original TouchJump click be sampled first.
+        RunService.RenderStepped:Wait()
+
+        while enabled and pruneJumpBursts()>0 do
+            local controller,button=ensureOriginalTouchJump()
+            if type(controller)=="table" and button then
+                if not sendSyntheticNativeTap(controller,button) then
+                    RunService.Heartbeat:Wait()
+                end
+            else
+                RunService.Heartbeat:Wait()
+            end
+        end
+
+        jumpPulsePhase=false
+        activeJumpBursts=pruneJumpBursts()
+        nativeRepeatLoopRunning=false
+    end)
+end
+
+-- PC Identity owns movement, but the original Roblox TouchJump stays enabled.
 RunService:BindToRenderStep(
     JUMP_MAINTAIN_BIND_NAME,
     Enum.RenderPriority.Last.Value,
@@ -685,63 +754,6 @@ RunService:BindToRenderStep(
     end
 )
 
--- The actual 200ms add-on. This does not create a new jump system.
--- ControlModule already ORs:
--- activeController:GetIsJumping() OR touchJumpController:GetIsJumping()
--- We only pulse the ORIGINAL TouchJump.isJumping field before ControlModule reads it.
-RunService:BindToRenderStep(
-    JUMP_PULSE_BIND_NAME,
-    Enum.RenderPriority.Input.Value-1,
-    function()
-        local controller=touchJumpController
-        if type(controller)~="table" then
-            controller=select(1,ensureOriginalTouchJump())
-        end
-
-        local active=enabled and pruneJumpBursts()>0
-        if type(controller)~="table" then
-            jumpPulsePhase=false
-            jumpForcePulse=false
-            return
-        end
-
-        if not active then
-            if jumpPulsePhase then
-                pcall(function() rawset(controller,"isJumping",false) end)
-            end
-            jumpPulsePhase=false
-            jumpForcePulse=false
-            return
-        end
-
-        if jumpForcePulse then
-            jumpPulsePhase=true
-            jumpForcePulse=false
-        else
-            -- NOT a 200ms hold:
-            -- press one frame -> release one frame -> press -> release...
-            jumpPulsePhase=not jumpPulsePhase
-        end
-
-        local ok=pcall(function()
-            rawset(controller,"isJumping",jumpPulsePhase)
-        end)
-
-        if ok then
-            if jumpPulsePhase then
-                jumpPulseCount+=1
-                jumpBridgeHits+=1
-            end
-            jumpRoute="original-touchjump+200ms-repeat"
-        else
-            jumpFallbackHits+=1
-            jumpRoute="original-touchjump-pulse-failed"
-        end
-    end
-)
-
--- Resolve the native jump immediately so its original button is visible
--- before the first tap.
 ensureOriginalTouchJump()
 
 connections[#connections+1]=joystick.InputBegan:Connect(function(input)
@@ -991,6 +1003,8 @@ ENV.__EvadePCJoystickV7Cleanup=function()
         pcall(function() touchJumpController:Enable(false) end)
     end
     disconnectNativeJumpButton()
+    nativeSyntheticDispatch=false
+    nativeRepeatLoopRunning=false
     jumpPulsePhase=false
     releaseMovement()
 
@@ -999,9 +1013,6 @@ ENV.__EvadePCJoystickV7Cleanup=function()
     end)
     pcall(function()
         RunService:UnbindFromRenderStep(LEGACY_BIND_NAME)
-    end)
-    pcall(function()
-        RunService:UnbindFromRenderStep(JUMP_PULSE_BIND_NAME)
     end)
     pcall(function()
         RunService:UnbindFromRenderStep(JUMP_MAINTAIN_BIND_NAME)

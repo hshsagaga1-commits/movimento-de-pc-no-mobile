@@ -24,7 +24,7 @@ local player=Players.LocalPlayer
 local playerGui=player:WaitForChild("PlayerGui")
 local ENV=(type(getgenv)=="function" and getgenv()) or _G
 
-local VERSION="EvadePC-Joystick-V7.9-native-mobile-touchjump-200ms"
+local VERSION="EvadePC-Joystick-V7.10-native-touch-click-pulses-200ms"
 local BIND_NAME="__EvadePCJoystickV7"
 local LEGACY_BIND_NAME="__EvadePCJoystickV7LegacyKeyboardWake"
 local JUMP_PRE_BIND_NAME="__EvadePCJoystickV7JumpPre"
@@ -584,15 +584,17 @@ local function burstJump()
 
     jumpRequests+=1
 
-    -- Native mobile jump + the requested 200 ms buffer:
-    -- each tap owns its own 200 ms window; overlapping taps simply keep
-    -- TouchJump active until the last window expires.
+    -- EVERY tap creates its own 200 ms window.
+    -- Windows overlap freely; none cancels or restarts another.
     jumpBursts[#jumpBursts+1]=os.clock()+JUMP_BURST
     activeJumpBursts=#jumpBursts
-    jumpForcePulse=true
 
-    -- Immediate native mobile request on touch-down.
-    setNativeMobileJump(true)
+    -- Start with a fresh mobile-style press edge.
+    -- This is NOT "hold for 200 ms": the scheduler below alternates
+    -- RELEASE/PRESS/RELEASE/PRESS for the whole window.
+    setNativeMobileJump(false)
+    jumpPulsePhase=false
+    jumpForcePulse=true
 end
 
 RunService:BindToRenderStep(
@@ -607,14 +609,27 @@ RunService:BindToRenderStep(
         end
         activeJumpBursts=#jumpBursts
 
-        local active=enabled and activeJumpBursts>0
-        jumpPulsePhase=active
-        jumpForcePulse=false
+        if not enabled or activeJumpBursts==0 then
+            if jumpPulsePhase then
+                setNativeMobileJump(false)
+            end
+            jumpPulsePhase=false
+            jumpForcePulse=false
+            return
+        end
 
-        -- Re-assert the ORIGINAL mobile TouchJump state every frame during the
-        -- 200 ms window. Roblox ControlModule then performs its normal
-        -- humanoid.Jump assignment from TouchJump:GetIsJumping().
-        setNativeMobileJump(active)
+        -- Simulate repeated NORMAL mobile clicks during the 200 ms window:
+        -- frame A = press, frame B = release, frame C = press, ...
+        -- So ControlModule actually sees distinct click edges instead of one
+        -- long held jump that only works once.
+        if jumpForcePulse then
+            jumpPulsePhase=true
+            jumpForcePulse=false
+        else
+            jumpPulsePhase=not jumpPulsePhase
+        end
+
+        setNativeMobileJump(jumpPulsePhase)
     end
 )
 

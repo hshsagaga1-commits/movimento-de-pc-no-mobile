@@ -32,6 +32,19 @@ local previousV1=ENV.__EvadePCRebuildLegacyBodyV1Cleanup
 if type(previousV1)=="function" then pcall(previousV1) end
 pcall(function() RunService:UnbindFromRenderStep(BIND_NAME) end)
 
+-- Retire the older velocity-lag Legacy camera experiment if it is still active.
+local oldStyle=ENV.__EvadeLegacyPCStyleCamera
+if type(oldStyle)=="table" then
+    pcall(function()
+        if oldStyle.baseCamera and oldStyle.originalGetSubjectPosition
+            and oldStyle.baseCamera.GetSubjectPosition==oldStyle.wrapper then
+            oldStyle.baseCamera.GetSubjectPosition=oldStyle.originalGetSubjectPosition
+        end
+    end)
+    oldStyle.running=false
+    ENV.__EvadeLegacyPCStyleCamera=nil
+end
+
 if game.PlaceId~=LEGACY_PLACE_ID then
     local api={
         Version=VERSION,
@@ -221,6 +234,12 @@ RunService:BindToRenderStep(BIND_NAME,Enum.RenderPriority.Camera.Value+2,functio
     lastNativeDistance=nativeDistance
     lastTargetDistance=target
     lastExtra=extra
+
+    -- At level/up angles the native Legacy camera is left completely untouched.
+    if extra<=0.001 then
+        lastAppliedDelta=0
+        return
+    end
 
     -- Focus is the native camera's own subject anchor and already contains the
     -- game's vertical/shoulder behavior. We only change distance from this anchor.

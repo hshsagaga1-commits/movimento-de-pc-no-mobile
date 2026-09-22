@@ -14,7 +14,8 @@ local ENV = (type(getgenv) == "function" and getgenv()) or _G
 local VERSION = "EvadePCRebuild-LegacyCamera-V2.1-native-pc-camera-emote-center"
 local LEGACY_PLACE_ID = 96537472072550
 local BIND_NAME = "__EvadePCRebuildLegacyCameraV2"
-local SHOULDER_OFFSET = Vector3.new(1.75, 0, 0)\nlocal EMOTE_OFFSET = Vector3.zero
+local SHOULDER_OFFSET = Vector3.new(1.75, 0, 0)
+local EMOTE_OFFSET = Vector3.zero
 
 local previousCleanup = ENV.__EvadePCRebuildLegacyCameraV2Cleanup
 if type(previousCleanup) == "function" then

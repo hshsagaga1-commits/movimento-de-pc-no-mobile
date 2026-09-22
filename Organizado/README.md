@@ -4,6 +4,7 @@
 - PC Controls
 - PC Identity
 - Joystick + Pulo
+- Body Anchor / Buraco
 
 ## LEGACY
 - PC Controls
@@ -20,6 +21,7 @@
 
 ### O que cada combo junta
 - PC Controls = PC Identity + Joystick + Pulo
+- Overhaul principal = PC Controls + Body Anchor / Buraco
 - Legacy Camera Pack = Legacy Shift Lock + Legacy Body
 - Sensibilidade + Precisao = slider 0.1x a 2.0x + botao Precisao ON/OFF
 

@@ -16,7 +16,6 @@
 
 local Players=game:GetService("Players")
 local RunService=game:GetService("RunService")
-local ContextActionService=game:GetService("ContextActionService")
 local UserInputService=game:GetService("UserInputService")
 local VirtualInputManager=game:GetService("VirtualInputManager")
 local Workspace=game:GetService("Workspace")
@@ -25,10 +24,9 @@ local player=Players.LocalPlayer
 local playerGui=player:WaitForChild("PlayerGui")
 local ENV=(type(getgenv)=="function" and getgenv()) or _G
 
-local VERSION="EvadePC-Joystick-V7.6-cas-jump-ad-upshift"
+local VERSION="EvadePC-Joystick-V7.7-v71-spaceburst-overlap-ad84"
 local BIND_NAME="__EvadePCJoystickV7"
 local LEGACY_BIND_NAME="__EvadePCJoystickV7LegacyKeyboardWake"
-local JUMP_BIND_NAME="__EvadePCJoystickV7JumpPulse"
 local GUI_NAME="EvadePCJoystickV7Gui"
 local EVADE_GAME_ID=3647333358
 local LEGACY_PLACE_ID=96537472072550
@@ -46,9 +44,9 @@ local JUMP_SHEET="rbxasset://textures/ui/Input/TouchControlsSheetV2.png"
 --   0 deg = W, +90 = D, -90 = A, +/-180 = S.
 local PRESS_RADIUS=0.18
 local W_HALF_DEG=28       -- W total width: 56 deg
-local DIAG_END_DEG=88     -- A/D begins almost horizontal, matching the reference (~88 deg)
-local SIDE_END_DEG=146    -- pure A/D width stays 58 deg, but the whole sector shifts toward W
-                            -- S begins earlier, so D->S/A->S area is smaller
+local DIAG_END_DEG=84     -- A/D reaches a tiny bit farther toward W, matching the new reference
+local SIDE_END_DEG=142    -- pure A/D stays exactly 58 deg on both A and D
+                            -- S begins 4 deg earlier on each side
 
 -- Dry diagonal swap is only a short transition bridge, never a permanent latch.
 -- If the finger stays in W, W takes over after this tiny grace period.
@@ -493,51 +491,29 @@ local function locateSharedControls()
     return ok and type(sharedControls)=="table"
 end
 
-local function setNativeJumpState(value)
-    locateSharedControls()
-
-    -- PRIMARY ROUTE:
-    -- Call the exact action that Roblox Keyboard.lua binds for CharacterJump.
-    -- This runs the controller's own handleJumpAction and updates
-    -- jumpRequested/isJumping WITHOUT synthesizing Space, so emotes do not get
-    -- cancelled merely by a fake keyboard Space event.
-    local state=value and Enum.UserInputState.Begin or Enum.UserInputState.End
-    local called=false
-
+local function pulseWorkingSpace()
+    -- Restored from V7.1, the last jump route confirmed to actually jump:
+    -- Space-up -> Space-down every pulse.
     local ok=pcall(function()
-        ContextActionService:CallFunction("jumpAction",state,nil)
+        VirtualInputManager:SendKeyEvent(false,Enum.KeyCode.Space,false,game)
+        VirtualInputManager:SendKeyEvent(true,Enum.KeyCode.Space,false,game)
     end)
 
     if ok then
-        called=true
-        jumpRoute="contextaction-jumpAction"
-        jumpBridgeHits+=1
+        jumpPulseCount+=1
+        jumpRoute="v7.1-space-pulse"
+        return true
     end
 
-    -- Fallback for PlayerModule variants/executors where CallFunction is not
-    -- exposed. Write the controller state directly so ControlModule can still
-    -- consume GetIsJumping() on its render step.
-    if not called and type(sharedControls)=="table" then
-        local activeController=rawget(sharedControls,"activeController")
-        if type(activeController)=="table" then
-            local wrote=pcall(function()
-                rawset(activeController,"jumpRequested",value==true)
-                rawset(activeController,"isJumping",value==true)
-            end)
-            if wrote then
-                called=true
-                jumpRoute="activeController-fallback"
-                jumpBridgeHits+=1
-            end
-        end
-    end
+    jumpFallbackHits+=1
+    jumpRoute="v7.1-space-pulse-failed"
+    return false
+end
 
-    if not called then
-        jumpFallbackHits+=1
-        jumpRoute="jump-route-missing"
-    end
-
-    return called
+local function releaseWorkingSpace()
+    pcall(function()
+        VirtualInputManager:SendKeyEvent(false,Enum.KeyCode.Space,false,game)
+    end)
 end
 
 local function burstJump()
@@ -545,60 +521,41 @@ local function burstJump()
 
     jumpRequests+=1
 
-    -- One tap opens its own 200 ms request window. Windows overlap freely:
-    -- tapping again never waits for, cancels or restarts an older tap.
+    -- Preserve the requested semantics:
+    -- EVERY tap owns a full 200 ms window.
+    -- New taps overlap; they do not cancel, restart or wait for older windows.
     jumpBursts[#jumpBursts+1]=os.clock()+JUMP_BURST
     activeJumpBursts=#jumpBursts
 
-    -- Force a TRUE pulse immediately. The render-step pulser below then flips
-    -- false/true on following frames so ControlModule sees repeated jump
-    -- requests instead of one held boolean.
-    jumpForcePulse=true
-    jumpPulsePhase=true
-    if setNativeJumpState(true) then
-        jumpPulseCount+=1
-    end
+    -- Same immediate pulse that made V7.1 respond without first-frame latency.
+    pulseWorkingSpace()
 end
 
--- Pulse BEFORE Roblox's ControlModule consumes GetIsJumping().
--- While any 200 ms window exists, output alternates TRUE/FALSE every render
--- frame. This gives repeated jump edges with zero cooldown, and overlapping
--- taps simply keep the pulse train alive.
-RunService:BindToRenderStep(
-    JUMP_BIND_NAME,
-    Enum.RenderPriority.Input.Value-2,
-    function()
-        if not enabled then
-            jumpPulsePhase=false
-            setNativeJumpState(false)
-            return
-        end
+connections[#connections+1]=RunService.Heartbeat:Connect(function()
+    local now=os.clock()
 
-        local now=os.clock()
-        for i=#jumpBursts,1,-1 do
-            if jumpBursts[i]<=now then
-                table.remove(jumpBursts,i)
-            end
-        end
-        activeJumpBursts=#jumpBursts
-
-        if activeJumpBursts>0 then
-            if jumpForcePulse then
-                jumpPulsePhase=true
-                jumpForcePulse=false
-            else
-                jumpPulsePhase=not jumpPulsePhase
-            end
-
-            if setNativeJumpState(jumpPulsePhase) and jumpPulsePhase then
-                jumpPulseCount+=1
-            end
-        else
-            jumpPulsePhase=false
-            setNativeJumpState(false)
+    for i=#jumpBursts,1,-1 do
+        if jumpBursts[i]<=now then
+            table.remove(jumpBursts,i)
         end
     end
-)
+
+    local previousActive=activeJumpBursts
+    activeJumpBursts=#jumpBursts
+
+    if enabled and activeJumpBursts>0 then
+        -- V7.1 repeated this every Heartbeat for the 200 ms burst.
+        -- Keeping one shared pulse train avoids overlapping tasks releasing
+        -- Space while another tap's 200 ms window is still alive.
+        pulseWorkingSpace()
+        jumpPulsePhase=true
+    else
+        jumpPulsePhase=false
+        if previousActive>0 then
+            releaseWorkingSpace()
+        end
+    end
+end)
 
 connections[#connections+1]=joystick.InputBegan:Connect(function(input)
     if not enabled or movementTouch~=nil then return end
@@ -857,7 +814,7 @@ ENV.__EvadePCJoystickV7Cleanup=function()
     activeJumpBursts=0
     jumpPulsePhase=false
     jumpForcePulse=false
-    pcall(function() setNativeJumpState(false) end)
+    releaseWorkingSpace()
     releaseMovement()
 
     pcall(function()
@@ -865,9 +822,6 @@ ENV.__EvadePCJoystickV7Cleanup=function()
     end)
     pcall(function()
         RunService:UnbindFromRenderStep(LEGACY_BIND_NAME)
-    end)
-    pcall(function()
-        RunService:UnbindFromRenderStep(JUMP_BIND_NAME)
     end)
 
     if cameraViewportConnection then

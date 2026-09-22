@@ -24,10 +24,24 @@ local player=Players.LocalPlayer
 local playerGui=player:WaitForChild("PlayerGui")
 local ENV=(type(getgenv)=="function" and getgenv()) or _G
 
-local VERSION="EvadePC-Joystick-V7.15-original-button-real-repeat-taps-200ms"
+local oldCrouchCleanup=ENV.__PCCrouchToggleV59Cleanup
+if type(oldCrouchCleanup)=="function" then
+    pcall(oldCrouchCleanup)
+end
+for _,obj in ipairs(playerGui:GetDescendants()) do
+    if obj.Name=="PCCrouchPressVisualV59" and obj:IsA("UIScale") then
+        pcall(function()
+            obj.Scale=1
+            obj:Destroy()
+        end)
+    end
+end
+ENV.PCCrouchToggleV59=nil
+ENV.__PCCrouchToggleV59Cleanup=nil
+
+local VERSION="EvadePC-Joystick-V7.16-proven-spaceburst-original-crouch"
 local BIND_NAME="__EvadePCJoystickV7"
 local LEGACY_BIND_NAME="__EvadePCJoystickV7LegacyKeyboardWake"
-local JUMP_MAINTAIN_BIND_NAME="__EvadePCJoystickV7JumpMaintain"
 local GUI_NAME="EvadePCJoystickV7Gui"
 local EVADE_GAME_ID=3647333358
 local LEGACY_PLACE_ID=96537472072550
@@ -113,15 +127,6 @@ local touchJumpController=nil
 local jumpRoute="unresolved"
 local jumpBridgeHits=0
 local jumpFallbackHits=0
-local nativeJumpButton=nil
-local nativeJumpButtonConnection=nil
-local nativeJumpTouchModule=nil
-local nativeJumpOriginalController=nil
-local nativeJumpOriginalCaptured=false
-local nativeJumpMaintains=0
-local nativeRepeatLoopRunning=false
-local nativeSyntheticDispatch=false
-local nativeSyntheticTouchId=9100
 
 local legacyControls=nil
 local legacyWakeAttempts=0
@@ -367,8 +372,7 @@ local jumpButton=Instance.new("TextButton")
 jumpButton.Name="PCJump"
 jumpButton.Text=""
 jumpButton.AutoButtonColor=false
-jumpButton.Active=false
-jumpButton.Visible=false
+jumpButton.Active=true
 jumpButton.BackgroundTransparency=1
 jumpButton.BorderSizePixel=0
 jumpButton.ZIndex=20
@@ -502,259 +506,71 @@ local function locateSharedControls()
     return ok and type(sharedControls)=="table"
 end
 
-local function pruneJumpBursts()
+local function pulseWorkingSpace()
+    -- Restored from V7.1, the last jump route confirmed to actually jump:
+    -- Space-up -> Space-down every pulse.
+    local ok=pcall(function()
+        VirtualInputManager:SendKeyEvent(false,Enum.KeyCode.Space,false,game)
+        VirtualInputManager:SendKeyEvent(true,Enum.KeyCode.Space,false,game)
+    end)
+
+    if ok then
+        jumpPulseCount+=1
+        jumpRoute="v7.1-space-pulse"
+        return true
+    end
+
+    jumpFallbackHits+=1
+    jumpRoute="v7.1-space-pulse-failed"
+    return false
+end
+
+local function releaseWorkingSpace()
+    pcall(function()
+        VirtualInputManager:SendKeyEvent(false,Enum.KeyCode.Space,false,game)
+    end)
+end
+
+local function burstJump()
+    if not enabled then return end
+
+    jumpRequests+=1
+
+    -- Preserve the requested semantics:
+    -- EVERY tap owns a full 200 ms window.
+    -- New taps overlap; they do not cancel, restart or wait for older windows.
+    jumpBursts[#jumpBursts+1]=os.clock()+JUMP_BURST
+    activeJumpBursts=#jumpBursts
+
+    -- Same immediate pulse that made V7.1 respond without first-frame latency.
+    pulseWorkingSpace()
+end
+
+connections[#connections+1]=RunService.Heartbeat:Connect(function()
     local now=os.clock()
+
     for i=#jumpBursts,1,-1 do
         if jumpBursts[i]<=now then
             table.remove(jumpBursts,i)
         end
     end
+
+    local previousActive=activeJumpBursts
     activeJumpBursts=#jumpBursts
-    return activeJumpBursts
-end
 
-local function disconnectNativeJumpButton()
-    if nativeJumpButtonConnection then
-        pcall(function() nativeJumpButtonConnection:Disconnect() end)
-        nativeJumpButtonConnection=nil
-    end
-    nativeJumpButton=nil
-end
-
-local function findTouchControlFrame()
-    if type(sharedControls)~="table" then return nil end
-
-    local frame=rawget(sharedControls,"touchControlFrame")
-    if typeof(frame)=="Instance" and frame:IsA("GuiObject") and frame.Parent then
-        return frame
-    end
-
-    local touchGui=playerGui:FindFirstChild("TouchGui")
-    local found=touchGui and touchGui:FindFirstChild("TouchControlFrame")
-    if found and found:IsA("GuiObject") then
-        pcall(function()
-            rawset(sharedControls,"touchGui",touchGui)
-            rawset(sharedControls,"touchControlFrame",found)
-        end)
-        return found
-    end
-
-    if type(sharedControls.CreateTouchGuiContainer)=="function" then
-        pcall(function()
-            sharedControls:CreateTouchGuiContainer()
-        end)
-        frame=rawget(sharedControls,"touchControlFrame")
-        if typeof(frame)=="Instance" and frame:IsA("GuiObject") then
-            return frame
-        end
-    end
-
-    return nil
-end
-
-local function getNativeTouchJumpClass()
-    if type(nativeJumpTouchModule)=="table" then
-        return nativeJumpTouchModule
-    end
-
-    local scripts=player:FindFirstChild("PlayerScripts")
-    local playerModuleScript=scripts and scripts:FindFirstChild("PlayerModule")
-    local controlModuleScript=playerModuleScript and playerModuleScript:FindFirstChild("ControlModule")
-    local touchModuleScript=controlModuleScript and controlModuleScript:FindFirstChild("TouchJump")
-    if not touchModuleScript then return nil end
-
-    local ok,result=pcall(require,touchModuleScript)
-    if ok and type(result)=="table" and type(result.new)=="function" then
-        nativeJumpTouchModule=result
-        return result
-    end
-    return nil
-end
-
-local ensureOriginalTouchJump
-local startNativeRepeatLoop
-
-ensureOriginalTouchJump=function()
-    if not locateSharedControls() then
-        jumpRoute="original-touchjump-controls-missing"
-        return nil,nil
-    end
-
-    local frame=findTouchControlFrame()
-    if not frame then
-        jumpRoute="original-touchjump-frame-missing"
-        return nil,nil
-    end
-
-    local TouchJump=getNativeTouchJumpClass()
-    if type(TouchJump)~="table" then
-        jumpRoute="original-touchjump-module-missing"
-        return nil,nil
-    end
-
-    local controller=rawget(sharedControls,"touchJumpController")
-
-    if not nativeJumpOriginalCaptured then
-        nativeJumpOriginalController=controller
-        nativeJumpOriginalCaptured=true
-    end
-
-    local controllers=rawget(sharedControls,"controllers")
-    if type(controller)~="table" and type(controllers)=="table" then
-        controller=controllers[TouchJump]
-    end
-
-    if type(controller)~="table" then
-        local ok,created=pcall(function() return TouchJump.new() end)
-        if ok and type(created)=="table" then
-            controller=created
-            if type(controllers)=="table" then
-                controllers[TouchJump]=controller
-            end
-        end
-    end
-
-    if type(controller)~="table" then
-        jumpFallbackHits+=1
-        jumpRoute="original-touchjump-create-failed"
-        return nil,nil
-    end
-
-    pcall(function()
-        rawset(sharedControls,"touchJumpController",controller)
-        controller:Enable(true,frame)
-    end)
-
-    touchJumpController=controller
-    nativeJumpMaintains+=1
-
-    local button=rawget(controller,"jumpButton")
-    if not button and type(controller.Create)=="function" then
-        pcall(function() controller:Create() end)
-        button=rawget(controller,"jumpButton")
-    end
-    if not button or not button.Parent then
-        jumpRoute="original-touchjump-button-missing"
-        return controller,nil
-    end
-
-    button.Visible=true
-
-    if button~=nativeJumpButton then
-        disconnectNativeJumpButton()
-        nativeJumpButton=button
-
-        nativeJumpButtonConnection=button.InputBegan:Connect(function(input)
-            if not enabled or nativeSyntheticDispatch then return end
-            if input.UserInputType~=Enum.UserInputType.Touch
-                or input.UserInputState~=Enum.UserInputState.Begin then
-                return
-            end
-
-            jumpRequests+=1
-            jumpBursts[#jumpBursts+1]=os.clock()+JUMP_BURST
-            activeJumpBursts=#jumpBursts
-            jumpRoute="original-button+real-repeat-taps"
-            startNativeRepeatLoop()
-        end)
-    end
-
-    jumpRoute="original-touchjump-ready"
-    return controller,button
-end
-
-local function sendSyntheticNativeTap(controller,button)
-    if type(controller)~="table" or not button or not button.Parent then
-        return false
-    end
-
-    -- Free the original physical touch after Roblox had one render frame to
-    -- sample it. Otherwise TouchJump intentionally ignores any second touch.
-    pcall(function()
-        if rawget(controller,"touchObject")~=nil and type(controller._reset)=="function" then
-            controller:_reset()
-        end
-    end)
-
-    nativeSyntheticTouchId+=1
-    local touchId=nativeSyntheticTouchId
-    local pos=button.AbsolutePosition+(button.AbsoluteSize/2)
-
-    nativeSyntheticDispatch=true
-    local began=pcall(function()
-        VirtualInputManager:SendTouchEvent(touchId,0,pos.X,pos.Y)
-        if type(VirtualInputManager.WaitForInputEventsProcessed)=="function" then
-            VirtualInputManager:WaitForInputEventsProcessed()
-        end
-    end)
-    nativeSyntheticDispatch=false
-
-    if not began then
-        jumpFallbackHits+=1
-        jumpRoute="native-repeat-touch-start-failed"
-        return false
-    end
-
-    jumpPulsePhase=true
-    jumpPulseCount+=1
-    jumpBridgeHits+=1
-
-    -- One full frame pressed = one genuine mobile jump click sampled by ControlModule.
-    RunService.RenderStepped:Wait()
-
-    nativeSyntheticDispatch=true
-    pcall(function()
-        VirtualInputManager:SendTouchEvent(touchId,2,pos.X,pos.Y)
-        if type(VirtualInputManager.WaitForInputEventsProcessed)=="function" then
-            VirtualInputManager:WaitForInputEventsProcessed()
-        end
-    end)
-    nativeSyntheticDispatch=false
-
-    jumpPulsePhase=false
-
-    -- One full released frame before the next click.
-    RunService.RenderStepped:Wait()
-    return true
-end
-
-startNativeRepeatLoop=function()
-    if nativeRepeatLoopRunning then return end
-    nativeRepeatLoopRunning=true
-
-    task.spawn(function()
-        -- Let the USER'S original TouchJump click be sampled first.
-        RunService.RenderStepped:Wait()
-
-        while enabled and pruneJumpBursts()>0 do
-            local controller,button=ensureOriginalTouchJump()
-            if type(controller)=="table" and button then
-                if not sendSyntheticNativeTap(controller,button) then
-                    RunService.Heartbeat:Wait()
-                end
-            else
-                RunService.Heartbeat:Wait()
-            end
-        end
-
+    if enabled and activeJumpBursts>0 then
+        -- V7.1 repeated this every Heartbeat for the 200 ms burst.
+        -- Keeping one shared pulse train avoids overlapping tasks releasing
+        -- Space while another tap's 200 ms window is still alive.
+        pulseWorkingSpace()
+        jumpPulsePhase=true
+    else
         jumpPulsePhase=false
-        activeJumpBursts=pruneJumpBursts()
-        nativeRepeatLoopRunning=false
-    end)
-end
-
--- PC Identity owns movement, but the original Roblox TouchJump stays enabled.
-RunService:BindToRenderStep(
-    JUMP_MAINTAIN_BIND_NAME,
-    Enum.RenderPriority.Last.Value,
-    function()
-        if enabled then
-            ensureOriginalTouchJump()
+        if previousActive>0 then
+            releaseWorkingSpace()
         end
     end
-)
-
-ensureOriginalTouchJump()
+end)
 
 connections[#connections+1]=joystick.InputBegan:Connect(function(input)
     if not enabled or movementTouch~=nil then return end
@@ -782,6 +598,23 @@ end)
 connections[#connections+1]=UserInputService.InputEnded:Connect(function(input)
     if input==movementTouch then
         releaseMovement()
+    end
+end)
+
+connections[#connections+1]=jumpButton.InputBegan:Connect(function(input)
+    if not enabled then return end
+
+    if input.UserInputType==Enum.UserInputType.Touch
+        or input.UserInputType==Enum.UserInputType.MouseButton1 then
+        jumpImage.ImageRectOffset=Vector2.new(146,146)
+        burstJump()
+    end
+end)
+
+connections[#connections+1]=jumpButton.InputEnded:Connect(function(input)
+    if input.UserInputType==Enum.UserInputType.Touch
+        or input.UserInputType==Enum.UserInputType.MouseButton1 then
+        jumpImage.ImageRectOffset=Vector2.new(1,146)
     end
 end)
 
@@ -958,8 +791,6 @@ local api={
             jumpBridgeHits=jumpBridgeHits,
             jumpFallbackHits=jumpFallbackHits,
             touchJumpControllerFound=type(touchJumpController)=="table",
-            nativeJumpButtonFound=nativeJumpButton~=nil,
-            nativeJumpMaintains=nativeJumpMaintains,
             legacyMoveWrites=legacyMoveWrites,
             legacyWakeStatus=legacyWakeStatus,
             legacyControllerEnabled=legacyControllerEnabled,
@@ -998,14 +829,7 @@ ENV.__EvadePCJoystickV7Cleanup=function()
     activeJumpBursts=0
     jumpPulsePhase=false
     jumpForcePulse=false
-    if type(touchJumpController)=="table" then
-        pcall(function() rawset(touchJumpController,"isJumping",false) end)
-        pcall(function() touchJumpController:Enable(false) end)
-    end
-    disconnectNativeJumpButton()
-    nativeSyntheticDispatch=false
-    nativeRepeatLoopRunning=false
-    jumpPulsePhase=false
+    releaseWorkingSpace()
     releaseMovement()
 
     pcall(function()
@@ -1013,9 +837,6 @@ ENV.__EvadePCJoystickV7Cleanup=function()
     end)
     pcall(function()
         RunService:UnbindFromRenderStep(LEGACY_BIND_NAME)
-    end)
-    pcall(function()
-        RunService:UnbindFromRenderStep(JUMP_MAINTAIN_BIND_NAME)
     end)
 
     if cameraViewportConnection then

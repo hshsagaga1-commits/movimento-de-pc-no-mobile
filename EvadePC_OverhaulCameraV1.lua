@@ -30,6 +30,30 @@ local previous=ENV.__EvadePCOverhaulCameraV1Cleanup
 if type(previous)=="function" then pcall(previous) end
 pcall(function() RunService:UnbindFromRenderStep(BIND_NAME) end)
 
+-- Retire the older sensitivity wrapper if it is still active, so rotation is
+-- processed exactly once.
+local oldSpeed=ENV.__EvadeCameraSpeedControl
+if type(oldSpeed)=="table" then
+    pcall(function()
+        if oldSpeed.cameraInput and oldSpeed.originalGetRotation
+            and oldSpeed.cameraInput.getRotation==oldSpeed.wrapper then
+            oldSpeed.cameraInput.getRotation=oldSpeed.originalGetRotation
+        end
+    end)
+    pcall(function()
+        if oldSpeed.baseCamera and oldSpeed.originalInputTranslation
+            and oldSpeed.baseCamera.InputTranslationToCameraAngleChange==oldSpeed.legacyWrapper then
+            oldSpeed.baseCamera.InputTranslationToCameraAngleChange=oldSpeed.originalInputTranslation
+        end
+    end)
+    pcall(function() if oldSpeed.gui then oldSpeed.gui:Destroy() end end)
+    oldSpeed.running=false
+    ENV.__EvadeCameraSpeedControl=nil
+end
+
+local oldGate=ENV.__PCCameraTouchRightHalfGateV5Cleanup
+if type(oldGate)=="function" then pcall(oldGate) end
+
 if game.GameId~=EVADE_GAME_ID or game.PlaceId==LEGACY_PLACE_ID then
     local api={Version=VERSION,Installed=false,Reason="not-overhaul",PlaceId=game.PlaceId}
     ENV.EvadePCOverhaulCameraV1=api
@@ -361,7 +385,10 @@ gui=Instance.new("ScreenGui")
 gui.Name=GUI_NAME
 gui.ResetOnSpawn=false
 gui.IgnoreGuiInset=false
-gui.Parent=parent
+local parented=pcall(function() gui.Parent=parent end)
+if not parented then
+    gui.Parent=playerGui
+end
 
 local frame=Instance.new("Frame")
 frame.Size=UDim2.fromOffset(238,88)

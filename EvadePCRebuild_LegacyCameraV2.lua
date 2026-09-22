@@ -11,10 +11,10 @@ local Workspace = game:GetService("Workspace")
 local player = Players.LocalPlayer
 local ENV = (type(getgenv) == "function" and getgenv()) or _G
 
-local VERSION = "EvadePCRebuild-LegacyCamera-V2-native-lock"
+local VERSION = "EvadePCRebuild-LegacyCamera-V2.1-native-pc-camera-emote-center"
 local LEGACY_PLACE_ID = 96537472072550
 local BIND_NAME = "__EvadePCRebuildLegacyCameraV2"
-local SHOULDER_OFFSET = Vector3.new(2, 0.5, 0)
+local SHOULDER_OFFSET = Vector3.new(1.75, 0, 0)\nlocal EMOTE_OFFSET = Vector3.zero
 
 local previousCleanup = ENV.__EvadePCRebuildLegacyCameraV2Cleanup
 if type(previousCleanup) == "function" then
@@ -60,6 +60,8 @@ local offsetOriginal = nil
 local userGameSettings = nil
 local originalRotationType = nil
 local enabled = true
+local emoteCentered = false
+local effectiveOffset = SHOULDER_OFFSET
 local frames = 0
 local lockWrites = 0
 local offsetWrites = 0
@@ -225,12 +227,12 @@ local function setControllerState(controller)
         end
     end)
 
-    if typeof(currentOffset) ~= "Vector3" or (currentOffset - SHOULDER_OFFSET).Magnitude > 0.0001 then
+    if typeof(currentOffset) ~= "Vector3" or (currentOffset - effectiveOffset).Magnitude > 0.0001 then
         local ok = pcall(function()
             if type(controller.SetMouseLockOffset) == "function" then
-                controller:SetMouseLockOffset(SHOULDER_OFFSET)
+                controller:SetMouseLockOffset(effectiveOffset)
             else
-                rawset(controller, "mouseLockOffset", SHOULDER_OFFSET)
+                rawset(controller, "mouseLockOffset", effectiveOffset)
             end
         end)
         if ok then
@@ -252,6 +254,7 @@ local function setControllerState(controller)
 end
 
 local function applyLegacyState()
+    effectiveOffset = emoteCentered and EMOTE_OFFSET or SHOULDER_OFFSET
     findLegacyStateObjects()
 
     if shiftObject and shiftObject.Value ~= true then
@@ -263,9 +266,9 @@ local function applyLegacyState()
         end
     end
 
-    if offsetObject and ((offsetObject.Value - SHOULDER_OFFSET).Magnitude > 0.0001) then
+    if offsetObject and ((offsetObject.Value - effectiveOffset).Magnitude > 0.0001) then
         local ok = pcall(function()
-            offsetObject.Value = SHOULDER_OFFSET
+            offsetObject.Value = effectiveOffset
         end)
         if ok then
             stateWrites = stateWrites + 1
@@ -307,7 +310,7 @@ local function shouldRun()
     return true
 end
 
-RunService:BindToRenderStep(BIND_NAME, Enum.RenderPriority.Camera.Value + 1, function()
+RunService:BindToRenderStep(BIND_NAME, Enum.RenderPriority.Camera.Value - 1, function()
     frames = frames + 1
 
     if shouldRun() then
@@ -356,6 +359,13 @@ local api = {
             applyLegacyState()
         end
     end,
+    SetEmoteCentered = function(value)
+        local nextValue = value == true
+        if emoteCentered ~= nextValue then
+            emoteCentered = nextValue
+            applyLegacyState()
+        end
+    end,
     Resync = function()
         cameras = nil
         playerModule = nil
@@ -370,6 +380,12 @@ local api = {
             offsetWrites = offsetWrites,
             stateWrites = stateWrites,
             behaviorRefreshes = behaviorRefreshes,
+            emoteCentered = emoteCentered,
+            shoulderOffset = SHOULDER_OFFSET,
+            emoteOffset = EMOTE_OFFSET,
+            effectiveOffset = effectiveOffset,
+            ownsCameraCFrame = false,
+            ownsCameraFocus = false,
             hasController = type(getActiveController()) == "table",
             hasShiftObject = shiftObject ~= nil,
             hasOffsetObject = offsetObject ~= nil,
@@ -382,6 +398,8 @@ ENV.EvadePCRebuildLegacyCameraV2 = api
 
 ENV.__EvadePCRebuildLegacyCameraV2Cleanup = function()
     enabled = false
+    emoteCentered = false
+    effectiveOffset = SHOULDER_OFFSET
 
     pcall(function()
         RunService:UnbindFromRenderStep(BIND_NAME)

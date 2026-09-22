@@ -467,6 +467,17 @@ local function burstJump()
 
             RunService.Heartbeat:Wait()
         end
+
+        -- Mobile-style release. An older burst never releases a newer tap.
+        if token==jumpToken then
+            local character=player.Character
+            local humanoid=character and character:FindFirstChildOfClass("Humanoid")
+            if humanoid then
+                pcall(function()
+                    humanoid.Jump=false
+                end)
+            end
+        end
     end)
 end
 

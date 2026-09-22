@@ -24,7 +24,7 @@ local player=Players.LocalPlayer
 local playerGui=player:WaitForChild("PlayerGui")
 local ENV=(type(getgenv)=="function" and getgenv()) or _G
 
-local VERSION="EvadePC-Joystick-V7.2-legacy-keyboard-wake-mobile-jump-buffer"
+local VERSION="EvadePC-Joystick-V7.3-native-touchjump-bridge"
 local BIND_NAME="__EvadePCJoystickV7"
 local LEGACY_BIND_NAME="__EvadePCJoystickV7LegacyKeyboardWake"
 local GUI_NAME="EvadePCJoystickV7Gui"
@@ -101,6 +101,12 @@ local jumpRequests=0
 local legacyMoveWrites=0 -- retained for state compatibility; V7 no longer writes Player:Move
 local dryDiagonalSwaps=0
 local lastRawChord="-"
+
+local sharedControls=nil
+local touchJumpController=nil
+local jumpRoute="unresolved"
+local jumpBridgeHits=0
+local jumpFallbackHits=0
 
 local legacyControls=nil
 local legacyWakeAttempts=0
@@ -443,6 +449,88 @@ local function releaseMovement()
     knob.Position=UDim2.fromOffset(center.X,center.Y)
 end
 
+local function locateSharedControls()
+    if type(sharedControls)=="table" then
+        local cached=rawget(sharedControls,"touchJumpController")
+        if type(cached)=="table" then
+            touchJumpController=cached
+        end
+        return true
+    end
+
+    local ok=pcall(function()
+        local scripts=player:FindFirstChild("PlayerScripts")
+        local moduleScript=scripts and scripts:FindFirstChild("PlayerModule")
+        if not moduleScript then return end
+
+        local playerModule=require(moduleScript)
+        if type(playerModule)~="table" then return end
+
+        local controls=nil
+        if type(playerModule.GetControls)=="function" then
+            controls=playerModule:GetControls()
+        end
+        if type(controls)~="table" then
+            controls=rawget(playerModule,"controls")
+        end
+
+        if type(controls)=="table" then
+            sharedControls=controls
+            local tj=rawget(controls,"touchJumpController")
+            if type(tj)=="table" then
+                touchJumpController=tj
+            end
+        end
+    end)
+
+    return ok and type(sharedControls)=="table"
+end
+
+local function setTouchJumpState(value)
+    locateSharedControls()
+
+    local controller=touchJumpController
+    if type(controller)~="table" and type(sharedControls)=="table" then
+        controller=rawget(sharedControls,"touchJumpController")
+        if type(controller)=="table" then
+            touchJumpController=controller
+        end
+    end
+
+    if type(controller)~="table" then
+        return false
+    end
+
+    local ok=pcall(function()
+        -- Roblox ControlModule checks touchJumpController:GetIsJumping()
+        -- even while the keyboard controller owns movement. Setting the
+        -- controller's own jump state therefore follows the native mobile
+        -- jump path without synthesizing Space and without stealing WASD.
+        rawset(controller,"isJumping",value==true)
+    end)
+
+    if ok then
+        jumpRoute="touchJumpController"
+        jumpBridgeHits+=1
+        return true
+    end
+    return false
+end
+
+local function fallbackJumpPulse()
+    jumpFallbackHits+=1
+    jumpRoute="humanoid-fallback"
+
+    local character=player.Character
+    local humanoid=character and character:FindFirstChildOfClass("Humanoid")
+    if not humanoid or humanoid.Health<=0 then return end
+
+    pcall(function()
+        humanoid.Jump=true
+        humanoid:ChangeState(Enum.HumanoidStateType.Jumping)
+    end)
+end
+
 local function burstJump()
     if not enabled then return end
 
@@ -451,32 +539,27 @@ local function burstJump()
     local token=jumpToken
     local deadline=os.clock()+JUMP_BURST
 
-    -- Mobile-style jump route: no fake Space input at all.
-    -- One tap keeps requesting Humanoid.Jump for 200 ms, and a new tap can
-    -- restart the buffer immediately with zero cooldown.
+    -- Primary route: drive Roblox's own TouchJump controller. ControlModule
+    -- merges this with the active keyboard controller, so this works for both
+    -- Overhaul and Legacy while keeping movement as W/A/S/D.
+    local bridged=setTouchJumpState(true)
+    if not bridged then
+        fallbackJumpPulse()
+    end
+
     task.spawn(function()
         while enabled and token==jumpToken and os.clock()<deadline do
-            local character=player.Character
-            local humanoid=character and character:FindFirstChildOfClass("Humanoid")
-
-            if humanoid and humanoid.Health>0 then
-                pcall(function()
-                    humanoid.Jump=true
-                end)
+            if bridged then
+                -- Some PlayerModule versions clear the flag after reading it,
+                -- so refresh it during the short mobile-style input buffer.
+                setTouchJumpState(true)
             end
-
             RunService.Heartbeat:Wait()
         end
 
-        -- Mobile-style release. An older burst never releases a newer tap.
-        if token==jumpToken then
-            local character=player.Character
-            local humanoid=character and character:FindFirstChildOfClass("Humanoid")
-            if humanoid then
-                pcall(function()
-                    humanoid.Jump=false
-                end)
-            end
+        -- An older tap can never release a newer one.
+        if token==jumpToken and bridged then
+            setTouchJumpState(false)
         end
     end)
 end
@@ -566,25 +649,10 @@ local function locateLegacyControls()
     if not IS_LEGACY then return false end
     if type(legacyControls)=="table" then return true end
 
-    local ok=pcall(function()
-        local scripts=player:FindFirstChild("PlayerScripts")
-        local moduleScript=scripts and scripts:FindFirstChild("PlayerModule")
-        if not moduleScript then return end
-
-        local playerModule=require(moduleScript)
-        if type(playerModule)~="table" then return end
-
-        local controls=nil
-        if type(playerModule.GetControls)=="function" then
-            controls=playerModule:GetControls()
-        end
-        if type(controls)~="table" then
-            controls=rawget(playerModule,"controls")
-        end
-        if type(controls)=="table" then
-            legacyControls=controls
-        end
-    end)
+    local ok=locateSharedControls()
+    if ok and type(sharedControls)=="table" then
+        legacyControls=sharedControls
+    end
 
     if not ok or type(legacyControls)~="table" then
         legacyWakeStatus="controls-missing"
@@ -705,6 +773,10 @@ local api={
             updates=movementUpdates,
             keyEvents=keyEvents,
             jumpRequests=jumpRequests,
+            jumpRoute=jumpRoute,
+            jumpBridgeHits=jumpBridgeHits,
+            jumpFallbackHits=jumpFallbackHits,
+            touchJumpControllerFound=type(touchJumpController)=="table",
             legacyMoveWrites=legacyMoveWrites,
             legacyWakeStatus=legacyWakeStatus,
             legacyControllerEnabled=legacyControllerEnabled,
@@ -739,6 +811,7 @@ ENV.EvadePCJoystickV7=api
 ENV.__EvadePCJoystickV7Cleanup=function()
     enabled=false
     jumpToken+=1
+    pcall(function() setTouchJumpState(false) end)
     releaseMovement()
 
     pcall(function()

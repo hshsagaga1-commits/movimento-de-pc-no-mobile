@@ -8,7 +8,6 @@ local function run(path)
     if not chunk then
         error("[Evade PC Combo] compile failed in "..path..": "..tostring(err))
     end
-
     local ok,result=pcall(chunk)
     if not ok then
         error("[Evade PC Combo] runtime failed in "..path..": "..tostring(result))
@@ -17,11 +16,11 @@ local function run(path)
 end
 
 local identity=run("EvadePC_IdentityV1.lua")
-local joystick=run("EvadePC_JoystickV5.lua")
+local joystick=run("EvadePC_JoystickV6.lua")
 
 local env=(type(getgenv)=="function" and getgenv()) or _G
 local api={
-    Version="EvadePC-Identity+Joystick-V3",
+    Version="EvadePC-Identity+Joystick-V4",
     Identity=identity,
     Joystick=joystick,
     GetState=function()
@@ -30,9 +29,9 @@ local api={
             and type(env.EvadePCIdentityV1.GetState)=="function" then
             state.identity=env.EvadePCIdentityV1.GetState()
         end
-        if type(env.EvadePCJoystickV5)=="table"
-            and type(env.EvadePCJoystickV5.GetState)=="function" then
-            state.joystick=env.EvadePCJoystickV5.GetState()
+        if type(env.EvadePCJoystickV6)=="table"
+            and type(env.EvadePCJoystickV6.GetState)=="function" then
+            state.joystick=env.EvadePCJoystickV6.GetState()
         end
         return state
     end,

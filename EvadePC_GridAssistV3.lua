@@ -29,7 +29,7 @@ local EDGE_INWARD_SPEED=4.25
 local CONTACT_GRACE_SECONDS=0.24
 local MIN_INPUT=0.10
 
-local YAW_WINDOW_SECONDS=0.16
+local YAW_WINDOW_SECONDS=0.22
 local REVERSE_TRIGGER_DEG=105
 local REVERSE_HOLD_SECONDS=0.24
 local PEAK_DECAY_PER_SECOND=0.85
@@ -62,6 +62,7 @@ local edgeFrames=0
 local noContactFrames=0
 local activeChord="-"
 local lastCameraForward=nil
+local yawWindowForward=nil
 local yawWindowStart=os.clock()
 local yawAccumDegrees=0
 local recentTangentPeak=0
@@ -107,6 +108,7 @@ local function bindCharacter(char)
     lastMode="none"
     lastContactUntil=-math.huge
     lastCameraForward=nil
+    yawWindowForward=nil
     yawWindowStart=os.clock()
     yawAccumDegrees=0
     recentTangentPeak=0
@@ -288,16 +290,16 @@ local function updateReverseWindow(now,chord,contactNormal,tangentSpeed)
     end
     recentTangentPeak=math.max(recentTangentPeak,tangentSpeed)
 
-    if now-yawWindowStart>YAW_WINDOW_SECONDS then
-        yawWindowStart=now
-        yawAccumDegrees=0
-    end
-
-    if forward.Magnitude>0 and lastCameraForward and lastCameraForward.Magnitude>0 then
-        local dot=math.clamp(lastCameraForward:Dot(forward),-1,1)
-        yawAccumDegrees+=math.deg(math.acos(dot))
-    end
     if forward.Magnitude>0 then
+        if not yawWindowForward
+            or now-yawWindowStart>YAW_WINDOW_SECONDS then
+            yawWindowStart=now
+            yawWindowForward=forward
+            yawAccumDegrees=0
+        else
+            local dot=math.clamp(yawWindowForward:Dot(forward),-1,1)
+            yawAccumDegrees=math.deg(math.acos(dot))
+        end
         lastCameraForward=forward
     end
 
@@ -306,15 +308,20 @@ local function updateReverseWindow(now,chord,contactNormal,tangentSpeed)
         and yawAccumDegrees>=REVERSE_TRIGGER_DEG
         and recentTangentPeak>=MIN_REVERSE_SPEED then
         reversePreserveUntil=now+REVERSE_HOLD_SECONDS
-        reversePreserveSpeed=math.max(reversePreserveSpeed,recentTangentPeak)
+        reversePreserveSpeed=recentTangentPeak
         reverseTriggers+=1
+
+        -- Start a new yaw window from the flipped orientation so one turn cannot
+        -- retrigger every frame.
         yawWindowStart=now
+        yawWindowForward=forward.Magnitude>0 and forward or nil
         yawAccumDegrees=0
     elseif chord~="W" then
         reversePreserveUntil=-math.huge
         reversePreserveSpeed=0
         yawAccumDegrees=0
         yawWindowStart=now
+        yawWindowForward=forward.Magnitude>0 and forward or nil
     end
 end
 

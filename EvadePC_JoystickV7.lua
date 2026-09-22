@@ -24,7 +24,7 @@ local player=Players.LocalPlayer
 local playerGui=player:WaitForChild("PlayerGui")
 local ENV=(type(getgenv)=="function" and getgenv()) or _G
 
-local VERSION="EvadePC-Joystick-V7-legacy-keyboard-wake-held-jump"
+local VERSION="EvadePC-Joystick-V7.1-legacy-keyboard-wake-200ms-pulse-burst"
 local BIND_NAME="__EvadePCJoystickV7"
 local LEGACY_BIND_NAME="__EvadePCJoystickV7LegacyKeyboardWake"
 local GUI_NAME="EvadePCJoystickV7Gui"
@@ -459,19 +459,24 @@ local function burstJump()
     jumpRequests+=1
     jumpToken+=1
     local token=jumpToken
+    local deadline=os.clock()+JUMP_BURST
 
-    -- A real keyboard-like hold: one Space-down, held for 200 ms, then Space-up.
-    -- A new tap restarts the hold cleanly.
-    pcall(function()
-        VirtualInputManager:SendKeyEvent(false,Enum.KeyCode.Space,false,game)
-        VirtualInputManager:SendKeyEvent(true,Enum.KeyCode.Space,false,game)
-    end)
+    -- One tap starts a 200 ms burst of repeated Space pulses.
+    -- There is NO cooldown: another tap can restart the burst immediately.
+    task.spawn(function()
+        while enabled and token==jumpToken and os.clock()<deadline do
+            pcall(function()
+                VirtualInputManager:SendKeyEvent(false,Enum.KeyCode.Space,false,game)
+                VirtualInputManager:SendKeyEvent(true,Enum.KeyCode.Space,false,game)
+            end)
+            RunService.Heartbeat:Wait()
+        end
 
-    task.delay(JUMP_BURST,function()
-        if token~=jumpToken then return end
-        pcall(function()
-            VirtualInputManager:SendKeyEvent(false,Enum.KeyCode.Space,false,game)
-        end)
+        if token==jumpToken then
+            pcall(function()
+                VirtualInputManager:SendKeyEvent(false,Enum.KeyCode.Space,false,game)
+            end)
+        end
     end)
 end
 

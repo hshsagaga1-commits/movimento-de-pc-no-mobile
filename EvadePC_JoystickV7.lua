@@ -24,7 +24,7 @@ local player=Players.LocalPlayer
 local playerGui=player:WaitForChild("PlayerGui")
 local ENV=(type(getgenv)=="function" and getgenv()) or _G
 
-local VERSION="EvadePC-Joystick-V7.1-legacy-keyboard-wake-200ms-pulse-burst"
+local VERSION="EvadePC-Joystick-V7.2-legacy-keyboard-wake-mobile-jump-buffer"
 local BIND_NAME="__EvadePCJoystickV7"
 local LEGACY_BIND_NAME="__EvadePCJoystickV7LegacyKeyboardWake"
 local GUI_NAME="EvadePCJoystickV7Gui"
@@ -446,36 +446,26 @@ end
 local function burstJump()
     if not enabled then return end
 
-    local character=player.Character
-    local humanoid=character and character:FindFirstChildOfClass("Humanoid")
-
-    -- Immediate local fallback.
-    if humanoid and humanoid.Health>0 then
-        pcall(function()
-            humanoid.Jump=true
-        end)
-    end
-
     jumpRequests+=1
     jumpToken+=1
     local token=jumpToken
     local deadline=os.clock()+JUMP_BURST
 
-    -- One tap starts a 200 ms burst of repeated Space pulses.
-    -- There is NO cooldown: another tap can restart the burst immediately.
+    -- Mobile-style jump route: no fake Space input at all.
+    -- One tap keeps requesting Humanoid.Jump for 200 ms, and a new tap can
+    -- restart the buffer immediately with zero cooldown.
     task.spawn(function()
         while enabled and token==jumpToken and os.clock()<deadline do
-            pcall(function()
-                VirtualInputManager:SendKeyEvent(false,Enum.KeyCode.Space,false,game)
-                VirtualInputManager:SendKeyEvent(true,Enum.KeyCode.Space,false,game)
-            end)
-            RunService.Heartbeat:Wait()
-        end
+            local character=player.Character
+            local humanoid=character and character:FindFirstChildOfClass("Humanoid")
 
-        if token==jumpToken then
-            pcall(function()
-                VirtualInputManager:SendKeyEvent(false,Enum.KeyCode.Space,false,game)
-            end)
+            if humanoid and humanoid.Health>0 then
+                pcall(function()
+                    humanoid.Jump=true
+                end)
+            end
+
+            RunService.Heartbeat:Wait()
         end
     end)
 end
@@ -745,10 +735,6 @@ ENV.__EvadePCJoystickV7Cleanup=function()
     end)
     pcall(function()
         RunService:UnbindFromRenderStep(LEGACY_BIND_NAME)
-    end)
-
-    pcall(function()
-        VirtualInputManager:SendKeyEvent(false,Enum.KeyCode.Space,false,game)
     end)
 
     if cameraViewportConnection then

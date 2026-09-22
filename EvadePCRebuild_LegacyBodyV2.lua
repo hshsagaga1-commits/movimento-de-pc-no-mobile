@@ -10,9 +10,10 @@ local Workspace=game:GetService("Workspace")
 local player=Players.LocalPlayer
 local ENV=(type(getgenv)=="function" and getgenv()) or _G
 
-local VERSION="EvadePCRebuild-LegacyBody-V2.2-emote-head-1px-hole"
+local VERSION="EvadePCRebuild-LegacyBody-V2.3-exact-overhaul-emote-semilock"
 local LEGACY_PLACE_ID=96537472072550
 local BIND_NAME="__EvadePCRebuildLegacyBodyV2"
+local HOLE_GUI_NAME="EvadePCLegacyHole1px"
 
 -- Extra distance added to the native camera distance.
 -- Level/up ~= native. Moderate look-down exposes more body / "buraco".
@@ -26,7 +27,6 @@ local MAX_EXTRA_DISTANCE=1.70
 local COLLISION_PADDING=0.14
 local FIRST_PERSON_DISTANCE=1.45
 local EMOTE_TARGET_NORM=Vector2.new(0.50,0.50)
-local EMOTE_HOLE_SIZE_PX=1
 local EMOTE_MAX_TRANSLATION_PER_FRAME=3.5
 local EMOTE_MIN_DEPTH=0.35
 
@@ -59,6 +59,29 @@ if game.PlaceId~=LEGACY_PLACE_ID then
     ENV.EvadePCRebuildLegacyBodyV2=api
     return api
 end
+
+local playerGui=player:WaitForChild("PlayerGui")
+local previousHole=playerGui:FindFirstChild(HOLE_GUI_NAME)
+if previousHole then previousHole:Destroy() end
+
+local holeGui=Instance.new("ScreenGui")
+holeGui.Name=HOLE_GUI_NAME
+holeGui.ResetOnSpawn=false
+holeGui.IgnoreGuiInset=true
+holeGui.DisplayOrder=10040
+holeGui.ZIndexBehavior=Enum.ZIndexBehavior.Sibling
+holeGui.Parent=playerGui
+
+local hole=Instance.new("Frame")
+hole.Name="Hole1px"
+hole.AnchorPoint=Vector2.new(0.5,0.5)
+hole.Position=UDim2.fromScale(0.5,0.5)
+hole.Size=UDim2.fromOffset(1,1)
+hole.BorderSizePixel=0
+hole.BackgroundTransparency=0
+hole.BackgroundColor3=Color3.new(1,1,1)
+hole.ZIndex=100
+hole.Parent=holeGui
 
 local enabled=true
 local character=nil
@@ -274,6 +297,7 @@ local function withPosition(cf,position)
 end
 
 local function centerHeadOnScreen(camera)
+    -- This is intentionally the SAME screen-space mechanic as Overhaul.
     if not head or not head.Parent then return end
 
     local viewport=camera.ViewportSize
@@ -290,35 +314,25 @@ local function centerHeadOnScreen(camera)
 
     local targetX=EMOTE_TARGET_NORM.X*viewport.X
     local targetY=EMOTE_TARGET_NORM.Y*viewport.Y
+
     local desiredX=(targetX-viewport.X*0.5)*depth/focal
     local desiredY=-(targetY-viewport.Y*0.5)*depth/focal
 
     local dx=localPoint.X-desiredX
     local dy=localPoint.Y-desiredY
-    local delta=cf.RightVector*dx + cf.UpVector*dy
 
+    local delta=cf.RightVector*dx + cf.UpVector*dy
     if delta.Magnitude>EMOTE_MAX_TRANSLATION_PER_FRAME then
         delta=delta.Unit*EMOTE_MAX_TRANSLATION_PER_FRAME
     end
 
     local currentPoint=camera:WorldToViewportPoint(head.Position)
-    local errorX=currentPoint.X-targetX
-    local errorY=currentPoint.Y-targetY
-    emoteLastErrorPixels=Vector2.new(errorX,errorY)
-
-    -- The "buraco" is literally a 1x1 px target at screen center.
-    -- If the head is already inside that pixel, do not correct further.
-    local halfHole=EMOTE_HOLE_SIZE_PX*0.5
-    if math.abs(errorX)<=halfHole and math.abs(errorY)<=halfHole then
-        emoteLastTranslation=Vector3.zero
-        return
-    end
-
+    emoteLastErrorPixels=Vector2.new(currentPoint.X-targetX,currentPoint.Y-targetY)
     emoteLastTranslation=delta
 
     if delta.Magnitude>0.0001 then
-        -- Semi-lock: camera follows the CURRENT head position only while an
-        -- emote/action track is active. Character/root movement stays fully free.
+        -- Same as Overhaul: translate camera AND focus together so the head
+        -- remains centered while the character can move freely in the world.
         camera.CFrame=cf+delta
         camera.Focus=camera.Focus+delta
         emoteCenterWrites+=1
@@ -350,7 +364,7 @@ local function shouldRun(camera)
     return true
 end
 
-RunService:BindToRenderStep(BIND_NAME,Enum.RenderPriority.Camera.Value+2,function()
+RunService:BindToRenderStep(BIND_NAME,Enum.RenderPriority.Camera.Value+3,function()
     frames+=1
 
     local camera=Workspace.CurrentCamera
@@ -365,6 +379,26 @@ RunService:BindToRenderStep(BIND_NAME,Enum.RenderPriority.Camera.Value+2,functio
         return
     end
 
+    -- Detect emote BEFORE Legacy pitch/body framing.
+    -- During emote we run ONLY the exact Overhaul semi-lock path. This prevents
+    -- the older Legacy distance/shoulder framing from pulling the character
+    -- sideways while the emote is active.
+    local emote,trackName=detectEmote()
+    activeEmote=emote
+    lastEmoteTrack=trackName
+
+    if emote then
+        emoteFrames+=1
+        lastAppliedDelta=0
+        lastExtra=0
+        centerHeadOnScreen(camera)
+        return
+    end
+
+    emoteLastErrorPixels=Vector2.zero
+    emoteLastTranslation=Vector3.zero
+
+    -- Outside emotes, keep the existing Legacy-only pitch framing.
     local pitch=pitchDegrees(camera)
     local extra=math.clamp(extraForPitch(pitch),0,MAX_EXTRA_DISTANCE)
     local target=nativeDistance+extra
@@ -375,47 +409,35 @@ RunService:BindToRenderStep(BIND_NAME,Enum.RenderPriority.Camera.Value+2,functio
     lastExtra=extra
     lastAppliedDelta=0
 
-    -- Preserve the existing Legacy body/pitch framing first.
-    if extra>0.001 then
-        local anchor=camera.Focus.Position
-        local cf=camera.CFrame
-        local fromAnchor=cf.Position-anchor
-        local currentDistance=fromAnchor.Magnitude
-
-        if currentDistance>0.0001 then
-            local direction=fromAnchor.Unit
-            local desired=anchor+direction*target
-            local finalPosition=collisionClamp(anchor,desired)
-            local delta=(finalPosition-cf.Position).Magnitude
-
-            lastAppliedDelta=delta
-            if delta>0.001 then
-                camera.CFrame=withPosition(cf,finalPosition)
-                writes+=1
-            end
-        end
+    if extra<=0.001 then
+        return
     end
 
-    -- Then add the PC-like "buraco" behavior:
-    -- no lock outside emotes; during an emote/action, the HEAD goes to the
-    -- screen center while W/A/S/D movement remains completely free.
-    local emote,trackName=detectEmote()
-    activeEmote=emote
-    lastEmoteTrack=trackName
+    local anchor=camera.Focus.Position
+    local cf=camera.CFrame
+    local fromAnchor=cf.Position-anchor
+    local currentDistance=fromAnchor.Magnitude
+    if currentDistance<=0.0001 then return end
 
-    if emote then
-        emoteFrames+=1
-        centerHeadOnScreen(camera)
-    else
-        emoteLastErrorPixels=Vector2.zero
-        emoteLastTranslation=Vector3.zero
+    local direction=fromAnchor.Unit
+    local desired=anchor+direction*target
+    local finalPosition=collisionClamp(anchor,desired)
+    local delta=(finalPosition-cf.Position).Magnitude
+
+    lastAppliedDelta=delta
+    if delta>0.001 then
+        camera.CFrame=withPosition(cf,finalPosition)
+        writes+=1
     end
 end)
 
 local api={
     Version=VERSION,
     Installed=true,
-    SetEnabled=function(value) enabled=value~=false end,
+    SetEnabled=function(value)
+        enabled=value~=false
+        holeGui.Enabled=enabled
+    end,
     IsEnabled=function() return enabled end,
     GetState=function()
         return {
@@ -433,7 +455,8 @@ local api={
             emoteCenterWrites=emoteCenterWrites,
             emoteTargetNorm=EMOTE_TARGET_NORM,
             emoteTargetPart="Head",
-            emoteHoleSizePixels=EMOTE_HOLE_SIZE_PX,
+            emoteHoleSizePixels=1,
+            emoteMechanic="exact-overhaul-screen-space-head-lock",
             emoteBehavior="native-outside-emote/head-center-during-emote",
             emoteLastErrorPixels=emoteLastErrorPixels,
             emoteLastTranslation=emoteLastTranslation,
@@ -451,6 +474,7 @@ ENV.__EvadePCRebuildLegacyBodyV2Cleanup=function()
     enabled=false
     pcall(function() RunService:UnbindFromRenderStep(BIND_NAME) end)
     if characterConnection then pcall(function() characterConnection:Disconnect() end) end
+    pcall(function() holeGui:Destroy() end)
     ENV.EvadePCRebuildLegacyBodyV2=nil
     ENV.__EvadePCRebuildLegacyBodyV2Cleanup=nil
 end

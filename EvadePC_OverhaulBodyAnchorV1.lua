@@ -17,12 +17,12 @@ local Workspace=game:GetService("Workspace")
 local player=Players.LocalPlayer
 local ENV=(type(getgenv)=="function" and getgenv()) or _G
 
-local VERSION="EvadePC-OverhaulBodyAnchor-V1-screen-hole-lock"
+local VERSION="EvadePC-OverhaulBodyAnchor-V1.1-fixed-pc-hole"
 local EVADE_GAME_ID=3647333358
 local LEGACY_PLACE_ID=96537472072550
 local BIND_NAME="__EvadePCOverhaulBodyAnchorV1"
 
-local CAPTURE_FRAMES=12
+local TARGET_NORM=Vector2.new(0.50,0.55)
 local MAX_TRANSLATION_PER_FRAME=3.0
 local MIN_CAMERA_DISTANCE=0.85
 local MIN_DEPTH=0.35
@@ -41,8 +41,7 @@ local enabled=true
 local character=nil
 local humanoid=nil
 local root=nil
-local targetNorm=nil
-local captureCountdown=CAPTURE_FRAMES
+local targetNorm=TARGET_NORM
 local corrections=0
 local recaptures=0
 local skippedFirstPerson=0
@@ -55,8 +54,7 @@ local function refreshCharacter(char)
     character=char
     humanoid=char and char:FindFirstChildOfClass("Humanoid") or nil
     root=char and char:FindFirstChild("HumanoidRootPart") or nil
-    targetNorm=nil
-    captureCountdown=CAPTURE_FRAMES
+    targetNorm=TARGET_NORM
 end
 
 local function ensureCharacter()
@@ -108,23 +106,6 @@ local function canOperate(camera)
     return true
 end
 
-local function captureTarget(camera)
-    local viewport=camera.ViewportSize
-    if viewport.X<=1 or viewport.Y<=1 then return false end
-
-    local point,onScreen=camera:WorldToViewportPoint(root.Position)
-    if not onScreen or point.Z<=MIN_DEPTH then return false end
-
-    targetNorm=Vector2.new(
-        math.clamp(point.X/viewport.X,0,1),
-        math.clamp(point.Y/viewport.Y,0,1)
-    )
-    recaptures+=1
-    lastErrorPixels=Vector2.zero
-    lastTranslation=Vector3.zero
-    return true
-end
-
 local function applyAnchor(camera)
     local viewport=camera.ViewportSize
     if not targetNorm or viewport.X<=1 or viewport.Y<=1 then return end
@@ -170,8 +151,7 @@ connections[#connections+1]=player.CharacterAdded:Connect(function(char)
 end)
 
 connections[#connections+1]=Workspace:GetPropertyChangedSignal("CurrentCamera"):Connect(function()
-    targetNorm=nil
-    captureCountdown=CAPTURE_FRAMES
+    targetNorm=TARGET_NORM
 end)
 
 refreshCharacter(player.Character)
@@ -183,15 +163,7 @@ RunService:BindToRenderStep(
         local camera=Workspace.CurrentCamera
         if not canOperate(camera) then return end
 
-        if not targetNorm then
-            if captureCountdown>0 then
-                captureCountdown-=1
-                return
-            end
-            captureTarget(camera)
-            return
-        end
-
+        targetNorm=TARGET_NORM
         applyAnchor(camera)
     end
 )
@@ -203,14 +175,13 @@ local api={
         enabled=value~=false
     end,
     Recapture=function()
-        targetNorm=nil
-        captureCountdown=CAPTURE_FRAMES
+        targetNorm=TARGET_NORM
     end,
     GetState=function()
         return {
             enabled=enabled,
             targetNorm=targetNorm,
-            captureCountdown=captureCountdown,
+            targetSource="fixed-pc-reference",
             corrections=corrections,
             recaptures=recaptures,
             skippedFirstPerson=skippedFirstPerson,

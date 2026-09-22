@@ -28,6 +28,14 @@ pcall(function()
     RunService:UnbindFromRenderStep(BIND_NAME)
 end)
 
+-- Retire the older BURACO/R2 camera owner if it is still alive in this session.
+local oldBuraco = ENV.EvadeLegacyPCBuraco
+if type(oldBuraco) == "table" and type(oldBuraco.Cleanup) == "function" then
+    pcall(function()
+        oldBuraco.Cleanup(false)
+    end)
+end
+
 if game.PlaceId ~= LEGACY_PLACE_ID then
     local api = {
         Version = VERSION,

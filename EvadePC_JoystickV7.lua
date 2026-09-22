@@ -24,7 +24,7 @@ local player=Players.LocalPlayer
 local playerGui=player:WaitForChild("PlayerGui")
 local ENV=(type(getgenv)=="function" and getgenv()) or _G
 
-local VERSION="EvadePC-Joystick-V7.3-native-touchjump-bridge"
+local VERSION="EvadePC-Joystick-V7.4-overlapping-jump-bursts"
 local BIND_NAME="__EvadePCJoystickV7"
 local LEGACY_BIND_NAME="__EvadePCJoystickV7LegacyKeyboardWake"
 local GUI_NAME="EvadePCJoystickV7Gui"
@@ -92,7 +92,9 @@ local bridgeDeadline=-math.huge
 
 local connections={}
 local cameraViewportConnection=nil
-local jumpToken=0
+local jumpEpoch=0
+local activeJumpBursts=0
+local jumpPulseCount=0
 
 local keyEvents=0
 local movementCaptures=0
@@ -517,48 +519,61 @@ local function setTouchJumpState(value)
     return false
 end
 
-local function fallbackJumpPulse()
-    jumpFallbackHits+=1
-    jumpRoute="humanoid-fallback"
+local function pulseJumpRequest()
+    -- Keep Roblox's native TouchJump state hot when available.
+    local bridged=setTouchJumpState(true)
 
+    -- Also pulse Humanoid.Jump every frame. The false->true edge is deliberate:
+    -- a held true state can be consumed once and then stop retriggering. This
+    -- creates repeated jump requests without synthesizing Space.
     local character=player.Character
     local humanoid=character and character:FindFirstChildOfClass("Humanoid")
-    if not humanoid or humanoid.Health<=0 then return end
 
-    pcall(function()
-        humanoid.Jump=true
-        humanoid:ChangeState(Enum.HumanoidStateType.Jumping)
-    end)
+    if humanoid and humanoid.Health>0 then
+        local ok=pcall(function()
+            humanoid.Jump=false
+            humanoid.Jump=true
+        end)
+
+        if ok then
+            jumpPulseCount+=1
+            if not bridged then
+                jumpFallbackHits+=1
+                jumpRoute="humanoid-pulse"
+            else
+                jumpRoute="touchjump+humanoid-pulse"
+            end
+        end
+    end
+
+    return bridged
 end
 
 local function burstJump()
     if not enabled then return end
 
     jumpRequests+=1
-    jumpToken+=1
-    local token=jumpToken
-    local deadline=os.clock()+JUMP_BURST
 
-    -- Primary route: drive Roblox's own TouchJump controller. ControlModule
-    -- merges this with the active keyboard controller, so this works for both
-    -- Overhaul and Legacy while keeping movement as W/A/S/D.
-    local bridged=setTouchJumpState(true)
-    if not bridged then
-        fallbackJumpPulse()
-    end
+    -- IMPORTANT: every tap owns its own 200 ms request burst.
+    -- New taps DO NOT cancel, wait for, or restart older bursts.
+    -- Several bursts may overlap, so rapid tapping has zero cooldown.
+    local epoch=jumpEpoch
+    local deadline=os.clock()+JUMP_BURST
+    activeJumpBursts+=1
+
+    -- Fire immediately on touch-down so there is no first-frame latency.
+    pulseJumpRequest()
 
     task.spawn(function()
-        while enabled and token==jumpToken and os.clock()<deadline do
-            if bridged then
-                -- Some PlayerModule versions clear the flag after reading it,
-                -- so refresh it during the short mobile-style input buffer.
-                setTouchJumpState(true)
-            end
+        while enabled and epoch==jumpEpoch and os.clock()<deadline do
+            pulseJumpRequest()
             RunService.Heartbeat:Wait()
         end
 
-        -- An older tap can never release a newer one.
-        if token==jumpToken and bridged then
+        activeJumpBursts=math.max(0,activeJumpBursts-1)
+
+        -- Release native TouchJump only after the LAST overlapping burst ends.
+        if epoch==jumpEpoch and activeJumpBursts==0 then
             setTouchJumpState(false)
         end
     end)
@@ -773,6 +788,11 @@ local api={
             updates=movementUpdates,
             keyEvents=keyEvents,
             jumpRequests=jumpRequests,
+            activeJumpBursts=activeJumpBursts,
+            jumpPulseCount=jumpPulseCount,
+            jumpBurstSeconds=JUMP_BURST,
+            jumpCooldownSeconds=0,
+            overlappingJumpBursts=true,
             jumpRoute=jumpRoute,
             jumpBridgeHits=jumpBridgeHits,
             jumpFallbackHits=jumpFallbackHits,
@@ -810,7 +830,8 @@ ENV.EvadePCJoystickV7=api
 
 ENV.__EvadePCJoystickV7Cleanup=function()
     enabled=false
-    jumpToken+=1
+    jumpEpoch+=1
+    activeJumpBursts=0
     pcall(function() setTouchJumpState(false) end)
     releaseMovement()
 

@@ -12,7 +12,7 @@ local identity=run("EvadePC_IdentityV1.lua")
 local joystick=run("EvadePC_JoystickV7.lua")
 local env=(type(getgenv)=="function" and getgenv()) or _G
 local api={
-    Version="EvadePC-Identity+Joystick-V5",
+    Version="EvadePC-Identity+Joystick-V7.2",
     Identity=identity,
     Joystick=joystick,
     GetState=function()

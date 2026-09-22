@@ -23,11 +23,11 @@ end
 local identity=run("EvadePC_IdentityV1.lua")
 
 -- 2) Keep the mobile joystick + jump visible and translate them to real keyboard events.
-local joystick=run("EvadePC_JoystickV3.lua")
+local joystick=run("EvadePC_JoystickV4.lua")
 
 local env=(type(getgenv)=="function" and getgenv()) or _G
 local api={
-    Version="EvadePC-Identity+Joystick-V1",
+    Version="EvadePC-Identity+Joystick-V2",
     Identity=identity,
     Joystick=joystick,
     GetState=function()
@@ -36,9 +36,9 @@ local api={
             and type(env.EvadePCIdentityV1.GetState)=="function" then
             state.identity=env.EvadePCIdentityV1.GetState()
         end
-        if type(env.EvadePCJoystickV3)=="table"
-            and type(env.EvadePCJoystickV3.GetState)=="function" then
-            state.joystick=env.EvadePCJoystickV3.GetState()
+        if type(env.EvadePCJoystickV4)=="table"
+            and type(env.EvadePCJoystickV4.GetState)=="function" then
+            state.joystick=env.EvadePCJoystickV4.GetState()
         end
         return state
     end,

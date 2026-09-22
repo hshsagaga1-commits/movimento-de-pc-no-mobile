@@ -10,4 +10,5 @@ local function run(path)
 end
 
 local controls=run("Loader_PCControlsV1.lua")
-return {Version="EvadePC-Overhaul-Pack-V1",Controls=controls}
+local bodyAnchor=run("Loader_OverhaulBodyAnchorV1.lua")
+return {Version="EvadePC-Overhaul-Pack-V2-body-anchor",Controls=controls,BodyAnchor=bodyAnchor}

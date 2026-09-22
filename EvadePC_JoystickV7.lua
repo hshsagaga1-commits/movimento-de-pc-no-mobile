@@ -24,9 +24,11 @@ local player=Players.LocalPlayer
 local playerGui=player:WaitForChild("PlayerGui")
 local ENV=(type(getgenv)=="function" and getgenv()) or _G
 
-local VERSION="EvadePC-Joystick-V7.7-v71-spaceburst-overlap-ad84"
+local VERSION="EvadePC-Joystick-V7.8-native-postcontrol-jump-no-space"
 local BIND_NAME="__EvadePCJoystickV7"
 local LEGACY_BIND_NAME="__EvadePCJoystickV7LegacyKeyboardWake"
+local JUMP_PRE_BIND_NAME="__EvadePCJoystickV7JumpPre"
+local JUMP_POST_BIND_NAME="__EvadePCJoystickV7JumpPost"
 local GUI_NAME="EvadePCJoystickV7Gui"
 local EVADE_GAME_ID=3647333358
 local LEGACY_PLACE_ID=96537472072550
@@ -491,29 +493,65 @@ local function locateSharedControls()
     return ok and type(sharedControls)=="table"
 end
 
-local function pulseWorkingSpace()
-    -- Restored from V7.1, the last jump route confirmed to actually jump:
-    -- Space-up -> Space-down every pulse.
-    local ok=pcall(function()
-        VirtualInputManager:SendKeyEvent(false,Enum.KeyCode.Space,false,game)
-        VirtualInputManager:SendKeyEvent(true,Enum.KeyCode.Space,false,game)
-    end)
+local function setControllerJumpState(value)
+    locateSharedControls()
 
-    if ok then
-        jumpPulseCount+=1
-        jumpRoute="v7.1-space-pulse"
-        return true
+    local wrote=false
+
+    if type(sharedControls)=="table" then
+        local controller=rawget(sharedControls,"activeController")
+        if type(controller)=="table" then
+            local ok=pcall(function()
+                -- Keyboard.lua stores BOTH fields. Update both so
+                -- GetIsJumping() sees the pulse without generating a Space key.
+                rawset(controller,"jumpRequested",value==true)
+                rawset(controller,"isJumping",value==true)
+
+                -- Older/newer PlayerModule variants may expose UpdateJump.
+                if type(controller.UpdateJump)=="function" then
+                    controller:UpdateJump()
+                end
+            end)
+            if ok then wrote=true end
+        end
+
+        local touch=rawget(sharedControls,"touchJumpController")
+        if type(touch)=="table" then
+            touchJumpController=touch
+            local ok=pcall(function()
+                rawset(touch,"isJumping",value==true)
+            end)
+            if ok then wrote=true end
+        end
     end
 
-    jumpFallbackHits+=1
-    jumpRoute="v7.1-space-pulse-failed"
-    return false
+    if wrote then
+        jumpRoute="controller-state+postcontrol-humanoid"
+        jumpBridgeHits+=1
+    end
+
+    return wrote
 end
 
-local function releaseWorkingSpace()
-    pcall(function()
-        VirtualInputManager:SendKeyEvent(false,Enum.KeyCode.Space,false,game)
+local function setHumanoidJumpAfterControls(value)
+    local character=player.Character
+    local humanoid=character and character:FindFirstChildOfClass("Humanoid")
+    if not humanoid or humanoid.Health<=0 then
+        return false
+    end
+
+    local ok=pcall(function()
+        -- IMPORTANT: this runs AFTER Roblox ControlModule's Input-priority
+        -- render step, so its humanoid.Jump assignment cannot erase our pulse.
+        -- No Space/UserInput event is generated, so emotes are not cancelled
+        -- just because the jump was requested.
+        humanoid.Jump=value==true
     end)
+
+    if ok and value then
+        jumpPulseCount+=1
+    end
+    return ok
 end
 
 local function burstJump()
@@ -521,41 +559,67 @@ local function burstJump()
 
     jumpRequests+=1
 
-    -- Preserve the requested semantics:
-    -- EVERY tap owns a full 200 ms window.
-    -- New taps overlap; they do not cancel, restart or wait for older windows.
+    -- Every tap owns a full 200 ms window. Windows overlap freely.
     jumpBursts[#jumpBursts+1]=os.clock()+JUMP_BURST
     activeJumpBursts=#jumpBursts
 
-    -- Same immediate pulse that made V7.1 respond without first-frame latency.
-    pulseWorkingSpace()
+    -- Make the next pre/post ControlModule pair a TRUE pulse immediately.
+    jumpForcePulse=true
 end
 
-connections[#connections+1]=RunService.Heartbeat:Connect(function()
-    local now=os.clock()
+-- PRE: feed the same jump boolean that ControlModule consumes, but without a
+-- fake keyboard Space event.
+RunService:BindToRenderStep(
+    JUMP_PRE_BIND_NAME,
+    Enum.RenderPriority.Input.Value-1,
+    function()
+        local now=os.clock()
+        for i=#jumpBursts,1,-1 do
+            if jumpBursts[i]<=now then
+                table.remove(jumpBursts,i)
+            end
+        end
+        activeJumpBursts=#jumpBursts
 
-    for i=#jumpBursts,1,-1 do
-        if jumpBursts[i]<=now then
-            table.remove(jumpBursts,i)
+        if not enabled or activeJumpBursts==0 then
+            jumpPulsePhase=false
+            jumpForcePulse=false
+            setControllerJumpState(false)
+            return
+        end
+
+        if jumpForcePulse then
+            jumpPulsePhase=true
+            jumpForcePulse=false
+        else
+            -- Recreate V7.1's repeated request behavior as real boolean edges,
+            -- still inside the same 200 ms window.
+            jumpPulsePhase=not jumpPulsePhase
+        end
+
+        setControllerJumpState(jumpPulsePhase)
+    end
+)
+
+-- POST: ControlModule writes Humanoid.Jump at Input priority. Re-apply our
+-- current pulse one step later so it cannot be overwritten. This is the piece
+-- the earlier no-Space attempts were missing.
+RunService:BindToRenderStep(
+    JUMP_POST_BIND_NAME,
+    Enum.RenderPriority.Input.Value+1,
+    function()
+        if enabled and activeJumpBursts>0 then
+            if not setHumanoidJumpAfterControls(jumpPulsePhase) then
+                jumpFallbackHits+=1
+                jumpRoute="postcontrol-humanoid-failed"
+            elseif jumpRoute=="unresolved" then
+                jumpRoute="postcontrol-humanoid"
+            end
+        else
+            setHumanoidJumpAfterControls(false)
         end
     end
-
-    local previousActive=activeJumpBursts
-    activeJumpBursts=#jumpBursts
-
-    if enabled and activeJumpBursts>0 then
-        -- V7.1 repeated this every Heartbeat for the 200 ms burst.
-        -- Keeping one shared pulse train avoids overlapping tasks releasing
-        -- Space while another tap's 200 ms window is still alive.
-        pulseWorkingSpace()
-        jumpPulsePhase=true
-    else
-        jumpPulsePhase=false
-        if previousActive>0 then
-            releaseWorkingSpace()
-        end
-    end
-end)
+)
 
 connections[#connections+1]=joystick.InputBegan:Connect(function(input)
     if not enabled or movementTouch~=nil then return end
@@ -814,7 +878,8 @@ ENV.__EvadePCJoystickV7Cleanup=function()
     activeJumpBursts=0
     jumpPulsePhase=false
     jumpForcePulse=false
-    releaseWorkingSpace()
+    pcall(function() setControllerJumpState(false) end)
+    pcall(function() setHumanoidJumpAfterControls(false) end)
     releaseMovement()
 
     pcall(function()
@@ -822,6 +887,12 @@ ENV.__EvadePCJoystickV7Cleanup=function()
     end)
     pcall(function()
         RunService:UnbindFromRenderStep(LEGACY_BIND_NAME)
+    end)
+    pcall(function()
+        RunService:UnbindFromRenderStep(JUMP_PRE_BIND_NAME)
+    end)
+    pcall(function()
+        RunService:UnbindFromRenderStep(JUMP_POST_BIND_NAME)
     end)
 
     if cameraViewportConnection then

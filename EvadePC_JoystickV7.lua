@@ -24,10 +24,11 @@ local player=Players.LocalPlayer
 local playerGui=player:WaitForChild("PlayerGui")
 local ENV=(type(getgenv)=="function" and getgenv()) or _G
 
-local VERSION="EvadePC-Joystick-V7.13-postcontrol-humanoid-click-pulses-200ms"
+local VERSION="EvadePC-Joystick-V7.14-original-touchjump-repeat-200ms"
 local BIND_NAME="__EvadePCJoystickV7"
 local LEGACY_BIND_NAME="__EvadePCJoystickV7LegacyKeyboardWake"
-local JUMP_POST_BIND_NAME="__EvadePCJoystickV7JumpPost"
+local JUMP_PULSE_BIND_NAME="__EvadePCJoystickV7JumpPulse"
+local JUMP_MAINTAIN_BIND_NAME="__EvadePCJoystickV7JumpMaintain"
 local GUI_NAME="EvadePCJoystickV7Gui"
 local EVADE_GAME_ID=3647333358
 local LEGACY_PLACE_ID=96537472072550
@@ -113,13 +114,12 @@ local touchJumpController=nil
 local jumpRoute="unresolved"
 local jumpBridgeHits=0
 local jumpFallbackHits=0
-
-local nativeJumpController=nil
+local nativeJumpButton=nil
+local nativeJumpButtonConnection=nil
+local nativeJumpTouchModule=nil
 local nativeJumpOriginalController=nil
-local nativeJumpGui=nil
-local nativeJumpFrame=nil
-local nativeJumpLoopRunning=false
-local nativeTouchId=7300
+local nativeJumpOriginalCaptured=false
+local nativeJumpMaintains=0
 
 local legacyControls=nil
 local legacyWakeAttempts=0
@@ -365,7 +365,8 @@ local jumpButton=Instance.new("TextButton")
 jumpButton.Name="PCJump"
 jumpButton.Text=""
 jumpButton.AutoButtonColor=false
-jumpButton.Active=true
+jumpButton.Active=false
+jumpButton.Visible=false
 jumpButton.BackgroundTransparency=1
 jumpButton.BorderSizePixel=0
 jumpButton.ZIndex=20
@@ -499,15 +500,6 @@ local function locateSharedControls()
     return ok and type(sharedControls)=="table"
 end
 
-local function currentHumanoid()
-    local character=player.Character
-    local humanoid=character and character:FindFirstChildOfClass("Humanoid")
-    if humanoid and humanoid.Health>0 then
-        return humanoid
-    end
-    return nil
-end
-
 local function pruneJumpBursts()
     local now=os.clock()
     for i=#jumpBursts,1,-1 do
@@ -519,59 +511,203 @@ local function pruneJumpBursts()
     return activeJumpBursts
 end
 
-local function writeJump(value)
-    local humanoid=currentHumanoid()
-    if not humanoid then
-        jumpFallbackHits+=1
-        jumpRoute="humanoid-missing"
-        return false
+local function disconnectNativeJumpButton()
+    if nativeJumpButtonConnection then
+        pcall(function() nativeJumpButtonConnection:Disconnect() end)
+        nativeJumpButtonConnection=nil
+    end
+    nativeJumpButton=nil
+end
+
+local function findTouchControlFrame()
+    if type(sharedControls)~="table" then return nil end
+
+    local frame=rawget(sharedControls,"touchControlFrame")
+    if typeof(frame)=="Instance" and frame:IsA("GuiObject") and frame.Parent then
+        return frame
     end
 
-    local ok=pcall(function()
-        humanoid.Jump=value==true
+    local touchGui=playerGui:FindFirstChild("TouchGui")
+    local found=touchGui and touchGui:FindFirstChild("TouchControlFrame")
+    if found and found:IsA("GuiObject") then
+        pcall(function()
+            rawset(sharedControls,"touchGui",touchGui)
+            rawset(sharedControls,"touchControlFrame",found)
+        end)
+        return found
+    end
+
+    -- On a real mobile client this normally already exists. If PC Identity
+    -- caused Roblox to skip lazy creation, ask ControlModule to create its
+    -- ORIGINAL TouchGui container, then use that.
+    if type(sharedControls.CreateTouchGuiContainer)=="function" then
+        pcall(function()
+            sharedControls:CreateTouchGuiContainer()
+        end)
+        frame=rawget(sharedControls,"touchControlFrame")
+        if typeof(frame)=="Instance" and frame:IsA("GuiObject") then
+            return frame
+        end
+    end
+
+    return nil
+end
+
+local function getNativeTouchJumpClass()
+    if type(nativeJumpTouchModule)=="table" then
+        return nativeJumpTouchModule
+    end
+
+    local scripts=player:FindFirstChild("PlayerScripts")
+    local playerModuleScript=scripts and scripts:FindFirstChild("PlayerModule")
+    local controlModuleScript=playerModuleScript and playerModuleScript:FindFirstChild("ControlModule")
+    local touchModuleScript=controlModuleScript and controlModuleScript:FindFirstChild("TouchJump")
+    if not touchModuleScript then
+        return nil
+    end
+
+    local ok,result=pcall(require,touchModuleScript)
+    if ok and type(result)=="table" and type(result.new)=="function" then
+        nativeJumpTouchModule=result
+        return result
+    end
+    return nil
+end
+
+local function ensureOriginalTouchJump()
+    if not locateSharedControls() then
+        jumpRoute="original-touchjump-controls-missing"
+        return nil,nil
+    end
+
+    local frame=findTouchControlFrame()
+    if not frame then
+        jumpRoute="original-touchjump-frame-missing"
+        return nil,nil
+    end
+
+    local TouchJump=getNativeTouchJumpClass()
+    if type(TouchJump)~="table" then
+        jumpRoute="original-touchjump-module-missing"
+        return nil,nil
+    end
+
+    local controller=rawget(sharedControls,"touchJumpController")
+
+    if not nativeJumpOriginalCaptured then
+        nativeJumpOriginalController=controller
+        nativeJumpOriginalCaptured=true
+    end
+
+    -- Reuse Roblox's own controller from its controller cache whenever possible.
+    local controllers=rawget(sharedControls,"controllers")
+    if type(controller)~="table" and type(controllers)=="table" then
+        controller=controllers[TouchJump]
+    end
+
+    if type(controller)~="table" then
+        local ok,created=pcall(function()
+            return TouchJump.new()
+        end)
+        if ok and type(created)=="table" then
+            controller=created
+            if type(controllers)=="table" then
+                controllers[TouchJump]=controller
+            end
+        end
+    end
+
+    if type(controller)~="table" then
+        jumpFallbackHits+=1
+        jumpRoute="original-touchjump-create-failed"
+        return nil,nil
+    end
+
+    -- Keyboard remains the movement owner. Only TouchJump is kept alive beside it.
+    pcall(function()
+        rawset(sharedControls,"touchJumpController",controller)
+        controller:Enable(true,frame)
     end)
 
-    if ok then
-        jumpRoute="postcontrol-humanoid-click-pulses"
-        if value then
-            jumpPulseCount+=1
-            jumpBridgeHits+=1
-        end
-        return true
+    touchJumpController=controller
+    nativeJumpMaintains+=1
+
+    local button=rawget(controller,"jumpButton")
+    if not button and type(controller.Create)=="function" then
+        pcall(function() controller:Create() end)
+        button=rawget(controller,"jumpButton")
     end
 
-    jumpFallbackHits+=1
-    jumpRoute="humanoid-jump-write-failed"
-    return false
+    if not button or not button.Parent then
+        jumpRoute="original-touchjump-button-missing"
+        return controller,nil
+    end
+
+    -- Keep Roblox's ORIGINAL button/style/position. No fake PCJump overlay.
+    button.Visible=true
+
+    if button~=nativeJumpButton then
+        disconnectNativeJumpButton()
+        nativeJumpButton=button
+
+        nativeJumpButtonConnection=button.InputBegan:Connect(function(input)
+            if not enabled then return end
+            if input.UserInputType~=Enum.UserInputType.Touch
+                or input.UserInputState~=Enum.UserInputState.Begin then
+                return
+            end
+
+            jumpRequests+=1
+
+            -- The native InputBegan handler has already/also set isJumping=true.
+            -- We add ONLY this: a 200ms window that repeatedly produces
+            -- distinct TRUE/FALSE/TRUE/FALSE jump clicks.
+            jumpBursts[#jumpBursts+1]=os.clock()+JUMP_BURST
+            activeJumpBursts=#jumpBursts
+            jumpForcePulse=true
+            jumpRoute="original-touchjump+200ms-repeat"
+        end)
+    end
+
+    jumpRoute="original-touchjump-ready"
+    return controller,button
 end
 
-local function burstJump()
-    if not enabled then return end
-
-    jumpRequests+=1
-
-    -- Every physical tap owns its own 200 ms window.
-    -- Windows overlap; no tap cancels or restarts another.
-    jumpBursts[#jumpBursts+1]=os.clock()+JUMP_BURST
-    activeJumpBursts=#jumpBursts
-
-    -- Force the next render step to begin a brand-new click.
-    jumpForcePulse=true
-end
-
--- Roblox ControlModule writes Humanoid.Jump at RenderPriority.Input.
--- We run immediately AFTER it, so Roblox cannot erase our click.
--- This is a real pulse train, not a hold:
--- TRUE one frame -> FALSE one frame -> TRUE one frame -> ...
+-- Run after PC Identity's Last-1 keeper. If ControlModule disables TouchJump
+-- because keyboard owns movement, this turns ONLY the original TouchJump back on.
 RunService:BindToRenderStep(
-    JUMP_POST_BIND_NAME,
-    Enum.RenderPriority.Input.Value+1,
+    JUMP_MAINTAIN_BIND_NAME,
+    Enum.RenderPriority.Last.Value,
     function()
+        if enabled then
+            ensureOriginalTouchJump()
+        end
+    end
+)
+
+-- The actual 200ms add-on. This does not create a new jump system.
+-- ControlModule already ORs:
+-- activeController:GetIsJumping() OR touchJumpController:GetIsJumping()
+-- We only pulse the ORIGINAL TouchJump.isJumping field before ControlModule reads it.
+RunService:BindToRenderStep(
+    JUMP_PULSE_BIND_NAME,
+    Enum.RenderPriority.Input.Value-1,
+    function()
+        local controller=touchJumpController
+        if type(controller)~="table" then
+            controller=select(1,ensureOriginalTouchJump())
+        end
+
         local active=enabled and pruneJumpBursts()>0
+        if type(controller)~="table" then
+            jumpPulsePhase=false
+            jumpForcePulse=false
+            return
+        end
 
         if not active then
             if jumpPulsePhase then
-                writeJump(false)
+                pcall(function() rawset(controller,"isJumping",false) end)
             end
             jumpPulsePhase=false
             jumpForcePulse=false
@@ -579,19 +715,34 @@ RunService:BindToRenderStep(
         end
 
         if jumpForcePulse then
-            -- Explicitly release first if an older burst left us in TRUE.
-            if jumpPulsePhase then
-                writeJump(false)
-            end
             jumpPulsePhase=true
             jumpForcePulse=false
         else
+            -- NOT a 200ms hold:
+            -- press one frame -> release one frame -> press -> release...
             jumpPulsePhase=not jumpPulsePhase
         end
 
-        writeJump(jumpPulsePhase)
+        local ok=pcall(function()
+            rawset(controller,"isJumping",jumpPulsePhase)
+        end)
+
+        if ok then
+            if jumpPulsePhase then
+                jumpPulseCount+=1
+                jumpBridgeHits+=1
+            end
+            jumpRoute="original-touchjump+200ms-repeat"
+        else
+            jumpFallbackHits+=1
+            jumpRoute="original-touchjump-pulse-failed"
+        end
     end
 )
+
+-- Resolve the native jump immediately so its original button is visible
+-- before the first tap.
+ensureOriginalTouchJump()
 
 connections[#connections+1]=joystick.InputBegan:Connect(function(input)
     if not enabled or movementTouch~=nil then return end
@@ -619,23 +770,6 @@ end)
 connections[#connections+1]=UserInputService.InputEnded:Connect(function(input)
     if input==movementTouch then
         releaseMovement()
-    end
-end)
-
-connections[#connections+1]=jumpButton.InputBegan:Connect(function(input)
-    if not enabled then return end
-
-    if input.UserInputType==Enum.UserInputType.Touch
-        or input.UserInputType==Enum.UserInputType.MouseButton1 then
-        jumpImage.ImageRectOffset=Vector2.new(146,146)
-        burstJump()
-    end
-end)
-
-connections[#connections+1]=jumpButton.InputEnded:Connect(function(input)
-    if input.UserInputType==Enum.UserInputType.Touch
-        or input.UserInputType==Enum.UserInputType.MouseButton1 then
-        jumpImage.ImageRectOffset=Vector2.new(1,146)
     end
 end)
 
@@ -812,6 +946,8 @@ local api={
             jumpBridgeHits=jumpBridgeHits,
             jumpFallbackHits=jumpFallbackHits,
             touchJumpControllerFound=type(touchJumpController)=="table",
+            nativeJumpButtonFound=nativeJumpButton~=nil,
+            nativeJumpMaintains=nativeJumpMaintains,
             legacyMoveWrites=legacyMoveWrites,
             legacyWakeStatus=legacyWakeStatus,
             legacyControllerEnabled=legacyControllerEnabled,
@@ -850,7 +986,11 @@ ENV.__EvadePCJoystickV7Cleanup=function()
     activeJumpBursts=0
     jumpPulsePhase=false
     jumpForcePulse=false
-    pcall(function() writeJump(false) end)
+    if type(touchJumpController)=="table" then
+        pcall(function() rawset(touchJumpController,"isJumping",false) end)
+        pcall(function() touchJumpController:Enable(false) end)
+    end
+    disconnectNativeJumpButton()
     jumpPulsePhase=false
     releaseMovement()
 
@@ -861,7 +1001,10 @@ ENV.__EvadePCJoystickV7Cleanup=function()
         RunService:UnbindFromRenderStep(LEGACY_BIND_NAME)
     end)
     pcall(function()
-        RunService:UnbindFromRenderStep(JUMP_POST_BIND_NAME)
+        RunService:UnbindFromRenderStep(JUMP_PULSE_BIND_NAME)
+    end)
+    pcall(function()
+        RunService:UnbindFromRenderStep(JUMP_MAINTAIN_BIND_NAME)
     end)
 
     if cameraViewportConnection then

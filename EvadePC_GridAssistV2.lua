@@ -94,7 +94,7 @@ bindCharacter(player.Character)
 characterConnection=player.CharacterAdded:Connect(bindCharacter)
 
 local function readChord()
-    local joystick=ENV.EvadePCJoystickV5 or ENV.EvadePCJoystickV4 or ENV.EvadePCJoystickV3 or ENV.EvadePCJoystickV2
+    local joystick=ENV.EvadePCJoystickV6 or ENV.EvadePCJoystickV5 or ENV.EvadePCJoystickV4 or ENV.EvadePCJoystickV3 or ENV.EvadePCJoystickV2
     if type(joystick)=="table" and type(joystick.GetState)=="function" then
         local ok,state=pcall(joystick.GetState)
         if ok and type(state)=="table" then

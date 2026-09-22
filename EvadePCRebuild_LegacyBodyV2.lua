@@ -10,7 +10,7 @@ local Workspace=game:GetService("Workspace")
 local player=Players.LocalPlayer
 local ENV=(type(getgenv)=="function" and getgenv()) or _G
 
-local VERSION="EvadePCRebuild-LegacyBody-V2.1-emote-head-semilock"
+local VERSION="EvadePCRebuild-LegacyBody-V2.2-emote-head-1px-hole"
 local LEGACY_PLACE_ID=96537472072550
 local BIND_NAME="__EvadePCRebuildLegacyBodyV2"
 
@@ -26,6 +26,7 @@ local MAX_EXTRA_DISTANCE=1.70
 local COLLISION_PADDING=0.14
 local FIRST_PERSON_DISTANCE=1.45
 local EMOTE_TARGET_NORM=Vector2.new(0.50,0.50)
+local EMOTE_HOLE_SIZE_PX=1
 local EMOTE_MAX_TRANSLATION_PER_FRAME=3.5
 local EMOTE_MIN_DEPTH=0.35
 
@@ -301,7 +302,18 @@ local function centerHeadOnScreen(camera)
     end
 
     local currentPoint=camera:WorldToViewportPoint(head.Position)
-    emoteLastErrorPixels=Vector2.new(currentPoint.X-targetX,currentPoint.Y-targetY)
+    local errorX=currentPoint.X-targetX
+    local errorY=currentPoint.Y-targetY
+    emoteLastErrorPixels=Vector2.new(errorX,errorY)
+
+    -- The "buraco" is literally a 1x1 px target at screen center.
+    -- If the head is already inside that pixel, do not correct further.
+    local halfHole=EMOTE_HOLE_SIZE_PX*0.5
+    if math.abs(errorX)<=halfHole and math.abs(errorY)<=halfHole then
+        emoteLastTranslation=Vector3.zero
+        return
+    end
+
     emoteLastTranslation=delta
 
     if delta.Magnitude>0.0001 then
@@ -421,6 +433,7 @@ local api={
             emoteCenterWrites=emoteCenterWrites,
             emoteTargetNorm=EMOTE_TARGET_NORM,
             emoteTargetPart="Head",
+            emoteHoleSizePixels=EMOTE_HOLE_SIZE_PX,
             emoteBehavior="native-outside-emote/head-center-during-emote",
             emoteLastErrorPixels=emoteLastErrorPixels,
             emoteLastTranslation=emoteLastTranslation,

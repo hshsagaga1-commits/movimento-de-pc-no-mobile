@@ -20,10 +20,11 @@ local Workspace=game:GetService("Workspace")
 local player=Players.LocalPlayer
 local ENV=(type(getgenv)=="function" and getgenv()) or _G
 
-local VERSION="EvadePC-OverhaulBodyAnchor-V1.2-emote-head-semilock"
+local VERSION="EvadePC-OverhaulBodyAnchor-V1.3-emote-head-semilock-visible-1px-hole"
 local EVADE_GAME_ID=3647333358
 local LEGACY_PLACE_ID=96537472072550
 local BIND_NAME="__EvadePCOverhaulBodyAnchorV1"
+local HOLE_GUI_NAME="EvadePCOverhaulHole1px"
 
 local TARGET_NORM=Vector2.new(0.50,0.50)
 local MAX_TRANSLATION_PER_FRAME=3.5
@@ -33,6 +34,10 @@ local MIN_DEPTH=0.35
 local old=ENV.__EvadePCOverhaulBodyAnchorV1Cleanup
 if type(old)=="function" then pcall(old) end
 pcall(function() RunService:UnbindFromRenderStep(BIND_NAME) end)
+
+local playerGui=player:WaitForChild("PlayerGui")
+local previousHole=playerGui:FindFirstChild(HOLE_GUI_NAME)
+if previousHole then previousHole:Destroy() end
 
 if game.GameId~=EVADE_GAME_ID or game.PlaceId==LEGACY_PLACE_ID then
     local api={Version=VERSION,Installed=false,Reason="not-overhaul",PlaceId=game.PlaceId}
@@ -56,6 +61,26 @@ local lastTranslation=Vector3.zero
 local lastEmoteTrack=nil
 local activeEmote=false
 local connections={}
+
+-- Visible 1x1 px "buraco" at the exact camera target.
+local holeGui=Instance.new("ScreenGui")
+holeGui.Name=HOLE_GUI_NAME
+holeGui.ResetOnSpawn=false
+holeGui.IgnoreGuiInset=true
+holeGui.DisplayOrder=10040
+holeGui.ZIndexBehavior=Enum.ZIndexBehavior.Sibling
+holeGui.Parent=playerGui
+
+local hole=Instance.new("Frame")
+hole.Name="Hole1px"
+hole.AnchorPoint=Vector2.new(0.5,0.5)
+hole.Position=UDim2.fromScale(0.5,0.5)
+hole.Size=UDim2.fromOffset(1,1)
+hole.BorderSizePixel=0
+hole.BackgroundTransparency=0
+hole.BackgroundColor3=Color3.new(1,1,1)
+hole.ZIndex=100
+hole.Parent=holeGui
 
 local LOCOMOTION_NAMES={
     idle=true,walk=true,run=true,running=true,jump=true,jumping=true,
@@ -272,6 +297,7 @@ local api={
     Installed=true,
     SetEnabled=function(value)
         enabled=value~=false
+        holeGui.Enabled=enabled
     end,
     GetState=function()
         return {
@@ -307,6 +333,7 @@ ENV.__EvadePCOverhaulBodyAnchorV1Cleanup=function()
         pcall(function() connection:Disconnect() end)
     end
     table.clear(connections)
+    pcall(function() holeGui:Destroy() end)
 
     ENV.EvadePCOverhaulBodyAnchorV1=nil
     ENV.__EvadePCOverhaulBodyAnchorV1Cleanup=nil

@@ -24,7 +24,7 @@ local player=Players.LocalPlayer
 local playerGui=player:WaitForChild("PlayerGui")
 local ENV=(type(getgenv)=="function" and getgenv()) or _G
 
-local VERSION="EvadePC-Joystick-V7.10-native-touch-click-pulses-200ms"
+local VERSION="EvadePC-Joystick-V7.11-controlmodule-jump-bridge-200ms"
 local BIND_NAME="__EvadePCJoystickV7"
 local LEGACY_BIND_NAME="__EvadePCJoystickV7LegacyKeyboardWake"
 local JUMP_PRE_BIND_NAME="__EvadePCJoystickV7JumpPre"
@@ -113,6 +113,9 @@ local touchJumpController=nil
 local jumpRoute="unresolved"
 local jumpBridgeHits=0
 local jumpFallbackHits=0
+local jumpBridgeController=nil
+local jumpBridgeOriginalResolved=nil
+local jumpBridgeOriginalRaw=nil
 
 local legacyControls=nil
 local legacyWakeAttempts=0
@@ -492,91 +495,108 @@ local function locateSharedControls()
     return ok and type(sharedControls)=="table"
 end
 
-local function ensureNativeTouchJumpController()
-    locateSharedControls()
-    if type(sharedControls)~="table" then
-        jumpRoute="native-touchjump-controls-missing"
-        return nil
+local function restoreJumpGetterBridge()
+    local controller=jumpBridgeController
+    if type(controller)~="table" then
+        jumpBridgeController=nil
+        jumpBridgeOriginalResolved=nil
+        jumpBridgeOriginalRaw=nil
+        return
     end
 
-    local controller=rawget(sharedControls,"touchJumpController")
-    if type(controller)=="table" then
-        touchJumpController=controller
-        return controller
-    end
-
-    -- PC Identity selects keyboard movement, so Roblox may never instantiate
-    -- TouchJump on its own. Create the SAME Roblox TouchJump controller class
-    -- and attach it to ControlModule, without enabling its own GUI button.
-    local ok,result=pcall(function()
-        local scripts=player:FindFirstChild("PlayerScripts")
-        local playerModuleScript=scripts and scripts:FindFirstChild("PlayerModule")
-        local controlModuleScript=playerModuleScript and playerModuleScript:FindFirstChild("ControlModule")
-        local touchModuleScript=controlModuleScript and controlModuleScript:FindFirstChild("TouchJump")
-        if not touchModuleScript then return nil end
-
-        local TouchJump=require(touchModuleScript)
-        if type(TouchJump)~="table" or type(TouchJump.new)~="function" then
-            return nil
+    pcall(function()
+        if jumpBridgeOriginalRaw~=nil then
+            rawset(controller,"GetIsJumping",jumpBridgeOriginalRaw)
+        else
+            rawset(controller,"GetIsJumping",nil)
         end
-
-        local controllers=rawget(sharedControls,"controllers")
-        local created=nil
-
-        if type(controllers)=="table" then
-            local cached=controllers[TouchJump]
-            if type(cached)=="table" then
-                created=cached
-            end
-        end
-
-        if type(created)~="table" then
-            created=TouchJump.new()
-            if type(controllers)=="table" then
-                controllers[TouchJump]=created
-            end
-        end
-
-        rawset(sharedControls,"touchJumpController",created)
-        return created
     end)
 
-    if ok and type(result)=="table" then
-        touchJumpController=result
-        jumpRoute="native-touchjump-controller"
-        return result
-    end
-
-    jumpRoute="native-touchjump-create-failed"
-    return nil
+    jumpBridgeController=nil
+    jumpBridgeOriginalResolved=nil
+    jumpBridgeOriginalRaw=nil
 end
 
-local function setNativeMobileJump(value)
-    local controller=ensureNativeTouchJumpController()
-    if type(controller)~="table" then
-        jumpFallbackHits+=1
+local function ensureJumpGetterBridge()
+    locateSharedControls()
+    if type(sharedControls)~="table" then
+        jumpRoute="controls-missing"
         return false
     end
 
-    local ok=pcall(function()
-        -- This is the exact state Roblox TouchJump:GetIsJumping() returns.
-        -- ControlModule consumes it on its normal Input-priority render step.
-        -- No Space, no Humanoid.Jump writer, no keyboard emote cancellation.
-        rawset(controller,"isJumping",value==true)
-    end)
+    local controller=rawget(sharedControls,"activeController")
+    if type(controller)~="table" then
+        jumpRoute="active-controller-missing"
+        return false
+    end
 
-    if ok then
-        jumpRoute="native-mobile-touchjump"
-        if value then
-            jumpPulseCount+=1
-        end
-        jumpBridgeHits+=1
+    if controller==jumpBridgeController then
         return true
     end
 
-    jumpFallbackHits+=1
-    jumpRoute="native-mobile-touchjump-write-failed"
-    return false
+    restoreJumpGetterBridge()
+
+    local rawOriginal=rawget(controller,"GetIsJumping")
+    local resolved=nil
+    pcall(function() resolved=controller.GetIsJumping end)
+    if type(resolved)~="function" then
+        jumpRoute="getisjumping-missing"
+        return false
+    end
+
+    jumpBridgeController=controller
+    jumpBridgeOriginalResolved=resolved
+    jumpBridgeOriginalRaw=rawOriginal
+
+    local ok=pcall(function()
+        rawset(controller,"GetIsJumping",function(self,...)
+            -- This is the exact value Roblox ControlModule reads at Input
+            -- priority before assigning Humanoid.Jump.
+            if enabled and jumpPulsePhase then
+                return true
+            end
+            return jumpBridgeOriginalResolved(self,...)
+        end)
+    end)
+
+    if not ok then
+        restoreJumpGetterBridge()
+        jumpRoute="getisjumping-bridge-failed"
+        return false
+    end
+
+    jumpRoute="controlmodule-getisjumping-bridge"
+    return true
+end
+
+local function setNativeMobileJump(value)
+    -- Keep the native TouchJump state mirrored when Roblox already has one.
+    -- The getter bridge below is the reliable path when PC Identity owns
+    -- movement and Roblox disables/removes TouchJump.
+    locateSharedControls()
+
+    local controller=type(sharedControls)=="table"
+        and rawget(sharedControls,"touchJumpController")
+        or nil
+
+    if type(controller)=="table" then
+        touchJumpController=controller
+        pcall(function()
+            rawset(controller,"isJumping",value==true)
+        end)
+    end
+
+    jumpPulsePhase=value==true
+
+    local bridged=ensureJumpGetterBridge()
+    if bridged and value then
+        jumpPulseCount+=1
+        jumpBridgeHits+=1
+    elseif not bridged then
+        jumpFallbackHits+=1
+    end
+
+    return bridged
 end
 
 local function burstJump()
@@ -629,6 +649,8 @@ RunService:BindToRenderStep(
             jumpPulsePhase=not jumpPulsePhase
         end
 
+        -- Refreshes the active-controller bridge before Roblox's own
+        -- ControlModule runs at Input priority.
         setNativeMobileJump(jumpPulsePhase)
     end
 )
@@ -851,6 +873,7 @@ local api={
             jumpRoute=jumpRoute,
             jumpBridgeHits=jumpBridgeHits,
             jumpFallbackHits=jumpFallbackHits,
+            jumpGetterBridgeInstalled=type(jumpBridgeController)=="table",
             touchJumpControllerFound=type(touchJumpController)=="table",
             legacyMoveWrites=legacyMoveWrites,
             legacyWakeStatus=legacyWakeStatus,
@@ -891,6 +914,7 @@ ENV.__EvadePCJoystickV7Cleanup=function()
     jumpPulsePhase=false
     jumpForcePulse=false
     pcall(function() setNativeMobileJump(false) end)
+    pcall(restoreJumpGetterBridge)
     releaseMovement()
 
     pcall(function()

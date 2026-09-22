@@ -24,7 +24,7 @@ local player=Players.LocalPlayer
 local playerGui=player:WaitForChild("PlayerGui")
 local ENV=(type(getgenv)=="function" and getgenv()) or _G
 
-local VERSION="EvadePC-Joystick-V7.4-overlapping-jump-bursts"
+local VERSION="EvadePC-Joystick-V7.4.1-ad-plus-1pct"
 local BIND_NAME="__EvadePCJoystickV7"
 local LEGACY_BIND_NAME="__EvadePCJoystickV7LegacyKeyboardWake"
 local GUI_NAME="EvadePCJoystickV7Gui"
@@ -45,7 +45,7 @@ local JUMP_SHEET="rbxasset://textures/ui/Input/TouchControlsSheetV2.png"
 local PRESS_RADIUS=0.18
 local W_HALF_DEG=28       -- W total width: 56 deg
 local DIAG_END_DEG=105    -- each WA/WD: 65 deg
-local SIDE_END_DEG=160    -- each A/D: 55 deg
+local SIDE_END_DEG=160.55 -- each A/D: 55.55 deg (~1% wider)
                             -- S gets the remaining 40 deg total
 
 -- Dry diagonal swap is only a short transition bridge, never a permanent latch.

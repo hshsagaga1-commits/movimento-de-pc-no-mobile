@@ -14,7 +14,7 @@ local player=Players.LocalPlayer
 local playerGui=player:WaitForChild("PlayerGui")
 local ENV=(type(getgenv)=="function" and getgenv()) or _G
 
-local VERSION="EvadePC-OverhaulCamera-V1-axis-clean-native-touch"
+local VERSION="EvadePC-OverhaulCamera-V1.1-axis-clean-toggle-native-touch"
 local EVADE_GAME_ID=3647333358
 local LEGACY_PLACE_ID=96537472072550
 local BIND_NAME="__EvadePCOverhaulCameraV1"
@@ -61,7 +61,8 @@ if game.GameId~=EVADE_GAME_ID or game.PlaceId==LEGACY_PLACE_ID then
 end
 
 local enabled=true
-local precisionEnabled=true
+local precisionEnabled=ENV.EvadePCOverhaulPrecisionEnabled
+if precisionEnabled==nil then precisionEnabled=true end
 local multiplier=tonumber(ENV.EvadePCOverhaulCameraMultiplier) or 1
 multiplier=math.clamp(multiplier,MIN_MULTIPLIER,MAX_MULTIPLIER)
 
@@ -391,7 +392,7 @@ if not parented then
 end
 
 local frame=Instance.new("Frame")
-frame.Size=UDim2.fromOffset(238,88)
+frame.Size=UDim2.fromOffset(238,122)
 frame.Position=UDim2.new(0.5,-119,0.14,0)
 frame.BackgroundColor3=Color3.fromRGB(24,24,27)
 frame.BorderSizePixel=0
@@ -455,11 +456,49 @@ local knobCorner=Instance.new("UICorner")
 knobCorner.CornerRadius=UDim.new(1,0)
 knobCorner.Parent=knob
 
+local minLabel=Instance.new("TextLabel")
+minLabel.BackgroundTransparency=1
+minLabel.Position=UDim2.fromOffset(12,62)
+minLabel.Size=UDim2.fromOffset(40,16)
+minLabel.Text="0.1x"
+minLabel.TextColor3=Color3.fromRGB(160,160,168)
+minLabel.Font=Enum.Font.Gotham
+minLabel.TextSize=10
+minLabel.TextXAlignment=Enum.TextXAlignment.Left
+minLabel.Parent=frame
+
+local maxLabel=Instance.new("TextLabel")
+maxLabel.BackgroundTransparency=1
+maxLabel.Position=UDim2.new(1,-52,0,62)
+maxLabel.Size=UDim2.fromOffset(40,16)
+maxLabel.Text="2.0x"
+maxLabel.TextColor3=Color3.fromRGB(160,160,168)
+maxLabel.Font=Enum.Font.Gotham
+maxLabel.TextSize=10
+maxLabel.TextXAlignment=Enum.TextXAlignment.Right
+maxLabel.Parent=frame
+
+local precisionButton=Instance.new("TextButton")
+precisionButton.Position=UDim2.fromOffset(12,83)
+precisionButton.Size=UDim2.new(1,-24,0,28)
+precisionButton.BackgroundColor3=Color3.fromRGB(48,48,54)
+precisionButton.BorderSizePixel=0
+precisionButton.AutoButtonColor=true
+precisionButton.TextColor3=Color3.fromRGB(245,245,245)
+precisionButton.Font=Enum.Font.GothamMedium
+precisionButton.TextSize=12
+precisionButton.Parent=frame
+
+local precisionCorner=Instance.new("UICorner")
+precisionCorner.CornerRadius=UDim.new(0,8)
+precisionCorner.Parent=precisionButton
+
 local function refreshUI()
     local alpha=(multiplier-MIN_MULTIPLIER)/(MAX_MULTIPLIER-MIN_MULTIPLIER)
     fill.Size=UDim2.fromScale(alpha,1)
     knob.Position=UDim2.fromScale(alpha,0.5)
     valueLabel.Text=string.format("%.1fx",multiplier)
+    precisionButton.Text=precisionEnabled and "Precisao: ON" or "Precisao: OFF"
 end
 
 local function updateFromX(x)
@@ -488,6 +527,11 @@ end
 
 connections[#connections+1]=bar.InputBegan:Connect(beginSlide)
 connections[#connections+1]=knob.InputBegan:Connect(beginSlide)
+connections[#connections+1]=precisionButton.MouseButton1Click:Connect(function()
+    precisionEnabled=not precisionEnabled
+    ENV.EvadePCOverhaulPrecisionEnabled=precisionEnabled
+    refreshUI()
+end)
 
 connections[#connections+1]=frame.InputBegan:Connect(function(input)
     if input.UserInputType==Enum.UserInputType.Touch
@@ -564,6 +608,8 @@ local api={
     end,
     SetPrecisionEnabled=function(value)
         precisionEnabled=value~=false
+        ENV.EvadePCOverhaulPrecisionEnabled=precisionEnabled
+        refreshUI()
     end,
     SetMultiplier=setMultiplier,
     GetMultiplier=function() return multiplier end,

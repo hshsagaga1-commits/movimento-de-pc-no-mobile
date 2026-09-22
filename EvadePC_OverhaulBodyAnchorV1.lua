@@ -1,13 +1,16 @@
--- Evade PC - Overhaul Body Anchor V1
--- Keeps the character's native camera anchor at a stable screen-space point.
--- Designed for PC-like emote hop/dash framing: the camera point stays put while
--- the character animation/body moves around it.
+-- Evade PC - Overhaul Emote Semi-Lock V1.2
+-- PC-like framing for Overhaul:
+--   * OUTSIDE emote: native Roblox/Evade camera is left alone.
+--   * DURING emote: the character HEAD is kept at the screen center.
+--   * World movement remains fully free; this only translates the camera so it
+--     follows the moving head. It never freezes the character/root in world space.
+--
+-- This is intentionally NOT a permanent screen lock.
 --
 -- IMPORTANT:
 --   * Overhaul only; never installs in Legacy.
 --   * No smoothing / no delayed follow.
 --   * Preserves camera rotation, FOV and zoom.
---   * Applies translation only, after Roblox's native camera step.
 --   * Does not touch joystick, WASD, jump, Grid Assist or sensitivity.
 
 local Players=game:GetService("Players")
@@ -17,13 +20,13 @@ local Workspace=game:GetService("Workspace")
 local player=Players.LocalPlayer
 local ENV=(type(getgenv)=="function" and getgenv()) or _G
 
-local VERSION="EvadePC-OverhaulBodyAnchor-V1.1-fixed-pc-hole"
+local VERSION="EvadePC-OverhaulBodyAnchor-V1.2-emote-head-semilock"
 local EVADE_GAME_ID=3647333358
 local LEGACY_PLACE_ID=96537472072550
 local BIND_NAME="__EvadePCOverhaulBodyAnchorV1"
 
-local TARGET_NORM=Vector2.new(0.50,0.55)
-local MAX_TRANSLATION_PER_FRAME=3.0
+local TARGET_NORM=Vector2.new(0.50,0.50)
+local MAX_TRANSLATION_PER_FRAME=3.5
 local MIN_CAMERA_DISTANCE=0.85
 local MIN_DEPTH=0.35
 
@@ -40,21 +43,33 @@ end
 local enabled=true
 local character=nil
 local humanoid=nil
-local root=nil
-local targetNorm=TARGET_NORM
+local animator=nil
+local head=nil
+
 local corrections=0
-local recaptures=0
+local emoteFrames=0
+local nativeFrames=0
 local skippedFirstPerson=0
 local skippedSubject=0
 local lastErrorPixels=Vector2.zero
 local lastTranslation=Vector3.zero
+local lastEmoteTrack=nil
+local activeEmote=false
 local connections={}
+
+local LOCOMOTION_NAMES={
+    idle=true,walk=true,run=true,running=true,jump=true,jumping=true,
+    fall=true,falling=true,climb=true,climbing=true,swim=true,swimming=true,
+    sit=true,seated=true
+}
 
 local function refreshCharacter(char)
     character=char
     humanoid=char and char:FindFirstChildOfClass("Humanoid") or nil
-    root=char and char:FindFirstChild("HumanoidRootPart") or nil
-    targetNorm=TARGET_NORM
+    animator=humanoid and humanoid:FindFirstChildOfClass("Animator") or nil
+    head=char and char:FindFirstChild("Head") or nil
+    activeEmote=false
+    lastEmoteTrack=nil
 end
 
 local function ensureCharacter()
@@ -67,22 +82,92 @@ local function ensureCharacter()
         if not humanoid or humanoid.Parent~=char then
             humanoid=char:FindFirstChildOfClass("Humanoid")
         end
-        if not root or root.Parent~=char then
-            root=char:FindFirstChild("HumanoidRootPart")
+        if humanoid and (not animator or animator.Parent~=humanoid) then
+            animator=humanoid:FindFirstChildOfClass("Animator")
+        end
+        if not head or head.Parent~=char then
+            head=char:FindFirstChild("Head")
         end
     end
 
-    return char and humanoid and root
+    return char and humanoid and head
 end
 
 local function subjectBelongsToCharacter(camera)
     local subject=camera.CameraSubject
     if not subject then return false end
-    if subject==humanoid or subject==root then return true end
+    if subject==humanoid or subject==head then return true end
     if typeof(subject)=="Instance" and character and subject:IsDescendantOf(character) then
         return true
     end
     return false
+end
+
+local function normalizedTrackName(track)
+    local name=""
+    pcall(function()
+        name=(track.Name or "").." "..((track.Animation and track.Animation.Name) or "")
+    end)
+    return string.lower(name)
+end
+
+local function looksLikeEmoteTrack(track)
+    if not track or not track.IsPlaying then return false end
+
+    local weight=0
+    pcall(function() weight=track.WeightCurrent or 0 end)
+    if weight<=0.01 then return false end
+
+    local name=normalizedTrackName(track)
+
+    -- Explicit emote names always win.
+    if string.find(name,"emote",1,true)
+        or string.find(name,"dance",1,true)
+        or string.find(name,"taunt",1,true) then
+        return true
+    end
+
+    -- Ignore ordinary locomotion even if a game gives it Action priority.
+    for locomotionName in pairs(LOCOMOTION_NAMES) do
+        if string.find(name,locomotionName,1,true) then
+            return false
+        end
+    end
+
+    -- Evade/custom emotes commonly run as Action-family tracks. Using the
+    -- Action family as a fallback makes the semi-lock work even when the game
+    -- exposes only generic AnimationTrack names.
+    local priority=nil
+    pcall(function() priority=track.Priority end)
+    if priority==Enum.AnimationPriority.Action
+        or priority==Enum.AnimationPriority.Action2
+        or priority==Enum.AnimationPriority.Action3
+        or priority==Enum.AnimationPriority.Action4 then
+        return true
+    end
+
+    return false
+end
+
+local function detectEmote()
+    if not animator then
+        return false,nil
+    end
+
+    local tracks={}
+    local ok=pcall(function()
+        tracks=animator:GetPlayingAnimationTracks()
+    end)
+    if not ok then return false,nil end
+
+    for _,track in ipairs(tracks) do
+        if looksLikeEmoteTrack(track) then
+            local name=normalizedTrackName(track)
+            return true,name
+        end
+    end
+
+    return false,nil
 end
 
 local function canOperate(camera)
@@ -106,12 +191,12 @@ local function canOperate(camera)
     return true
 end
 
-local function applyAnchor(camera)
+local function centerHead(camera)
     local viewport=camera.ViewportSize
-    if not targetNorm or viewport.X<=1 or viewport.Y<=1 then return end
+    if viewport.X<=1 or viewport.Y<=1 then return end
 
     local cf=camera.CFrame
-    local localPoint=cf:PointToObjectSpace(root.Position)
+    local localPoint=cf:PointToObjectSpace(head.Position)
     local depth=-localPoint.Z
     if depth<=MIN_DEPTH then return end
 
@@ -119,8 +204,8 @@ local function applyAnchor(camera)
     local focal=(viewport.Y*0.5)/math.tan(fov*0.5)
     if focal<=0 then return end
 
-    local targetX=targetNorm.X*viewport.X
-    local targetY=targetNorm.Y*viewport.Y
+    local targetX=TARGET_NORM.X*viewport.X
+    local targetY=TARGET_NORM.Y*viewport.Y
 
     local desiredX=(targetX-viewport.X*0.5)*depth/focal
     local desiredY=-(targetY-viewport.Y*0.5)*depth/focal
@@ -128,18 +213,19 @@ local function applyAnchor(camera)
     local dx=localPoint.X-desiredX
     local dy=localPoint.Y-desiredY
 
-    -- Translation only. Rotation and camera distance are left untouched.
     local delta=cf.RightVector*dx + cf.UpVector*dy
-    local magnitude=delta.Magnitude
-    if magnitude>MAX_TRANSLATION_PER_FRAME then
+    if delta.Magnitude>MAX_TRANSLATION_PER_FRAME then
         delta=delta.Unit*MAX_TRANSLATION_PER_FRAME
     end
 
-    local currentPoint=camera:WorldToViewportPoint(root.Position)
+    local currentPoint=camera:WorldToViewportPoint(head.Position)
     lastErrorPixels=Vector2.new(currentPoint.X-targetX,currentPoint.Y-targetY)
     lastTranslation=delta
 
     if delta.Magnitude>0.0001 then
+        -- Translate camera + focus together: orientation, FOV and zoom distance
+        -- stay native. Because this is recomputed from the CURRENT head position
+        -- every frame, the player can move W/A/S/D freely in world space.
         camera.CFrame=cf+delta
         camera.Focus=camera.Focus+delta
         corrections+=1
@@ -150,10 +236,6 @@ connections[#connections+1]=player.CharacterAdded:Connect(function(char)
     refreshCharacter(char)
 end)
 
-connections[#connections+1]=Workspace:GetPropertyChangedSignal("CurrentCamera"):Connect(function()
-    targetNorm=TARGET_NORM
-end)
-
 refreshCharacter(player.Character)
 
 RunService:BindToRenderStep(
@@ -161,10 +243,27 @@ RunService:BindToRenderStep(
     Enum.RenderPriority.Camera.Value+3,
     function()
         local camera=Workspace.CurrentCamera
-        if not canOperate(camera) then return end
+        if not canOperate(camera) then
+            activeEmote=false
+            return
+        end
 
-        targetNorm=TARGET_NORM
-        applyAnchor(camera)
+        local emote,trackName=detectEmote()
+        activeEmote=emote
+        lastEmoteTrack=trackName
+
+        if not emote then
+            -- Critical behavior: outside an emote, DO NOTHING.
+            -- The normal character remains outside the center exactly as the
+            -- native Overhaul framing puts it.
+            nativeFrames+=1
+            lastErrorPixels=Vector2.zero
+            lastTranslation=Vector3.zero
+            return
+        end
+
+        emoteFrames+=1
+        centerHead(camera)
     end
 )
 
@@ -174,16 +273,17 @@ local api={
     SetEnabled=function(value)
         enabled=value~=false
     end,
-    Recapture=function()
-        targetNorm=TARGET_NORM
-    end,
     GetState=function()
         return {
             enabled=enabled,
-            targetNorm=targetNorm,
-            targetSource="fixed-pc-reference",
+            activeEmote=activeEmote,
+            lastEmoteTrack=lastEmoteTrack,
+            targetNorm=TARGET_NORM,
+            targetPart="Head",
+            behavior="native-outside-emote/head-center-during-emote",
             corrections=corrections,
-            recaptures=recaptures,
+            emoteFrames=emoteFrames,
+            nativeFrames=nativeFrames,
             skippedFirstPerson=skippedFirstPerson,
             skippedSubject=skippedSubject,
             lastErrorPixels=lastErrorPixels,
@@ -191,6 +291,7 @@ local api={
             maxTranslationPerFrame=MAX_TRANSLATION_PER_FRAME,
             writesCameraPosition=true,
             writesCameraRotation=false,
+            locksWorldMovement=false,
             usesSmoothing=false,
             affectsLegacy=false,
         }

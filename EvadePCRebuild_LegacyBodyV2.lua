@@ -10,7 +10,7 @@ local Workspace=game:GetService("Workspace")
 local player=Players.LocalPlayer
 local ENV=(type(getgenv)=="function" and getgenv()) or _G
 
-local VERSION="EvadePCRebuild-LegacyBody-V2.4-adaptive-emote-rail"
+local VERSION="EvadePCRebuild-LegacyBody-V2.5-v23-native-outside-soft-pitch-rail"
 local LEGACY_PLACE_ID=96537472072550
 local BIND_NAME="__EvadePCRebuildLegacyBodyV2"
 local HOLE_GUI_NAME="EvadePCLegacyHole1px"
@@ -28,12 +28,11 @@ local COLLISION_PADDING=0.14
 local FIRST_PERSON_DISTANCE=1.45
 local EMOTE_TARGET_NORM=Vector2.new(0.50,0.50)
 local EMOTE_MIN_DEPTH=0.35
-local EMOTE_ENTRY_CENTER_FRAMES=4
-local EMOTE_Y_DEADZONE_PX=5
-local EMOTE_Y_GAIN=0.45
-local EMOTE_ENTRY_X_GAIN=0.55
-local EMOTE_MAX_RAIL_TRANSLATION=1.20
-local EMOTE_PITCH_RECAPTURE_DEG=0.75
+local EMOTE_ENTRY_X_FRAMES=4
+local EMOTE_X_GAIN=0.45
+local EMOTE_Y_GAIN=0.32
+local EMOTE_Y_DEADZONE_PX=7
+local EMOTE_MAX_TRANSLATION_PER_FRAME=1.05
 
 local previous=ENV.__EvadePCRebuildLegacyBodyV2Cleanup
 if type(previous)=="function" then pcall(previous) end
@@ -116,8 +115,7 @@ local emoteFrames=0
 local emoteCenterWrites=0
 local emoteLastErrorPixels=Vector2.zero
 local emoteLastTranslation=Vector3.zero
-local emoteRailYNorm=nil
-local emoteRailPitch=nil
+local emoteEntryPitch=nil
 local emoteEntryFramesLeft=0
 local emoteWasActive=false
 local emoteRejectReason=nil
@@ -150,9 +148,9 @@ local LOCOMOTION_NAMES={
 }
 
 local NON_EMOTE_ACTION_WORDS={
-    "crouch","duck","crawl","slide","lantern","flashlight","equip","unequip",
-    "hold","tool","item","carry","use","interact","aim","reload","heal",
-    "drink","revive","downed","pickup","pick up","grab"
+    "crouch","duck","crawl","slide","lantern","flashlight",
+    "equip","unequip","hold","tool","item","carry","use","interact",
+    "aim","reload","heal","drink","revive","downed","pickup","grab"
 }
 
 local function normalizedTrackName(track)
@@ -163,17 +161,8 @@ local function normalizedTrackName(track)
     return string.lower(name)
 end
 
-local function hasWord(haystack,words)
-    for _,word in ipairs(words) do
-        if string.find(haystack,word,1,true) then
-            return true,word
-        end
-    end
-    return false,nil
-end
-
 local function looksLikeEmoteTrack(track)
-    if not track or not track.IsPlaying then return false,nil end
+    if not track or not track.IsPlaying then return false,"not-playing" end
 
     local weight=0
     pcall(function() weight=track.WeightCurrent or 0 end)
@@ -181,6 +170,7 @@ local function looksLikeEmoteTrack(track)
 
     local name=normalizedTrackName(track)
 
+    -- Explicit emote names are trusted.
     if string.find(name,"emote",1,true)
         or string.find(name,"dance",1,true)
         or string.find(name,"taunt",1,true) then
@@ -193,19 +183,18 @@ local function looksLikeEmoteTrack(track)
         end
     end
 
-    local blocked,word=hasWord(name,NON_EMOTE_ACTION_WORDS)
-    if blocked then
-        return false,"blocked:"..tostring(word)
+    for _,word in ipairs(NON_EMOTE_ACTION_WORDS) do
+        if string.find(name,word,1,true) then
+            return false,"blocked:"..word
+        end
     end
 
-    -- Equipped tools/actions are NOT emotes. This is the important filter for
-    -- lantern/gear poses that were incorrectly triggering the center lock.
+    -- Lantern/gear actions must never trigger the emote rail.
     if character and character:FindFirstChildOfClass("Tool") then
         return false,"tool-equipped"
     end
 
-    -- Legacy Evade may expose emotes only as generic Action-family tracks.
-    -- Keep that compatibility fallback, but only after the non-emote filters.
+    -- Legacy Evade can expose actual emotes as generic Action tracks.
     local priority=nil
     pcall(function() priority=track.Priority end)
     if priority==Enum.AnimationPriority.Action
@@ -230,16 +219,16 @@ local function detectEmote()
     end)
     if not ok then return false,nil,"tracks-failed" end
 
-    local lastReason="none"
+    local reason="none"
     for _,track in ipairs(tracks) do
-        local isEmote,reason=looksLikeEmoteTrack(track)
-        if isEmote then
+        local yes,why=looksLikeEmoteTrack(track)
+        if yes then
             return true,normalizedTrackName(track),nil
         end
-        if reason then lastReason=reason end
+        if why then reason=why end
     end
 
-    return false,nil,lastReason
+    return false,nil,reason
 end
 
 local function getPlayerModule()
@@ -338,14 +327,13 @@ local function withPosition(cf,position)
 end
 
 local function resetEmoteRail()
-    emoteRailYNorm=nil
-    emoteRailPitch=nil
+    emoteEntryPitch=nil
     emoteEntryFramesLeft=0
     emoteLastErrorPixels=Vector2.zero
     emoteLastTranslation=Vector3.zero
 end
 
-local function applyAdaptiveEmoteRail(camera,pitch)
+local function applySoftPitchRail(camera,pitch)
     if not head or not head.Parent then return end
 
     local viewport=camera.ViewportSize
@@ -363,55 +351,48 @@ local function applyAdaptiveEmoteRail(camera,pitch)
     local point,onScreen=camera:WorldToViewportPoint(head.Position)
     if not onScreen then return end
 
-    -- Entering an emote: align toward the center for only a few frames.
-    -- After that, X is completely free: the character may slide left/right.
-    if emoteRailYNorm==nil then
-        emoteRailYNorm=EMOTE_TARGET_NORM.Y
-        emoteRailPitch=pitch
-        emoteEntryFramesLeft=EMOTE_ENTRY_CENTER_FRAMES
+    if emoteEntryPitch==nil then
+        emoteEntryPitch=pitch
+        emoteEntryFramesLeft=EMOTE_ENTRY_X_FRAMES
     end
 
-    -- When the user intentionally looks up/down, the rail moves WITH the new
-    -- framing instead of dragging the head back onto the visible 1px dot.
-    -- Once the pitch stops changing, the new vertical relation is held.
-    if emoteEntryFramesLeft<=0
-        and emoteRailPitch~=nil
-        and math.abs(pitch-emoteRailPitch)>=EMOTE_PITCH_RECAPTURE_DEG then
-        emoteRailYNorm=math.clamp(point.Y/viewport.Y,0,1)
-        emoteRailPitch=pitch
-    end
-
+    -- The visible 1px dot is a REFERENCE, not a magnet.
+    -- Looking up/down moves the virtual rail away from the dot by the exact
+    -- angular camera change, so the character keeps the same framing relation
+    -- without being hammered onto screen center.
+    local pitchDelta=math.rad(pitch-emoteEntryPitch)
     local targetX=EMOTE_TARGET_NORM.X*viewport.X
-    local targetY=emoteRailYNorm*viewport.Y
+    local targetY=(EMOTE_TARGET_NORM.Y*viewport.Y) + focal*math.tan(pitchDelta)
+    targetY=math.clamp(targetY,viewport.Y*0.10,viewport.Y*0.90)
+
     local errorX=point.X-targetX
     local errorY=point.Y-targetY
-
     emoteLastErrorPixels=Vector2.new(errorX,errorY)
 
-    -- Vertical/depth framing is the "rail". Horizontal movement is only
-    -- corrected during the short entry alignment, then left 100% free.
-    local correctionX=0
+    -- Only center X briefly when the emote begins.
+    -- After that the character may slide left/right freely.
+    local pxX=0
     if emoteEntryFramesLeft>0 then
-        correctionX=errorX*EMOTE_ENTRY_X_GAIN
+        pxX=errorX*EMOTE_X_GAIN
     end
 
-    local correctionY=0
+    -- Y is a soft rail with deadzone, never a 1px hard lock.
+    local pxY=0
     if math.abs(errorY)>EMOTE_Y_DEADZONE_PX then
-        correctionY=errorY*EMOTE_Y_GAIN
+        pxY=errorY*EMOTE_Y_GAIN
     end
 
-    local desiredX=correctionX*depth/focal
-    local desiredY=-correctionY*depth/focal
-    local delta=cf.RightVector*desiredX + cf.UpVector*desiredY
+    local dx=pxX*depth/focal
+    local dy=-pxY*depth/focal
+    local delta=cf.RightVector*dx + cf.UpVector*dy
 
-    if delta.Magnitude>EMOTE_MAX_RAIL_TRANSLATION then
-        delta=delta.Unit*EMOTE_MAX_RAIL_TRANSLATION
+    if delta.Magnitude>EMOTE_MAX_TRANSLATION_PER_FRAME then
+        delta=delta.Unit*EMOTE_MAX_TRANSLATION_PER_FRAME
     end
 
     emoteLastTranslation=delta
 
     if delta.Magnitude>0.0001 then
-        -- Translate camera + Focus together: distance/orientation stay native.
         camera.CFrame=cf+delta
         camera.Focus=camera.Focus+delta
         emoteCenterWrites+=1
@@ -466,6 +447,7 @@ RunService:BindToRenderStep(BIND_NAME,Enum.RenderPriority.Camera.Value+3,functio
         return
     end
 
+    -- EXACT V2.3 no-emote framing path (the version reported good by the user).
     local pitch=pitchDegrees(camera)
     local extra=math.clamp(extraForPitch(pitch),0,MAX_EXTRA_DISTANCE)
     local target=nativeDistance+extra
@@ -476,8 +458,6 @@ RunService:BindToRenderStep(BIND_NAME,Enum.RenderPriority.Camera.Value+3,functio
     lastExtra=extra
     lastAppliedDelta=0
 
-    -- Keep the Legacy camera distance/pitch framing active even during emotes.
-    -- This fixes the "camera too close" regression.
     if extra>0.001 then
         local anchor=camera.Focus.Position
         local cf=camera.CFrame
@@ -503,19 +483,22 @@ RunService:BindToRenderStep(BIND_NAME,Enum.RenderPriority.Camera.Value+3,functio
     lastEmoteTrack=trackName
     emoteRejectReason=rejectReason
 
-    if emote then
-        if not emoteWasActive then
-            resetEmoteRail()
-        end
-        emoteWasActive=true
-        emoteFrames+=1
-        applyAdaptiveEmoteRail(camera,pitch)
-    else
+    if not emote then
         if emoteWasActive then
             resetEmoteRail()
         end
         emoteWasActive=false
+        return
     end
+
+    if not emoteWasActive then
+        resetEmoteRail()
+    end
+    emoteWasActive=true
+    emoteFrames+=1
+
+    -- Same native Legacy distance stays active; only add the soft emote rail.
+    applySoftPitchRail(camera,pitch)
 end)
 
 local api={
@@ -543,11 +526,10 @@ local api={
             emoteTargetNorm=EMOTE_TARGET_NORM,
             emoteTargetPart="Head",
             emoteHoleSizePixels=1,
-            emoteMechanic="adaptive-overhaul-style-rail",
-            emoteBehavior="strict-emote-only/entry-center-then-horizontal-free/pitch-adaptive",
+            emoteMechanic="v23-native-outside/soft-pitch-aware-emote-rail",
+            emoteBehavior="outside-identical-v23/entry-x-center/x-free/y-soft/pitch-adaptive",
             emoteRejectReason=emoteRejectReason,
-            emoteRailYNorm=emoteRailYNorm,
-            emoteRailPitch=emoteRailPitch,
+            emoteEntryPitch=emoteEntryPitch,
             emoteEntryFramesLeft=emoteEntryFramesLeft,
             emoteLastErrorPixels=emoteLastErrorPixels,
             emoteLastTranslation=emoteLastTranslation,

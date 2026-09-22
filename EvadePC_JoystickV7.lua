@@ -24,7 +24,7 @@ local player=Players.LocalPlayer
 local playerGui=player:WaitForChild("PlayerGui")
 local ENV=(type(getgenv)=="function" and getgenv()) or _G
 
-local VERSION="EvadePC-Joystick-V7.5-controller-jump-pulse"
+local VERSION="EvadePC-Joystick-V7.5.1-ad-58deg-upshift"
 local BIND_NAME="__EvadePCJoystickV7"
 local LEGACY_BIND_NAME="__EvadePCJoystickV7LegacyKeyboardWake"
 local JUMP_BIND_NAME="__EvadePCJoystickV7JumpPulse"
@@ -45,9 +45,9 @@ local JUMP_SHEET="rbxasset://textures/ui/Input/TouchControlsSheetV2.png"
 --   0 deg = W, +90 = D, -90 = A, +/-180 = S.
 local PRESS_RADIUS=0.18
 local W_HALF_DEG=28       -- W total width: 56 deg
-local DIAG_END_DEG=105    -- each WA/WD: 65 deg
-local SIDE_END_DEG=160.55 -- each A/D: 55.55 deg (~1% wider)
-                            -- S gets the remaining 40 deg total
+local DIAG_END_DEG=100    -- WA/WD end sooner so pure A/D starts closer to W
+local SIDE_END_DEG=158    -- each A/D: 58 deg; trims the A/D area near S
+                            -- S gets the remaining 44 deg total
 
 -- Dry diagonal swap is only a short transition bridge, never a permanent latch.
 -- If the finger stays in W, W takes over after this tiny grace period.

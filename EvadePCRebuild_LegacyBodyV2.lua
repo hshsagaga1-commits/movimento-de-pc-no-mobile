@@ -10,7 +10,7 @@ local Workspace=game:GetService("Workspace")
 local player=Players.LocalPlayer
 local ENV=(type(getgenv)=="function" and getgenv()) or _G
 
-local VERSION="EvadePCRebuild-LegacyBody-V2.3-exact-overhaul-emote-semilock"
+local VERSION="EvadePCRebuild-LegacyBody-V2.4-adaptive-emote-rail"
 local LEGACY_PLACE_ID=96537472072550
 local BIND_NAME="__EvadePCRebuildLegacyBodyV2"
 local HOLE_GUI_NAME="EvadePCLegacyHole1px"
@@ -27,8 +27,13 @@ local MAX_EXTRA_DISTANCE=1.70
 local COLLISION_PADDING=0.14
 local FIRST_PERSON_DISTANCE=1.45
 local EMOTE_TARGET_NORM=Vector2.new(0.50,0.50)
-local EMOTE_MAX_TRANSLATION_PER_FRAME=3.5
 local EMOTE_MIN_DEPTH=0.35
+local EMOTE_ENTRY_CENTER_FRAMES=4
+local EMOTE_Y_DEADZONE_PX=5
+local EMOTE_Y_GAIN=0.45
+local EMOTE_ENTRY_X_GAIN=0.55
+local EMOTE_MAX_RAIL_TRANSLATION=1.20
+local EMOTE_PITCH_RECAPTURE_DEG=0.75
 
 local previous=ENV.__EvadePCRebuildLegacyBodyV2Cleanup
 if type(previous)=="function" then pcall(previous) end
@@ -111,6 +116,11 @@ local emoteFrames=0
 local emoteCenterWrites=0
 local emoteLastErrorPixels=Vector2.zero
 local emoteLastTranslation=Vector3.zero
+local emoteRailYNorm=nil
+local emoteRailPitch=nil
+local emoteEntryFramesLeft=0
+local emoteWasActive=false
+local emoteRejectReason=nil
 
 local function attachCharacter(char)
     character=char
@@ -139,6 +149,12 @@ local LOCOMOTION_NAMES={
     sit=true,seated=true
 }
 
+local NON_EMOTE_ACTION_WORDS={
+    "crouch","duck","crawl","slide","lantern","flashlight","equip","unequip",
+    "hold","tool","item","carry","use","interact","aim","reload","heal",
+    "drink","revive","downed","pickup","pick up","grab"
+}
+
 local function normalizedTrackName(track)
     local name=""
     pcall(function()
@@ -147,58 +163,83 @@ local function normalizedTrackName(track)
     return string.lower(name)
 end
 
+local function hasWord(haystack,words)
+    for _,word in ipairs(words) do
+        if string.find(haystack,word,1,true) then
+            return true,word
+        end
+    end
+    return false,nil
+end
+
 local function looksLikeEmoteTrack(track)
-    if not track or not track.IsPlaying then return false end
+    if not track or not track.IsPlaying then return false,nil end
 
     local weight=0
     pcall(function() weight=track.WeightCurrent or 0 end)
-    if weight<=0.01 then return false end
+    if weight<=0.01 then return false,"weight" end
 
     local name=normalizedTrackName(track)
 
     if string.find(name,"emote",1,true)
         or string.find(name,"dance",1,true)
         or string.find(name,"taunt",1,true) then
-        return true
+        return true,nil
     end
 
     for locomotionName in pairs(LOCOMOTION_NAMES) do
         if string.find(name,locomotionName,1,true) then
-            return false
+            return false,"locomotion"
         end
     end
 
+    local blocked,word=hasWord(name,NON_EMOTE_ACTION_WORDS)
+    if blocked then
+        return false,"blocked:"..tostring(word)
+    end
+
+    -- Equipped tools/actions are NOT emotes. This is the important filter for
+    -- lantern/gear poses that were incorrectly triggering the center lock.
+    if character and character:FindFirstChildOfClass("Tool") then
+        return false,"tool-equipped"
+    end
+
+    -- Legacy Evade may expose emotes only as generic Action-family tracks.
+    -- Keep that compatibility fallback, but only after the non-emote filters.
     local priority=nil
     pcall(function() priority=track.Priority end)
     if priority==Enum.AnimationPriority.Action
         or priority==Enum.AnimationPriority.Action2
         or priority==Enum.AnimationPriority.Action3
         or priority==Enum.AnimationPriority.Action4 then
-        return true
+        return true,nil
     end
 
-    return false
+    return false,"not-action"
 end
 
 local function detectEmote()
     if humanoid and (not animator or animator.Parent~=humanoid) then
         animator=humanoid:FindFirstChildOfClass("Animator")
     end
-    if not animator then return false,nil end
+    if not animator then return false,nil,"animator-missing" end
 
     local tracks={}
     local ok=pcall(function()
         tracks=animator:GetPlayingAnimationTracks()
     end)
-    if not ok then return false,nil end
+    if not ok then return false,nil,"tracks-failed" end
 
+    local lastReason="none"
     for _,track in ipairs(tracks) do
-        if looksLikeEmoteTrack(track) then
-            return true,normalizedTrackName(track)
+        local isEmote,reason=looksLikeEmoteTrack(track)
+        if isEmote then
+            return true,normalizedTrackName(track),nil
         end
+        if reason then lastReason=reason end
     end
 
-    return false,nil
+    return false,nil,lastReason
 end
 
 local function getPlayerModule()
@@ -296,8 +337,15 @@ local function withPosition(cf,position)
     return CFrame.fromMatrix(position,cf.XVector,cf.YVector,cf.ZVector)
 end
 
-local function centerHeadOnScreen(camera)
-    -- This is intentionally the SAME screen-space mechanic as Overhaul.
+local function resetEmoteRail()
+    emoteRailYNorm=nil
+    emoteRailPitch=nil
+    emoteEntryFramesLeft=0
+    emoteLastErrorPixels=Vector2.zero
+    emoteLastTranslation=Vector3.zero
+end
+
+local function applyAdaptiveEmoteRail(camera,pitch)
     if not head or not head.Parent then return end
 
     local viewport=camera.ViewportSize
@@ -312,30 +360,65 @@ local function centerHeadOnScreen(camera)
     local focal=(viewport.Y*0.5)/math.tan(fov*0.5)
     if focal<=0 then return end
 
-    local targetX=EMOTE_TARGET_NORM.X*viewport.X
-    local targetY=EMOTE_TARGET_NORM.Y*viewport.Y
+    local point,onScreen=camera:WorldToViewportPoint(head.Position)
+    if not onScreen then return end
 
-    local desiredX=(targetX-viewport.X*0.5)*depth/focal
-    local desiredY=-(targetY-viewport.Y*0.5)*depth/focal
-
-    local dx=localPoint.X-desiredX
-    local dy=localPoint.Y-desiredY
-
-    local delta=cf.RightVector*dx + cf.UpVector*dy
-    if delta.Magnitude>EMOTE_MAX_TRANSLATION_PER_FRAME then
-        delta=delta.Unit*EMOTE_MAX_TRANSLATION_PER_FRAME
+    -- Entering an emote: align toward the center for only a few frames.
+    -- After that, X is completely free: the character may slide left/right.
+    if emoteRailYNorm==nil then
+        emoteRailYNorm=EMOTE_TARGET_NORM.Y
+        emoteRailPitch=pitch
+        emoteEntryFramesLeft=EMOTE_ENTRY_CENTER_FRAMES
     end
 
-    local currentPoint=camera:WorldToViewportPoint(head.Position)
-    emoteLastErrorPixels=Vector2.new(currentPoint.X-targetX,currentPoint.Y-targetY)
+    -- When the user intentionally looks up/down, the rail moves WITH the new
+    -- framing instead of dragging the head back onto the visible 1px dot.
+    -- Once the pitch stops changing, the new vertical relation is held.
+    if emoteEntryFramesLeft<=0
+        and emoteRailPitch~=nil
+        and math.abs(pitch-emoteRailPitch)>=EMOTE_PITCH_RECAPTURE_DEG then
+        emoteRailYNorm=math.clamp(point.Y/viewport.Y,0,1)
+        emoteRailPitch=pitch
+    end
+
+    local targetX=EMOTE_TARGET_NORM.X*viewport.X
+    local targetY=emoteRailYNorm*viewport.Y
+    local errorX=point.X-targetX
+    local errorY=point.Y-targetY
+
+    emoteLastErrorPixels=Vector2.new(errorX,errorY)
+
+    -- Vertical/depth framing is the "rail". Horizontal movement is only
+    -- corrected during the short entry alignment, then left 100% free.
+    local correctionX=0
+    if emoteEntryFramesLeft>0 then
+        correctionX=errorX*EMOTE_ENTRY_X_GAIN
+    end
+
+    local correctionY=0
+    if math.abs(errorY)>EMOTE_Y_DEADZONE_PX then
+        correctionY=errorY*EMOTE_Y_GAIN
+    end
+
+    local desiredX=correctionX*depth/focal
+    local desiredY=-correctionY*depth/focal
+    local delta=cf.RightVector*desiredX + cf.UpVector*desiredY
+
+    if delta.Magnitude>EMOTE_MAX_RAIL_TRANSLATION then
+        delta=delta.Unit*EMOTE_MAX_RAIL_TRANSLATION
+    end
+
     emoteLastTranslation=delta
 
     if delta.Magnitude>0.0001 then
-        -- Same as Overhaul: translate camera AND focus together so the head
-        -- remains centered while the character can move freely in the world.
+        -- Translate camera + Focus together: distance/orientation stay native.
         camera.CFrame=cf+delta
         camera.Focus=camera.Focus+delta
         emoteCenterWrites+=1
+    end
+
+    if emoteEntryFramesLeft>0 then
+        emoteEntryFramesLeft-=1
     end
 end
 
@@ -370,35 +453,19 @@ RunService:BindToRenderStep(BIND_NAME,Enum.RenderPriority.Camera.Value+3,functio
     local camera=Workspace.CurrentCamera
     if not shouldRun(camera) then
         activeEmote=false
+        emoteWasActive=false
+        resetEmoteRail()
         return
     end
 
     local nativeDistance=getNativeDistance(camera)
     if firstPerson(camera,nativeDistance) then
         activeEmote=false
+        emoteWasActive=false
+        resetEmoteRail()
         return
     end
 
-    -- Detect emote BEFORE Legacy pitch/body framing.
-    -- During emote we run ONLY the exact Overhaul semi-lock path. This prevents
-    -- the older Legacy distance/shoulder framing from pulling the character
-    -- sideways while the emote is active.
-    local emote,trackName=detectEmote()
-    activeEmote=emote
-    lastEmoteTrack=trackName
-
-    if emote then
-        emoteFrames+=1
-        lastAppliedDelta=0
-        lastExtra=0
-        centerHeadOnScreen(camera)
-        return
-    end
-
-    emoteLastErrorPixels=Vector2.zero
-    emoteLastTranslation=Vector3.zero
-
-    -- Outside emotes, keep the existing Legacy-only pitch framing.
     local pitch=pitchDegrees(camera)
     local extra=math.clamp(extraForPitch(pitch),0,MAX_EXTRA_DISTANCE)
     local target=nativeDistance+extra
@@ -409,25 +476,45 @@ RunService:BindToRenderStep(BIND_NAME,Enum.RenderPriority.Camera.Value+3,functio
     lastExtra=extra
     lastAppliedDelta=0
 
-    if extra<=0.001 then
-        return
+    -- Keep the Legacy camera distance/pitch framing active even during emotes.
+    -- This fixes the "camera too close" regression.
+    if extra>0.001 then
+        local anchor=camera.Focus.Position
+        local cf=camera.CFrame
+        local fromAnchor=cf.Position-anchor
+        local currentDistance=fromAnchor.Magnitude
+
+        if currentDistance>0.0001 then
+            local direction=fromAnchor.Unit
+            local desired=anchor+direction*target
+            local finalPosition=collisionClamp(anchor,desired)
+            local delta=(finalPosition-cf.Position).Magnitude
+
+            lastAppliedDelta=delta
+            if delta>0.001 then
+                camera.CFrame=withPosition(cf,finalPosition)
+                writes+=1
+            end
+        end
     end
 
-    local anchor=camera.Focus.Position
-    local cf=camera.CFrame
-    local fromAnchor=cf.Position-anchor
-    local currentDistance=fromAnchor.Magnitude
-    if currentDistance<=0.0001 then return end
+    local emote,trackName,rejectReason=detectEmote()
+    activeEmote=emote
+    lastEmoteTrack=trackName
+    emoteRejectReason=rejectReason
 
-    local direction=fromAnchor.Unit
-    local desired=anchor+direction*target
-    local finalPosition=collisionClamp(anchor,desired)
-    local delta=(finalPosition-cf.Position).Magnitude
-
-    lastAppliedDelta=delta
-    if delta>0.001 then
-        camera.CFrame=withPosition(cf,finalPosition)
-        writes+=1
+    if emote then
+        if not emoteWasActive then
+            resetEmoteRail()
+        end
+        emoteWasActive=true
+        emoteFrames+=1
+        applyAdaptiveEmoteRail(camera,pitch)
+    else
+        if emoteWasActive then
+            resetEmoteRail()
+        end
+        emoteWasActive=false
     end
 end)
 
@@ -456,8 +543,12 @@ local api={
             emoteTargetNorm=EMOTE_TARGET_NORM,
             emoteTargetPart="Head",
             emoteHoleSizePixels=1,
-            emoteMechanic="exact-overhaul-screen-space-head-lock",
-            emoteBehavior="native-outside-emote/head-center-during-emote",
+            emoteMechanic="adaptive-overhaul-style-rail",
+            emoteBehavior="strict-emote-only/entry-center-then-horizontal-free/pitch-adaptive",
+            emoteRejectReason=emoteRejectReason,
+            emoteRailYNorm=emoteRailYNorm,
+            emoteRailPitch=emoteRailPitch,
+            emoteEntryFramesLeft=emoteEntryFramesLeft,
             emoteLastErrorPixels=emoteLastErrorPixels,
             emoteLastTranslation=emoteLastTranslation,
             locksWorldMovement=false,

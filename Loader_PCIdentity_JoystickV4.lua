@@ -16,11 +16,11 @@ local function run(path)
 end
 
 local identity=run("EvadePC_IdentityV1.lua")
-local joystick=run("EvadePC_JoystickV6.lua")
+local joystick=run("EvadePC_JoystickV7.lua")
 
 local env=(type(getgenv)=="function" and getgenv()) or _G
 local api={
-    Version="EvadePC-Identity+Joystick-V4",
+    Version="EvadePC-Identity+Joystick-V5",
     Identity=identity,
     Joystick=joystick,
     GetState=function()
@@ -29,9 +29,9 @@ local api={
             and type(env.EvadePCIdentityV1.GetState)=="function" then
             state.identity=env.EvadePCIdentityV1.GetState()
         end
-        if type(env.EvadePCJoystickV6)=="table"
-            and type(env.EvadePCJoystickV6.GetState)=="function" then
-            state.joystick=env.EvadePCJoystickV6.GetState()
+        if type(env.EvadePCJoystickV7)=="table"
+            and type(env.EvadePCJoystickV7.GetState)=="function" then
+            state.joystick=env.EvadePCJoystickV7.GetState()
         end
         return state
     end,

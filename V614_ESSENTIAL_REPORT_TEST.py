@@ -39,7 +39,7 @@ if "getgenv().PCV614EssentialReport=function()" not in source:
     raise SystemExit("RED: PCV614EssentialReport entry point is missing")
 if "local fullReport=getgenv().PCV614EssentialReport()" not in source:
     raise SystemExit("RED: chunk export is not wired to the essential report")
-if 'local revision="V614-TemporalPoseControlR2-FullClipboardR1"' not in loader_source:
+if 'local revision="V614-ControlledAcquisitionR3-TemporalPoseControlR2-FullClipboardR1"' not in loader_source:
     raise SystemExit("RED: Loader essential-report cache revision is missing")
 
 REPORT_SECTIONS = (
@@ -248,8 +248,13 @@ function HttpService:JSONDecode(text)
 end
 function SEGCFG.serializeEssentialModel(value) return HttpService:JSONEncode(value) end
 function SEGCFG.deserializeEssentialModel(text) return HttpService:JSONDecode(text) end
+model.acquisitionR3={fixedTargetPerWindow=80,armedSegments=105,
+    rejectedArms={['animation-phase']=12},potentialModeratePairs=3}
 local decoded=SEGCFG.deserializeEssentialModel(SEGCFG.serializeEssentialModel(model))
 expect(decoded~=model and decoded.segments~=model.segments,"analysis input is decoded model")
+expect(decoded.acquisitionR3.fixedTargetPerWindow==80
+    and decoded.acquisitionR3.rejectedArms['animation-phase']==12,
+    "R3 acquisition audit metadata survives Essential round-trip")
 
 local matchingEqual=true
 for _,name in ipairs({"Strict","Moderate","Broad"}) do
@@ -309,6 +314,8 @@ model.windows={A1={},B1={},B2={},A2={}}
 local report=SEGCFG.buildEssentialReportText({diagnostics={},model=model,matched=baseline,
     parity={equal=analysisParity.equal},modelJson="{}"},
     {fullReportChars=100000,essentialReportChars=20000,reductionPercent=80,essentialChunks=1})
+expect(string.find(report,'acquisitionR3 = synthetic-json',1,true)~=nil,
+    "R3 fixed acquisition and arm losses exported without entering causal analysis")
 local sectionNames={
     "=== V614 BASELINE MATCHER (UNCHANGED) ===",
     "=== V614 CONTROLLED STRICT ===",

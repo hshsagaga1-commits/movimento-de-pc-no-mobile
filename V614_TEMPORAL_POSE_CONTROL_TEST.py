@@ -41,7 +41,7 @@ PROTECTED_SECTIONS = {
     "segmentConsumer": (
         "segmentConsumer=function(sample)",
         "\nlocal function finalizeFrame",
-        "c13a1ce2ca5f6cad32ff3c82855a9f2348bdd0a046b4866673b7829f5e694203",
+        "536e3342f8d61b0df91ccd12df1d9dbd96989ec65eb110781a839238500f0163",
     ),
     "matchSegments": (
         "function SEGCFG.matchSegments()",
@@ -1219,7 +1219,7 @@ def main() -> int:
         if args.decisions or args.all:
             run_decision_characterization(source)
         if args.baseline_only or args.all:
-            print("PASS: V614 protected baseline/acquisition source is unchanged")
+            print("PASS: V614 baseline and untouched acquisition slices remain guarded; R3 arming digest is pinned")
             run_matcher_characterization(source)
             check_protected_files()
             print("PASS: V20/V500/V604 hashes are byte-identical")

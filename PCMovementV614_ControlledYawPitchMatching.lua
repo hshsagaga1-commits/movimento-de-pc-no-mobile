@@ -7,19 +7,17 @@ local player=Players.LocalPlayer
 local UI_NAME="PCMovementV614Panel"
 
 --[[
-    V614 / CONTROLLED YAW-PITCH MATCHING / TEMPORAL-POSE CONTROL R2
+    V614 / CONTROLLED ACQUISITION R3 / TEMPORAL-POSE CONTROL R2
 
     V604-V613 and the post-V613 audit are accepted evidence. No search is
     reopened. This probe resolves only PrimaryPart-vs-Head ambiguity inside:
       A) native Touch, character standing
       B) V604 OnMouseMoved(same real Touch), character standing.
 
-    Acquisition R2 remains unchanged. This revision only records protected,
-    read-only numeric snapshots at the existing CameraModule.Update and active
-    Controller.Update boundaries so the already-observed Head effect can be
-    decomposed into camera projection, root motion, local joints and animation
-    progression. The 60-degree segment unit, pitch limits, matching calipers,
-    ABBA order and bootstrap are unchanged. No camera, character, subject,
+    R3 changes only predeclared segment arming, the fixed per-window sample
+    count, and read-only mobile guidance. The R2 boundary telemetry remains
+    untouched; the 60-degree unit, pitch limits, baseline and controlled
+    matching calipers, ABBA order and bootstrap are unchanged. No camera, character, subject,
     focus, joint, animation, sensitivity or physics value is written. Relay is
     not labeled native PC MouseMovement.
 ]]
@@ -51,8 +49,8 @@ local baseSetRelay=getgenv().PCV604SetRelayEnabled
 local baseDiagnostics=getgenv().PCV604Diagnostics
 local baseReport=getgenv().PCV604Report
 
-getgenv().PCMovementVersion="V614-ControlledYawPitchMatching-TemporalPoseControlR2"
-getgenv().PCInputBridgeMode="v614-controlled-yaw-pitch-matching-temporal-pose-control-r2"
+getgenv().PCMovementVersion="V614-ControlledAcquisitionR3-TemporalPoseControlR2"
+getgenv().PCInputBridgeMode="v614-controlled-acquisition-r3-temporal-pose-control-r2"
 
 local cameras=nil
 local activeController=nil
@@ -97,12 +95,12 @@ local SEGCFG={
     maxNetPitch=2.0,maxAbsPitchFloor=5.0,maxAbsPitchRatio=0.06,minCoherence=0.90,
     matchYawGap=5.0,matchNetPitchGap=1.0,matchAbsPitchGap=2.0,minMatched=12,
     bootstrapBlock=3,bootstrapIterations=1000,
-    phaseEligibleTarget=16,routeEligibleTarget=32,
+    phaseEligibleTarget=80,routeEligibleTarget=160,
     sequence={"A1","B1","B2","A2"}, -- ABBA balances a linear time trend.
     route={A1="touch",A2="touch",B1="relay",B2="relay"},
-    -- The R2 target is fixed before the new run: 16 per window gives 32 per
-    -- route. At the old observed 3/6 compatibility this projects 16 pairs,
-    -- four above the unchanged requirement of 12.
+    -- R3 is fixed before the next run: 80 per window, independent of live
+    -- matching or effect. Old Moderate yield 3/32 projects 15 at 160 per route;
+    -- this is a sampling heuristic, not a success guarantee.
     oldEligibleTouch=48,oldEligibleRelay=6,oldMatchedPairs=3,
     livePotentialPairs=0,lastSegmentEvent="GIRE MAIS",lastSegmentEventAt=0,
     lastSegmentDetail="none",coverageSufficient=false,
@@ -1179,7 +1177,20 @@ segmentConsumer=function(sample)
             SEGCFG.closeCurrentSegment("direction")
         end
     end
-    if not currentSegment then SEGCFG.startSegment(sample) end
+    if not currentSegment then
+        local telemetry=type(sample.temporalPoseTelemetry)=="table" and sample.temporalPoseTelemetry or nil
+        local before=telemetry and telemetry.cameraModuleBefore
+        local ready,reason=SEGCFG.acquisitionR3Eligible(before,SEGCFG.r3Reference)
+        if not ready then
+            SEGCFG.r3RejectedArms[reason]=(SEGCFG.r3RejectedArms[reason] or 0)+1
+            SEGCFG.r3LastArmReason=reason
+            sample.temporalPoseTelemetry=nil -- no selected segment can use this rejected sample
+            return
+        end
+        SEGCFG.r3ArmedSegments+=1
+        SEGCFG.r3LastArmReason="ready"
+        SEGCFG.startSegment(sample)
+    end
     local build=currentSegment
     build.samples[#build.samples+1]=sample
     build.totalSignedYaw+=sample.yawSigned
@@ -1528,6 +1539,10 @@ local function resetCounters()
     }
     SEGCFG.windowStats={}
     SEGCFG.livePotentialPairs=0; SEGCFG.coverageSufficient=false
+    SEGCFG.r3Reference=nil; SEGCFG.r3RejectedArms={}; SEGCFG.r3ArmedSegments=0
+    SEGCFG.r3LastArmReason="reference-pending"; SEGCFG.r3LiveModerate=0
+    SEGCFG.r3LiveCandidateCount=0; SEGCFG.r3LiveUseful=0; SEGCFG.r3LiveRejection="none"
+    SEGCFG.r3CueReadErrors=0; SEGCFG.r3LiveFeatureCounts={touch=0,relay=0}
     SEGCFG.lastSegmentEvent="GIRE MAIS"; SEGCFG.lastSegmentEventAt=0; SEGCFG.lastSegmentDetail="none"
     currentSegment=nil; currentPhase="none"; currentWindow="none"; phaseState="idle"
     stableConsecutive=0; phaseLastPrimaryPosition=nil; expectedPhaseIndex=1; completedWindows={}
@@ -1565,6 +1580,10 @@ local function stopProbe()
     end
     SEGCFG.closeCurrentSegment("probe-stop")
     local controlled=SEGCFG.prepareControlledMatching()
+    if type(SEGCFG.refreshLiveModerate)=="function" then
+        local ok=pcall(SEGCFG.refreshLiveModerate)
+        if not ok then SEGCFG.r3CueReadErrors+=1 end
+    end
     SEGCFG.pruneTelemetryToAnalysisUnion(controlled)
     if not controlled then
         addEvidence("CONTROLLED","preparation-failed errors="..tostring(#(SEGCFG.controlledPreparationErrors or {})))
@@ -1612,6 +1631,7 @@ end
 
 local function beginControlledPhase(window)
     if not probeRunning then return false,"press-INICIAR-first" end
+    if not SEGCFG.r3Reference then return false,"AGUARDE referência neutra antes de A1" end
     local phase=SEGCFG.route[window]
     if phase~="touch" and phase~="relay" then return false,"invalid-phase" end
     local expected=SEGCFG.sequence[expectedPhaseIndex]
@@ -2700,7 +2720,7 @@ getgenv().PCV614Diagnostics=function()
         relay=relayEnabled(),rotate=readRotate(getActiveController()),preferred=UserInputService.PreferredInput,
     }
     local result={
-        version="V614-ControlledYawPitchMatching-TemporalPoseControlR2-EssentialReportR2",
+        version="V614-ControlledAcquisitionR3-TemporalPoseControlR2-EssentialReportR2",
         bridgeMode=getgenv().PCInputBridgeMode,
         probePurpose="controlled-yaw-pitch-segment-matching-plus-read-only-temporal-pose-telemetry",
         probeRunning=probeRunning,
@@ -3282,8 +3302,8 @@ function SEGCFG.buildLegacyReport(includeEvidence,countOnly)
     lines[#lines+1]=""
     lines[#lines+1]="=== V614 REQUIRED AUDIT/SEGMENT DECISION ==="
     lines[#lines+1]="LuauValidation = pass: luau-compile"
-    lines[#lines+1]="LoaderValidation = pass: luau-compile plus cache-busted V614 TemporalPoseControlR2 URL"
-    lines[#lines+1]="StateTransitionValidation = pass: ABBA order, early-advance rejection, freeze at 16 per window, no 17th sample, 32 per route"
+    lines[#lines+1]="LoaderValidation = pass: luau-compile plus cache-busted V614 ControlledAcquisitionR3 URL"
+    lines[#lines+1]="StateTransitionValidation = ABBA order and fixed 80 per window; check window counters and completion flags"
     lines[#lines+1]="ProhibitedWriteAudit = pass: no prohibited property writes or input APIs added"
     lines[#lines+1]="relaySegmentLossPrimaryCause = "..tostring(diagnostics.relaySegmentLossPrimaryCause)
     lines[#lines+1]="relaySegmentLossSecondaryCause = "..tostring(diagnostics.relaySegmentLossSecondaryCause)
@@ -5352,6 +5372,124 @@ end
 -- END V614 ESSENTIAL REPORT PURE HELPERS
 end
 
+-- BEGIN V614 ACQUISITION R3 PURE HELPERS
+-- All limits here describe who may begin a segment. The existing segment
+-- validity gates and baseline/controlled matchers remain unchanged.
+SEGCFG.acquisitionR3={phaseCenter=0.50,referencePhaseHalfWidth=0.02,
+    segmentPhaseHalfWidth=0.045,localTranslationHalfCaliper=0.025,
+    localRotationHalfCaliper=1.25,cameraRotationHalfCaliper=2.5,
+    headDepthHalfCaliper=0.025,nominalDurationLow=0.18,nominalDurationHigh=0.22}
+
+local function acquisitionR3State(snapshot)
+    if type(snapshot)~="table" or type(snapshot.animation)~="table"
+        or type(snapshot.animation.humanoidState)~="string"
+        or type(snapshot.primaryToHead)~="table" or type(snapshot.cameraCFrame)~="table"
+        or type(snapshot.primaryCFrame)~="table" or type(snapshot.headCFrame)~="table"
+        or type(snapshot.viewport)~="table" then return nil,"missing-snapshot" end
+    local track,trackReason=SEGCFG.controlledDominantTrack(snapshot.animation)
+    if not track then return nil,trackReason or "missing-dominant-track" end
+    if type(track.length)~="number" or track.length<=0 or type(track.timePosition)~="number" then
+        return nil,"invalid-track-phase"
+    end
+    local phase=(track.timePosition%track.length)/track.length
+    local cameraToPrimary=SEGCFG.controlledRelativeRotation(snapshot.primaryCFrame,snapshot.cameraCFrame)
+    local depth=SEGCFG.controlledInitialHeadDepth(snapshot.cameraCFrame,snapshot.headCFrame,
+        {fieldOfView=snapshot.fieldOfView,viewport=snapshot.viewport})
+    if not cameraToPrimary or not depth or type(snapshot.fieldOfView)~="number"
+        or type(snapshot.viewport[1])~="number" or type(snapshot.viewport[2])~="number" then
+        return nil,"invalid-camera-geometry"
+    end
+    for index=1,3 do
+        if type(snapshot.primaryToHead[index])~="number" then return nil,"invalid-head-pose" end
+    end
+    return {trackKey=track.key,humanoidState=snapshot.animation.humanoidState,
+        phase=phase,localHead=snapshot.primaryToHead,cameraToPrimary=cameraToPrimary,
+        depth=depth,fieldOfView=snapshot.fieldOfView,viewport=snapshot.viewport},nil
+end
+
+function SEGCFG.acquisitionR3Reference(snapshot)
+    local state,reason=acquisitionR3State(snapshot)
+    if not state then return nil,reason end
+    if math.abs(state.phase-SEGCFG.acquisitionR3.phaseCenter)>
+        SEGCFG.acquisitionR3.referencePhaseHalfWidth+1e-12 then return nil,"reference-phase" end
+    return state,nil
+end
+
+function SEGCFG.acquisitionR3Eligible(snapshot,reference)
+    if type(reference)~="table" then return false,"no-reference" end
+    local state,reason=acquisitionR3State(snapshot)
+    if not state then return false,reason end
+    local config=SEGCFG.acquisitionR3
+    if state.trackKey~=reference.trackKey then return false,"track-identity" end
+    if state.humanoidState~=reference.humanoidState then return false,"humanoid-state" end
+    if state.fieldOfView~=reference.fieldOfView or state.viewport[1]~=reference.viewport[1]
+        or state.viewport[2]~=reference.viewport[2] then return false,"camera-config" end
+    if math.abs(state.phase-config.phaseCenter)>config.segmentPhaseHalfWidth+1e-12 then
+        return false,"animation-phase" end
+    local a,b=state.localHead,reference.localHead
+    local translation=math.sqrt((a[1]-b[1])^2+(a[2]-b[2])^2+(a[3]-b[3])^2)
+    if translation>config.localTranslationHalfCaliper then return false,"local-head-translation" end
+    local headRotation=SEGCFG.controlledRotationGapDeg(a,b)
+    if not headRotation or headRotation>config.localRotationHalfCaliper then
+        return false,"local-head-rotation" end
+    local cameraRotation=SEGCFG.controlledRotationGapDeg(state.cameraToPrimary,reference.cameraToPrimary)
+    if not cameraRotation or cameraRotation>config.cameraRotationHalfCaliper then
+        return false,"camera-primary-rotation" end
+    if math.abs(state.depth-reference.depth)>config.headDepthHalfCaliper then
+        return false,"head-depth" end
+    return true,"ready"
+end
+-- END V614 ACQUISITION R3 PURE HELPERS
+
+function SEGCFG.acquisitionR3LiveSnapshot()
+    local ok,snapshot=pcall(function()
+        local character,primary,head,humanoid=characterSnapshot()
+        local camera=workspace.CurrentCamera
+        if not (character and primary and head and humanoid and camera) then return nil end
+        local cameraCF,primaryCF,headCF=camera.CFrame,primary.CFrame,head.CFrame
+        return {animation=SEGCFG.snapshotAnimationTracks(humanoid),
+            primaryToHead=SEGCFG.cframeComponents(primaryCF:ToObjectSpace(headCF)),
+            cameraCFrame=SEGCFG.cframeComponents(cameraCF),
+            primaryCFrame=SEGCFG.cframeComponents(primaryCF),
+            headCFrame=SEGCFG.cframeComponents(headCF),
+            fieldOfView=camera.FieldOfView,viewport=SEGCFG.vector2Components(camera.ViewportSize)}
+    end)
+    if not ok then SEGCFG.r3CueReadErrors+=1; return nil end
+    return snapshot
+end
+
+function SEGCFG.refreshLiveModerate()
+    local counts=SEGCFG.r3LiveFeatureCounts
+    if not counts or not SEGCFG.r3Reference then return end
+    local touch,relay=segmentStats.touch.eligible,segmentStats.relay.eligible
+    if counts.touch==#touch and counts.relay==#relay then return end
+    local features={touch={},relay={}}
+    for _,route in ipairs({"touch","relay"}) do
+        for _,segment in ipairs(segmentStats[route].eligible) do
+            local ok,feature,reason=pcall(SEGCFG.controlledFeatureFromRawSegment,segment)
+            features[route][#features[route]+1]=ok and type(feature)=="table" and feature
+                or {id=segment.id,route=route,valid=false,invalidReason=tostring(reason or feature)}
+        end
+    end
+    local profile=SEGCFG.controlledProfiles().Moderate
+    local candidates,rejections=SEGCFG.buildControlledCandidates(features.touch,features.relay,profile)
+    SEGCFG.r3LiveModerate=SEGCFG.maximumControlledCardinality(features.touch,features.relay,candidates)
+    SEGCFG.r3LiveCandidateCount=#candidates
+    local useful={}
+    for _,candidate in ipairs(candidates) do
+        useful[candidate.touchId]=true; useful[candidate.relayId]=true
+    end
+    local usefulCount=0
+    for _ in pairs(useful) do usefulCount+=1 end
+    SEGCFG.r3LiveUseful=usefulCount
+    local lastReason,lastCount="none",0
+    for reason,count in pairs(rejections) do
+        if reason~="direction" and count>lastCount then lastReason,lastCount=reason,count end
+    end
+    SEGCFG.r3LiveRejection=lastReason
+    counts.touch=#touch; counts.relay=#relay
+end
+
 function SEGCFG.serializeEssentialModel(model)
     local ok,text=pcall(function() return HttpService:JSONEncode(model) end)
     if not ok then error("V614 essential JSON encode failed: "..tostring(text),0) end
@@ -5367,6 +5505,7 @@ end
 function SEGCFG.buildProductionEssentialBundle()
     local frozen=SEGCFG.getFrozenMatchingResults() or SEGCFG.prepareControlledMatching()
     if type(frozen)~="table" then error("V614 controlled matching results unavailable for Essential R2",0) end
+    if type(SEGCFG.refreshLiveModerate)=="function" then SEGCFG.refreshLiveModerate() end
     local matched=frozen.baseline
     local diagnostics=getgenv().PCV614Diagnostics()
     local model=SEGCFG.buildEssentialModel(frozen,diagnostics)
@@ -5412,6 +5551,16 @@ function SEGCFG.buildProductionEssentialBundle()
         yawMatchQuality=diagnostics.yawMatchQuality,pitchMatchQuality=diagnostics.pitchMatchQuality,
         counterbalancingMethod=diagnostics.counterbalancingMethod,
         profiles=SEGCFG.deepCopyEssential(model.pairSetStats),
+    }
+    model.acquisitionR3={
+        fixedTargetPerWindow=SEGCFG.phaseEligibleTarget,
+        reference=SEGCFG.essentialSafeValue(SEGCFG.r3Reference),
+        readiness=SEGCFG.essentialSafeValue(SEGCFG.acquisitionR3),
+        rejectedArms=SEGCFG.essentialSafeValue(SEGCFG.r3RejectedArms),
+        armedSegments=SEGCFG.r3ArmedSegments,cueReadErrors=SEGCFG.r3CueReadErrors,
+        potentialModeratePairs=SEGCFG.r3LiveModerate,
+        liveModerateCandidateCount=SEGCFG.r3LiveCandidateCount,
+        usefulSegments=SEGCFG.r3LiveUseful,
     }
 
     -- A reads complete runtime telemetry. B reads a JSON round-trip containing
@@ -5536,6 +5685,9 @@ function SEGCFG.buildEssentialReportText(bundle,size)
     lines[#lines+1]="windowB1 = "..essentialJsonValue(model.windows.B1)
     lines[#lines+1]="windowB2 = "..essentialJsonValue(model.windows.B2)
     lines[#lines+1]="windowA2 = "..essentialJsonValue(model.windows.A2)
+    if model.acquisitionR3 then
+        lines[#lines+1]="acquisitionR3 = "..essentialJsonValue(model.acquisitionR3)
+    end
 
     lines[#lines+1]=""
     lines[#lines+1]="=== V614 BASELINE MATCHER (UNCHANGED) ==="
@@ -5768,15 +5920,43 @@ end
 
 refreshLiveStatus=function()
     if not statusLabel then return end
+    local owner=baseSafe()
+    local noTouch=owner.activeCameraTouchIds=="none"
+        and owner.activeJoystickTouchIds=="none" and owner.moveTouchObjectActive==false
+    local cue="AGUARDE"
+    if probeRunning and currentWindow=="none" and not SEGCFG.r3Reference and noTouch then
+        local snapshot=SEGCFG.acquisitionR3LiveSnapshot()
+        local reference=SEGCFG.acquisitionR3Reference(snapshot)
+        if reference then SEGCFG.r3Reference=reference end
+    end
+    if probeRunning and phaseState=="active" and not currentSegment and noTouch then
+        local snapshot=SEGCFG.acquisitionR3LiveSnapshot()
+        local ready,reason=SEGCFG.acquisitionR3Eligible(snapshot,SEGCFG.r3Reference)
+        cue=ready and "GIRE AGORA" or ("AGUARDE • "..tostring(reason))
+    elseif currentSegment and phaseState=="active" then
+        local yaw=currentSegment.totalAbsYaw
+        local first=currentSegment.samples[1]
+        local elapsed=first and (os.clock()-probeStartedAt-first.time) or 0
+        local projected=yaw>5 and elapsed*SEGCFG.targetYaw/yaw or 0
+        if projected>0 and projected<SEGCFG.acquisitionR3.nominalDurationLow then
+            cue="GIRE • RITMO MAIS DEVAGAR"
+        elseif projected>SEGCFG.acquisitionR3.nominalDurationHigh then
+            cue="GIRE • RITMO MAIS RÁPIDO"
+        else cue="GIRE • CONTINUE" end
+    end
+    if probeRunning and SEGCFG.r3Reference and type(SEGCFG.refreshLiveModerate)=="function" then
+        local ok=pcall(SEGCFG.refreshLiveModerate)
+        if not ok then SEGCFG.r3CueReadErrors+=1 end
+    end
     local relayText=relayEnabled() and "ON" or "OFF"
     local stateText=phaseState
     if phaseState=="stabilizing" or phaseState=="restabilizing" then
         local remaining=math.max(0,phaseStabilizeUntil-os.clock())
         stateText=string.format("%s %.1fs • estável %d/%d",phaseState,remaining,stableConsecutive,STABLE_CONSECUTIVE_FRAMES)
     end
-    local pairs=SEGCFG.matchSegments()
-    SEGCFG.livePotentialPairs=#pairs
-    SEGCFG.coverageSufficient=#pairs>=SEGCFG.minMatched
+    -- updateCoverageState refreshes this cache when an eligible segment
+    -- closes. Re-solving baseline on every visual update burdens an iPhone.
+    local baselinePairs=SEGCFG.livePotentialPairs
     local touchEligible,relayEligible=#segmentStats.touch.eligible,#segmentStats.relay.eligible
     local windowStats=SEGCFG.getWindowStats(currentWindow)
     local eligibleThis=windowStats.eligible or 0
@@ -5784,26 +5964,17 @@ refreshLiveStatus=function()
     local segmentPitch=currentSegment and currentSegment.netPitch or 0
     local segmentAbsPitch=currentSegment and currentSegment.totalAbsPitch or 0
     local pitchLimit=math.max(SEGCFG.maxAbsPitchFloor,segmentYaw*SEGCFG.maxAbsPitchRatio)
-    local instruction="GIRE MAIS"
+    local instruction=cue
     if currentWindow=="A2" and phaseState=="complete" then
         instruction=SEGCFG.coverageSufficient and "12 PARES ATINGIDOS • COBERTURA SUFICIENTE"
-            or string.format("FASE COMPLETA • PARES %d/%d",#pairs,SEGCFG.minMatched)
+            or string.format("FASE COMPLETA • PARES %d/%d",baselinePairs,SEGCFG.minMatched)
     elseif phaseState=="complete" then
         instruction="FASE COMPLETA • AVANCE"
     elseif phaseState=="stabilizing" or phaseState=="restabilizing" then
-        instruction="ESPERE ESTABILIZAR"
+        instruction="AGUARDE • ESTABILIZAR"
     elseif phaseState=="active" then
         if math.abs(segmentPitch)>SEGCFG.maxNetPitch or segmentAbsPitch>pitchLimit then
-            instruction="PITCH ALTO • MANTENHA HORIZONTAL"
-        elseif os.clock()-SEGCFG.lastSegmentEventAt<1.25 then
-            instruction=SEGCFG.lastSegmentEvent
-        elseif segmentYaw>=15 then
-            instruction="CONTINUE • MESMA DIREÇÃO"
-        elseif math.abs((windowStats.eligiblePositive or 0)-(windowStats.eligibleNegative or 0))>=2
-            and segmentYaw<1 then
-            instruction="MUDE A DIREÇÃO"
-        elseif currentPhase=="relay" and relayEligible<touchEligible then
-            instruction="COBERTURA RELAY BAIXA • GIRE MAIS"
+            instruction="AGUARDE • PITCH ALTO"
         end
     end
     local exportText="export=aguardando • depois de PARAR toque COPIAR REPORT COMPLETO"
@@ -5820,10 +5991,12 @@ refreshLiveStatus=function()
         end
     end
     statusLabel.Text=string.format(
-        "phase=%s route=%s state=%s relay=%s\ncurrentSegmentYawDeg=%.2f/%.0f pitchNet/Abs=%.2f/%.2f\neligibleThisPhase=%d/%d • eligibleTouch=%d relay=%d\nmatchedPairsAvailable=%d targetPairs=%d\n%s\ncorrErr=%d telemetryErr=%d uiErr=%d\n%s",
+        "phase=%s route=%s state=%s relay=%s\nsegmentYaw=%.1f/%.0f pitchNet/Abs=%.1f/%.1f\nsegmentos=%d/%d • Touch=%d Relay=%d úteis=%d\nModerate potencial=%d/12 • Baseline=%d\n%s • descarte=%s\ncorrErr=%d telemetryErr=%d cueErr=%d\n%s",
         currentWindow,currentPhase,stateText,relayText,segmentYaw,SEGCFG.targetYaw,segmentPitch,segmentAbsPitch,
-        eligibleThis,SEGCFG.phaseEligibleTarget,touchEligible,relayEligible,#pairs,SEGCFG.minMatched,
-        instruction,frameCorrelationErrors,telemetryCaptureErrors,uiRefreshErrors,exportText)
+        eligibleThis,SEGCFG.phaseEligibleTarget,touchEligible,relayEligible,SEGCFG.r3LiveUseful or 0,
+        SEGCFG.r3LiveModerate or 0,baselinePairs,
+        instruction,SEGCFG.r3LiveRejection or SEGCFG.r3LastArmReason or "none",
+        frameCorrelationErrors,telemetryCaptureErrors,SEGCFG.r3CueReadErrors or 0,exportText)
     statusLabel.TextColor3=(phaseState=="active" or phaseState=="complete")
         and Color3.fromRGB(74,222,128) or Color3.fromRGB(250,204,21)
     refreshPhaseButtons()
@@ -5847,7 +6020,7 @@ local function createPanel()
 
     local title=Instance.new("TextLabel")
     title.Size=UDim2.new(1,-48,0,34); title.Position=UDim2.fromOffset(13,7); title.BackgroundTransparency=1
-    title.Text="V614 • TELEMETRIA TEMPORAL"; title.TextColor3=Color3.fromRGB(103,232,249)
+    title.Text="V614 • AQUISIÇÃO CONTROLADA R3"; title.TextColor3=Color3.fromRGB(103,232,249)
     title.TextSize=15; title.Font=Enum.Font.GothamBold; title.TextXAlignment=Enum.TextXAlignment.Left; title.Parent=panel
 
     local collapse=Instance.new("TextButton")
@@ -5864,7 +6037,7 @@ local function createPanel()
     local instructions=Instance.new("TextLabel")
     instructions.LayoutOrder=0; instructions.Size=UDim2.new(1,0,0,92)
     instructions.BackgroundColor3=Color3.fromRGB(18,28,48); instructions.BorderSizePixel=0
-    instructions.Text="INICIAR; depois siga 1→2→3→4 (ABBA).\nParado, sem joystick; espere ACTIVE.\nGire horizontalmente até FASE COMPLETA.\nSiga GIRE MAIS / CONTINUE / PITCH ALTO.\nPARAR → COPIAR REPORT COMPLETO; partes são fallback."
+    instructions.Text="INICIAR; AGUARDE referência; siga A1→B1→B2→A2.\nParado, sem joystick; largue o dedo quando AGUARDE.\nSó gire ao ver GIRE AGORA; siga ritmo sem mudar slider.\nCada fase fecha em 80 segmentos, mesmo com <12 Moderate.\nPARAR → COPIAR REPORT ESSENCIAL COMPLETO."
     instructions.TextColor3=Color3.fromRGB(226,232,240); instructions.TextSize=11
     instructions.TextWrapped=true; instructions.TextXAlignment=Enum.TextXAlignment.Left
     instructions.Font=Enum.Font.Gotham; instructions.Parent=body
@@ -5981,7 +6154,7 @@ local function createPanel()
     uiUpdaterRunning=true
     task.spawn(function()
         while uiUpdaterRunning do
-            task.wait(0.20)
+            task.wait(0.05)
             local ok=pcall(function() if type(refreshLiveStatus)=="function" then refreshLiveStatus() end end)
             if not ok then uiRefreshErrors+=1 end
         end
@@ -6032,5 +6205,5 @@ getgenv().__PCMobileAimCleanup=function()
     getgenv().__PCMobileAimCleanup=nil
 end
 
-addEvidence("READY","V614 TemporalPoseControlR2 ready; Acquisition R2 and controlled matching unchanged; read-only matched telemetry")
-warn("[V614 TemporalPoseControlR2] ready | use mobile panel")
+addEvidence("READY","V614 ControlledAcquisitionR3 ready; acquisition pre-arm and fixed count; controlled matching unchanged")
+warn("[V614 ControlledAcquisitionR3] ready | use mobile panel")

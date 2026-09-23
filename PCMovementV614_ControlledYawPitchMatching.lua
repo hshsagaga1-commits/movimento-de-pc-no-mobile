@@ -7,7 +7,7 @@ local player=Players.LocalPlayer
 local UI_NAME="PCMovementV614Panel"
 
 --[[
-    V614 / CONTROLLED YAW-PITCH MATCHING / TEMPORAL-POSE TELEMETRY R1
+    V614 / CONTROLLED YAW-PITCH MATCHING / TEMPORAL-POSE CONTROL R2
 
     V604-V613 and the post-V613 audit are accepted evidence. No search is
     reopened. This probe resolves only PrimaryPart-vs-Head ambiguity inside:
@@ -51,8 +51,8 @@ local baseSetRelay=getgenv().PCV604SetRelayEnabled
 local baseDiagnostics=getgenv().PCV604Diagnostics
 local baseReport=getgenv().PCV604Report
 
-getgenv().PCMovementVersion="V614-ControlledYawPitchMatching-TemporalPoseTelemetryR1"
-getgenv().PCInputBridgeMode="v614-controlled-yaw-pitch-matching-temporal-pose-telemetry-r1"
+getgenv().PCMovementVersion="V614-ControlledYawPitchMatching-TemporalPoseControlR2"
+getgenv().PCInputBridgeMode="v614-controlled-yaw-pitch-matching-temporal-pose-control-r2"
 
 local cameras=nil
 local activeController=nil
@@ -1533,6 +1533,8 @@ local function resetCounters()
     stableConsecutive=0; phaseLastPrimaryPosition=nil; expectedPhaseIndex=1; completedWindows={}
     uiRefreshErrors=0
     hookRestoreOk=nil; hookRestoreDetail="running"
+    SEGCFG.controlledResults=nil
+    SEGCFG.controlledPreparationErrors={}
 end
 
 local function startProbe()
@@ -1562,7 +1564,11 @@ local function stopProbe()
         return true,"already-stopped"
     end
     SEGCFG.closeCurrentSegment("probe-stop")
-    SEGCFG.pruneTelemetryToMatched()
+    local controlled=SEGCFG.prepareControlledMatching()
+    SEGCFG.pruneTelemetryToAnalysisUnion(controlled)
+    if not controlled then
+        addEvidence("CONTROLLED","preparation-failed errors="..tostring(#(SEGCFG.controlledPreparationErrors or {})))
+    end
     probeDuration=os.clock()-probeStartedAt
     probeRunning=false; currentFrame=nil; currentCalc=nil; currentPhase="none"; currentWindow="none"; phaseState="stopped"
     stateAtStop={relay=relayEnabled(),rotate=readRotate(getActiveController()),preferred=UserInputService.PreferredInput}
@@ -2234,19 +2240,263 @@ function SEGCFG.telemetryCoverage(pairs)
     return result
 end
 
-function SEGCFG.pruneTelemetryToMatched()
-    local keep={}
-    for _,pair in ipairs(SEGCFG.matchSegments()) do
-        keep[pair.touch]=true; keep[pair.relay]=true
+-- BEGIN V614 CONTROLLED PREPARATION
+do
+local function controlledPreparationAudit(stage,code,fields)
+    local entry={stage=stage,code=code}
+    for key,value in pairs(type(fields)=="table" and fields or {}) do entry[key]=value end
+    SEGCFG.controlledPreparationErrors[#SEGCFG.controlledPreparationErrors+1]=entry
+end
+
+local function controlledListShape(value)
+    if type(value)~="table" then return false,"not-table",nil,0 end
+    local count,maximum,invalidKey=0,0,false
+    for key in pairs(value) do
+        if type(key)~="number" or key<1 or key%1~=0 then
+            invalidKey=true
+        else
+            count+=1
+            maximum=math.max(maximum,key)
+        end
     end
-    for _,route in ipairs({"touch","relay"}) do
-        for _,segment in ipairs(segmentStats[route].eligible) do
-            if not keep[segment] then
-                for _,sample in ipairs(segment.samples or {}) do sample.temporalPoseTelemetry=nil end
+    if invalidKey then return false,"invalid-index",nil,count end
+    if maximum~=count then
+        for index=1,maximum do
+            if value[index]==nil then return false,"sparse-list",index,count end
+        end
+        return false,"sparse-list",nil,count
+    end
+    return true,nil,nil,count
+end
+
+local function controlledListAudit(stage,code,field,value,elementOK,fields)
+    local valid,reason,index,count=controlledListShape(value)
+    if valid and elementOK then
+        for itemIndex=1,count do
+            if not elementOK(value[itemIndex]) then
+                valid=false; reason="invalid-element"; index=itemIndex
+                break
+            end
+        end
+    end
+    if valid then return true,count end
+    local details={field=field,reason=reason}
+    if index~=nil then details.index=index end
+    for key,item in pairs(type(fields)=="table" and fields or {}) do details[key]=item end
+    controlledPreparationAudit(stage,code,details)
+    return false,count
+end
+
+local function controlledBaselinePairOK(pair)
+    return type(pair)=="table" and type(pair.touch)=="table" and type(pair.relay)=="table"
+end
+
+local function controlledProfileEdgeOK(edge)
+    return type(edge)=="table" and type(edge.touch)=="table" and type(edge.relay)=="table"
+        and type(edge.touch.segmentRef)=="table" and type(edge.relay.segmentRef)=="table"
+end
+
+local function controlledEligibleSnapshot(route)
+    local output={}
+    local stats=type(segmentStats)=="table" and segmentStats[route] or nil
+    local eligible=type(stats)=="table" and stats.eligible or nil
+    if type(eligible)~="table" then
+        controlledPreparationAudit("snapshot","eligible-not-table",{route=route})
+        return nil
+    end
+    local valid,reason,index,count=controlledListShape(eligible)
+    if not valid then
+        controlledPreparationAudit("snapshot","eligible-list-invalid",{
+            route=route,reason=reason,index=index,
+        })
+        return nil
+    end
+    for itemIndex=1,count do
+        local segment=eligible[itemIndex]
+        output[itemIndex]=segment
+        if type(segment)~="table" then
+            controlledPreparationAudit("snapshot","non-table-segment",{
+                route=route,index=itemIndex,segmentId=tostring(segment),
+            })
+        end
+    end
+    return output
+end
+
+local function controlledExtractSnapshot(route,snapshot,features)
+    for index,segment in ipairs(snapshot) do
+        if type(segment)=="table" then
+            local ok,feature,reason=pcall(SEGCFG.controlledFeatureFromRawSegment,segment)
+            if not ok then
+                controlledPreparationAudit("feature","extractor-error",{
+                    route=route,index=index,segmentId=tostring(segment.id or ""),reason=tostring(feature),
+                })
+            elseif type(feature)~="table" then
+                -- Ordinary missing telemetry rejects candidates, not the frozen
+                -- baseline or export. Preserve one compact record per segment.
+                features[#features+1]={id=segment.id,route=segment.route,window=segment.window,
+                    valid=false,invalidReason=tostring(reason or "unspecified"),segmentRef=segment}
+            else
+                features[#features+1]=feature
             end
         end
     end
 end
+
+function SEGCFG.prepareControlledMatching()
+    if SEGCFG.controlledResults then return SEGCFG.controlledResults end
+    SEGCFG.controlledPreparationErrors={}
+
+    -- Freeze both eligible arrays before invoking the unchanged baseline
+    -- matcher. Feature extraction below consumes only these snapshots.
+    local snapshots={}
+    snapshots.touch=controlledEligibleSnapshot("touch")
+    snapshots.relay=controlledEligibleSnapshot("relay")
+    if not snapshots.touch or not snapshots.relay then return nil end
+    local baselineOK,baseline=pcall(SEGCFG.matchSegments)
+    if not baselineOK then
+        controlledPreparationAudit("baseline","baseline-error",{reason=tostring(baseline)})
+        baseline=nil
+    elseif type(baseline)~="table" then
+        controlledPreparationAudit("baseline","baseline-result-invalid",{reason=type(baseline)})
+        baseline=nil
+    elseif not controlledListAudit("baseline","baseline-result-invalid","pairs",baseline,
+        controlledBaselinePairOK) then
+        baseline=nil
+    end
+    if baseline==nil then return nil end
+
+    local result={baseline=baseline,features={touch={},relay={}},profiles={},snapshotCounts={
+        touch=#snapshots.touch,relay=#snapshots.relay,
+    }}
+    controlledExtractSnapshot("touch",snapshots.touch,result.features.touch)
+    controlledExtractSnapshot("relay",snapshots.relay,result.features.relay)
+    if #SEGCFG.controlledPreparationErrors>0 then return nil end
+
+    local profilesOK,profiles=pcall(SEGCFG.controlledProfiles)
+    if not profilesOK or type(profiles)~="table" then
+        controlledPreparationAudit("profiles",profilesOK and "profiles-result-invalid" or "profiles-error",{
+            reason=tostring(profiles),
+        })
+        return nil
+    end
+    for _,name in ipairs({"Strict","Moderate","Broad"}) do
+        local profile=profiles[name]
+        if type(profile)~="table" then
+            controlledPreparationAudit("profile","profile-missing",{profile=name})
+        else
+            local ok,profileResult=pcall(SEGCFG.runControlledProfile,result.features,profile)
+            if not ok then
+                controlledPreparationAudit("profile","profile-error",{
+                    profile=name,reason=tostring(profileResult),
+                })
+            else
+                local valid=type(profileResult)=="table"
+                if not valid then
+                    controlledPreparationAudit("profile","profile-result-invalid",{
+                        profile=name,field="result",reason="not-table",
+                    })
+                else
+                    local pairsOK=controlledListAudit("profile","profile-result-invalid","pairs",
+                        profileResult.pairs,controlledProfileEdgeOK,{profile=name})
+                    local candidatesOK=controlledListAudit("profile","profile-result-invalid","candidates",
+                        profileResult.candidates,controlledProfileEdgeOK,{profile=name})
+                    local rejectionsOK=type(profileResult.rejectionCounts)=="table"
+                    if not rejectionsOK then
+                        controlledPreparationAudit("profile","profile-result-invalid",{
+                            profile=name,field="rejectionCounts",reason="not-table",
+                        })
+                    end
+                    valid=pairsOK and candidatesOK and rejectionsOK
+                end
+                if valid then result.profiles[name]=profileResult end
+            end
+        end
+    end
+    if #SEGCFG.controlledPreparationErrors>0 then return nil end
+    SEGCFG.controlledResults=result
+    return result
+end
+
+function SEGCFG.getFrozenMatchingResults()
+    return SEGCFG.controlledResults
+end
+
+local function controlledRetentionSet(result)
+    if type(result)~="table" or type(result.baseline)~="table" or type(result.profiles)~="table" then
+        return nil,"invalid-result"
+    end
+    local keep={}
+    local baselineOK,baselineReason,_,baselineCount=controlledListShape(result.baseline)
+    if not baselineOK then return nil,"invalid-baseline-pairs-"..baselineReason end
+    for index=1,baselineCount do
+        local pair=result.baseline[index]
+        if not controlledBaselinePairOK(pair) then return nil,"invalid-baseline-pair" end
+        keep[pair.touch]=true; keep[pair.relay]=true
+    end
+    for _,name in ipairs({"Strict","Moderate","Broad"}) do
+        local profile=result.profiles[name]
+        if type(profile)~="table" or type(profile.pairs)~="table" then return nil,"invalid-"..name.."-profile" end
+        local pairsOK,pairsReason,_,pairCount=controlledListShape(profile.pairs)
+        if not pairsOK then return nil,"invalid-"..name.."-pairs-"..pairsReason end
+        for index=1,pairCount do
+            local pair=profile.pairs[index]
+            if not controlledProfileEdgeOK(pair) then return nil,"invalid-"..name.."-pair" end
+            local touch,relay=pair.touch.segmentRef,pair.relay.segmentRef
+            keep[touch]=true; keep[relay]=true
+        end
+    end
+    return keep,nil
+end
+
+local function controlledRetentionEligibleSnapshots()
+    local snapshots={}
+    for _,route in ipairs({"touch","relay"}) do
+        local stats=type(segmentStats)=="table" and segmentStats[route] or nil
+        local eligible=type(stats)=="table" and stats.eligible or nil
+        if type(eligible)~="table" then return nil,route.."-eligible-not-table" end
+        local valid,reason,_,count=controlledListShape(eligible)
+        if not valid then return nil,route.."-eligible-"..reason end
+        local snapshot={}
+        for index=1,count do
+            local segment=eligible[index]
+            if type(segment)~="table" then return nil,route.."-eligible-invalid-element" end
+            snapshot[index]=segment
+        end
+        snapshots[route]=snapshot
+    end
+    return snapshots,nil
+end
+
+function SEGCFG.pruneTelemetryToAnalysisUnion(result)
+    local keep,reason=controlledRetentionSet(result)
+    local summary={skipped=true,reason=reason,retainedSegments=0,prunedSegments=0,
+        retainedTelemetrySamples=0,prunedTelemetrySamples=0,invalidSegments=0,invalidSamples=0}
+    if not keep then return summary end
+    local eligibleSnapshots,eligibleReason=controlledRetentionEligibleSnapshots()
+    if not eligibleSnapshots then summary.reason=eligibleReason; return summary end
+    summary.skipped=false; summary.reason=nil
+    for _,route in ipairs({"touch","relay"}) do
+        for _,segment in ipairs(eligibleSnapshots[route]) do
+            local retained=keep[segment]==true
+            if retained then summary.retainedSegments+=1 else summary.prunedSegments+=1 end
+            for _,sample in ipairs(type(segment.samples)=="table" and segment.samples or {}) do
+                if type(sample)~="table" then
+                    summary.invalidSamples+=1
+                elseif sample.temporalPoseTelemetry~=nil then
+                    if retained then summary.retainedTelemetrySamples+=1
+                    else
+                        summary.prunedTelemetrySamples+=1
+                        sample.temporalPoseTelemetry=nil
+                    end
+                end
+            end
+        end
+    end
+    return summary
+end
+end
+-- END V614 CONTROLLED PREPARATION
 
 function SEGCFG.updateCoverageState(segment)
     local pairs=SEGCFG.matchSegments()
@@ -2450,7 +2700,7 @@ getgenv().PCV614Diagnostics=function()
         relay=relayEnabled(),rotate=readRotate(getActiveController()),preferred=UserInputService.PreferredInput,
     }
     local result={
-        version="V614-ControlledYawPitchMatching-TemporalPoseTelemetryR1-EssentialReportR1",
+        version="V614-ControlledYawPitchMatching-TemporalPoseControlR2-EssentialReportR2",
         bridgeMode=getgenv().PCInputBridgeMode,
         probePurpose="controlled-yaw-pitch-segment-matching-plus-read-only-temporal-pose-telemetry",
         probeRunning=probeRunning,
@@ -2629,8 +2879,8 @@ getgenv().PCV614Diagnostics=function()
         experimentEligible=decision.experimentEligible,
         v615Justified=decision.v615Justified,
         astra6MaxJustified=decision.astra6MaxJustified,
-        temporalConfoundResolved="unproved: requires fresh TemporalPoseTelemetryR1 runtime and pair-by-pair control",
-        initialPoseConfoundResolved="unproved: requires fresh TemporalPoseTelemetryR1 runtime and overlap assessment",
+        temporalConfoundResolved="unproved: requires fresh TemporalPoseControlR2 runtime and pair-by-pair control",
+        initialPoseConfoundResolved="unproved: requires fresh TemporalPoseControlR2 runtime and overlap assessment",
         rootMotionContribution="unproved pending full PrimaryPart CFrame boundary telemetry",
         jointTransformContribution="unproved pending Neck/Waist/RootJoint Transform telemetry",
         animationProgressContribution="unproved pending active-track state and TimePosition telemetry",
@@ -3032,7 +3282,7 @@ function SEGCFG.buildLegacyReport(includeEvidence,countOnly)
     lines[#lines+1]=""
     lines[#lines+1]="=== V614 REQUIRED AUDIT/SEGMENT DECISION ==="
     lines[#lines+1]="LuauValidation = pass: luau-compile"
-    lines[#lines+1]="LoaderValidation = pass: luau-compile plus cache-busted V614 TemporalPoseTelemetryR1 URL"
+    lines[#lines+1]="LoaderValidation = pass: luau-compile plus cache-busted V614 TemporalPoseControlR2 URL"
     lines[#lines+1]="StateTransitionValidation = pass: ABBA order, early-advance rejection, freeze at 16 per window, no 17th sample, 32 per route"
     lines[#lines+1]="ProhibitedWriteAudit = pass: no prohibited property writes or input APIs added"
     lines[#lines+1]="relaySegmentLossPrimaryCause = "..tostring(diagnostics.relaySegmentLossPrimaryCause)
@@ -3457,14 +3707,47 @@ function SEGCFG.essentialSegment(segment,model,indexes)
     }
 end
 
-function SEGCFG.buildEssentialModel(pairs,diagnostics)
+function SEGCFG.essentialSegmentKey(segment)
+    if type(segment)~="table" then return nil end
+    local route,id,window=segment.route,segment.id,segment.window
+    if type(route)~="string" or route=="" or type(id)~="string" or id==""
+        or type(window)~="string" or window=="" then return nil end
+    return route.."|"..id.."|"..window
+end
+
+function SEGCFG.compactControlledFeature(feature)
+    if type(feature)~="table" then return nil end
+    local output={}
+    for key,value in pairs(feature) do
+        if key~="segmentRef" then output[key]=SEGCFG.essentialSafeValue(value) end
+    end
+    return output
+end
+
+function SEGCFG.essentialPairRecord(pair,touchKey,relayKey,index)
+    local output={index=index,touchKey=touchKey,relayKey=relayKey}
+    for _,field in ipairs({
+        "yawGap","netPitchGap","absPitchGap","durationGap","frameCountGap",
+        "animationAdvanceGap","localHeadTranslationGap","localHeadRotationGap",
+        "animationPhaseGap","animationPhaseFraction","cameraPrimaryRotationGap",
+        "initialHeadDepthGap","distance","integerCost",
+    }) do
+        if pair[field]~=nil then output[field]=pair[field] end
+    end
+    return output
+end
+
+function SEGCFG.buildEssentialModel(frozen,diagnostics)
     local model={
-        schema="V614-EssentialReportR1",run=SEGCFG.essentialSafeValue(diagnostics or {}),
-        constants={camera={},joints={},animations={}},pairs={},analysis={},
+        schema="V614-EssentialReportR2-TemporalPoseControl",
+        run=SEGCFG.essentialSafeValue(diagnostics or {}),
+        constants={camera={},joints={},animations={}},segments={},
+        eligibleFeatures={touch={},relay={}},
+        pairSets={Baseline={},Strict={},Moderate={},Broad={}},pairSetStats={},analysis={},
         omissions={
             unmatchedAcceptedFrames="not consumed by matched-pair analysis, controls, bootstrap, or decisions",
             rejectedSegments="only rejection counters and reasons participate; pose samples do not",
-            unmatchedEligibleSegments="matching counts and ranges are retained; telemetry is not selected",
+            unmatchedEligibleSegments="compact control features retained; telemetry projected only for the selected union",
             repeatedJointConstants="deduplicated in constants.joints and referenced by ID",
             repeatedAnimationMetadata="deduplicated in constants.animations and referenced by ID",
             repeatedCameraConfig="deduplicated in constants.camera and referenced by ID",
@@ -3473,11 +3756,35 @@ function SEGCFG.buildEssentialModel(pairs,diagnostics)
         },parity={},
     }
     local indexes={camera={},joints={},animations={}}
-    for index,pair in ipairs(pairs or {}) do
-        model.pairs[index]={
-            index=index,yawGap=pair.yawGap,netPitchGap=pair.netPitchGap,absPitchGap=pair.absPitchGap,
-            touch=SEGCFG.essentialSegment(pair.touch,model,indexes),
-            relay=SEGCFG.essentialSegment(pair.relay,model,indexes),
+    local sourceFeatures=type(frozen)=="table" and frozen.features or nil
+    for _,route in ipairs({"touch","relay"}) do
+        for index,feature in ipairs(type(sourceFeatures)=="table" and sourceFeatures[route] or {}) do
+            model.eligibleFeatures[route][index]=SEGCFG.compactControlledFeature(feature)
+        end
+    end
+    local function internSegment(segment)
+        local key=SEGCFG.essentialSegmentKey(segment)
+        if not key then error("V614 essential segment has no stable route|id|window key",0) end
+        if model.segments[key]==nil then model.segments[key]=SEGCFG.essentialSegment(segment,model,indexes) end
+        return key
+    end
+    local function addPairSet(name,pairs,controlled)
+        if type(pairs)~="table" then error("V614 essential pair set missing: "..name,0) end
+        for index,pair in ipairs(pairs) do
+            local touch=controlled and type(pair.touch)=="table" and pair.touch.segmentRef or pair.touch
+            local relay=controlled and type(pair.relay)=="table" and pair.relay.segmentRef or pair.relay
+            local touchKey,relayKey=internSegment(touch),internSegment(relay)
+            model.pairSets[name][index]=SEGCFG.essentialPairRecord(pair,touchKey,relayKey,index)
+        end
+    end
+    addPairSet("Baseline",type(frozen)=="table" and frozen.baseline or nil,false)
+    for _,name in ipairs({"Strict","Moderate","Broad"}) do
+        local profile=type(frozen)=="table" and type(frozen.profiles)=="table" and frozen.profiles[name] or nil
+        addPairSet(name,type(profile)=="table" and profile.pairs or nil,true)
+        model.pairSetStats[name]={
+            candidateCount=type(profile.candidates)=="table" and #profile.candidates or nil,
+            rejectionCounts=SEGCFG.essentialSafeValue(profile.rejectionCounts),
+            cardinality=profile.cardinality,totalCost=profile.totalCost,
         }
     end
     return model
@@ -3602,20 +3909,42 @@ function SEGCFG.essentialStoredStepPath(series,field,name)
     return found and SEGCFG.roundEssential(total) or nil
 end
 
+function SEGCFG.decomposeScreenX(series,beforeField,afterField,totalYaw)
+    if type(series)~="table" or type(totalYaw)~="number" or totalYaw~=totalYaw
+        or math.abs(totalYaw)==math.huge or totalYaw<=0 or #series==0 then return nil end
+    local within,boundary=0,0
+    for index,item in ipairs(series) do
+        local before=type(item)=="table" and item[beforeField] or nil
+        local after=type(item)=="table" and item[afterField] or nil
+        if type(before)~="number" or before~=before or math.abs(before)==math.huge
+            or type(after)~="number" or after~=after or math.abs(after)==math.huge then return nil end
+        within+=after-before
+        if index>1 then
+            local previous=type(series[index-1])=="table" and series[index-1][afterField] or nil
+            if type(previous)~="number" or previous~=previous or math.abs(previous)==math.huge then return nil end
+            boundary+=before-previous
+        end
+    end
+    local endpoint=series[#series][afterField]-series[1][beforeField]
+    local residual=endpoint-within-boundary
+    return {
+        endpoint=SEGCFG.roundEssential(endpoint/totalYaw),
+        within=SEGCFG.roundEssential(within/totalYaw),
+        between=SEGCFG.roundEssential(boundary/totalYaw),
+        residual=SEGCFG.roundEssential(residual/totalYaw),
+        maxAbsResidual=SEGCFG.roundEssential(math.abs(residual/totalYaw)),
+    }
+end
+
 function SEGCFG.analyzeEssentialSegment(segment,model)
     local series=segment.series or {}
     local yaw=segment.totalAbsYaw or 0
-    local within,boundary=0,0
-    local valid=yaw>0 and #series>0
-    for index,item in ipairs(series) do
-        if type(item.headBeforeX)~="number" or type(item.headAfterX)~="number" then valid=false
-        else within+=item.headAfterX-item.headBeforeX end
-        if index>1 then
-            local previous=series[index-1]
-            if type(item.headBeforeX)~="number" or type(previous.headAfterX)~="number" then valid=false
-            else boundary+=item.headBeforeX-previous.headAfterX end
-        end
-    end
+    local screenX={
+        head=SEGCFG.decomposeScreenX(series,"headBeforeX","headAfterX",yaw),
+        primary=SEGCFG.decomposeScreenX(series,"primaryBeforeX","primaryAfterX",yaw),
+        subject=SEGCFG.decomposeScreenX(series,"subjectBeforeX","subjectAfterX",yaw),
+    }
+    local valid=screenX.head~=nil and screenX.primary~=nil and screenX.subject~=nil
     local first,last=series[1],series[#series]
     local startBoundary=segment.boundaries and segment.boundaries.start
     local finishBoundary=segment.boundaries and segment.boundaries.finish
@@ -3677,12 +4006,14 @@ function SEGCFG.analyzeEssentialSegment(segment,model)
     local finishPoint=startSnapshot and finishSnapshot
         and SEGCFG.essentialProjectPoint(finishSnapshot.cameraCFrame,finishSnapshot.headCFrame,cameraConfig) or nil
     return {
+        id=segment.id,route=segment.route,window=segment.window,
         valid=valid,duration=segment.duration,frameCount=segment.frameCount,
         headHorizontal=segment.screen and segment.screen.head and segment.screen.head.x or nil,
         primaryHorizontal=segment.screen and segment.screen.primary and segment.screen.primary.x or nil,
         subjectHorizontal=segment.screen and segment.screen.subject and segment.screen.subject.x or nil,
-        headWithinXPerYaw=valid and SEGCFG.roundEssential(within/yaw) or nil,
-        headBoundaryXPerYaw=valid and SEGCFG.roundEssential(boundary/yaw) or nil,
+        screenX=screenX,
+        headWithinXPerYaw=screenX.head and screenX.head.within or nil,
+        headBoundaryXPerYaw=screenX.head and screenX.head.between or nil,
         rootTranslation=SEGCFG.essentialDistance(startSnapshot and startSnapshot.primaryCFrame,finishSnapshot and finishSnapshot.primaryCFrame),
         rootRotationDeg=SEGCFG.essentialRotationDegrees(startSnapshot and startSnapshot.primaryCFrame,finishSnapshot and finishSnapshot.primaryCFrame),
         rootPathTranslation=SEGCFG.essentialStoredStepPath(series,"rootStep")
@@ -3772,18 +4103,47 @@ function SEGCFG.essentialFirstAnimationAdvance(segmentAnalysis)
 end
 
 function SEGCFG.aggregateEssentialAnalyses(pairAnalyses)
-    local result={pairs={},aggregates={touch={},relay={}},bootstrap={},decisions={}}
+    local result={pairCount=#(pairAnalyses or {}),pairs={},aggregates={touch={},relay={}},
+        gapDistributions={},horizontal={},bootstrap={},decisions={}}
     local routeValues={touch={root={},head={},joint={},animation={},duration={},frames={}},
         relay={root={},head={},joint={},animation={},duration={},frames={}}}
     local differences={head={},primary={},subject={}}
+    local horizontal={head={touch={},relay={}},primary={touch={},relay={}},subject={touch={},relay={}}}
+    local headDecomposition={endpoint={},within={},between={}}
+    local initialPoseValues={cameraRotationGapDeg={},localHeadTranslationGap={},animationTimeGap={}}
+    local gapFields={
+        "yawGap","netPitchGap","absPitchGap","durationGap","frameCountGap",
+        "animationAdvanceGap","localHeadTranslationGap","localHeadRotationGap",
+        "animationPhaseGap","animationPhaseFraction","cameraPrimaryRotationGap",
+        "initialHeadDepthGap","distance","integerCost",
+    }
+    local gapValues={}
+    for _,field in ipairs(gapFields) do gapValues[field]={} end
     for index,pair in ipairs(pairAnalyses or {}) do
         local touch,relay=pair.touch,pair.relay
-        result.pairs[index]={index=index,yawGap=pair.yawGap,netPitchGap=pair.netPitchGap,
-            absPitchGap=pair.absPitchGap,touch=touch,relay=relay,
+        local pairResult={index=index,touch=touch,relay=relay,
             initial={cameraRotationGapDeg=SEGCFG.essentialRotationDegrees(touch.initialCameraCFrame,relay.initialCameraCFrame),
                 localHeadTranslationGap=SEGCFG.essentialDistance(touch.initialLocalHead,relay.initialLocalHead),
                 animationTimeGap=type(touch.initialAnimationTime)=="number" and type(relay.initialAnimationTime)=="number"
                     and SEGCFG.roundEssential(math.abs(relay.initialAnimationTime-touch.initialAnimationTime)) or nil}}
+        for _,field in ipairs({"cameraRotationGapDeg","localHeadTranslationGap","animationTimeGap"}) do
+            local value=pairResult.initial[field]
+            if type(value)=="number" then
+                initialPoseValues[field][#initialPoseValues[field]+1]=value
+            end
+        end
+        for _,field in ipairs({
+            "yawGap","netPitchGap","absPitchGap","durationGap","frameCountGap",
+            "animationAdvanceGap","localHeadTranslationGap","localHeadRotationGap",
+            "animationPhaseGap","animationPhaseFraction","cameraPrimaryRotationGap",
+            "initialHeadDepthGap","distance","integerCost",
+        }) do
+            if pair[field]~=nil then
+                pairResult[field]=pair[field]
+                gapValues[field][#gapValues[field]+1]=pair[field]
+            end
+        end
+        result.pairs[index]=pairResult
         for route,analysis in pairs({touch=touch,relay=relay}) do
             local values=routeValues[route]
             if type(analysis.rootTranslation)=="number" then values.root[#values.root+1]=analysis.rootTranslation end
@@ -3797,7 +4157,18 @@ function SEGCFG.aggregateEssentialAnalyses(pairAnalyses)
         end
         for key,field in pairs({head="headHorizontal",primary="primaryHorizontal",subject="subjectHorizontal"}) do
             if type(touch[field])=="number" and type(relay[field])=="number" then
+                horizontal[key].touch[#horizontal[key].touch+1]=touch[field]
+                horizontal[key].relay[#horizontal[key].relay+1]=relay[field]
                 differences[key][#differences[key]+1]=SEGCFG.roundEssential(relay[field]-touch[field])
+            end
+        end
+        local touchHead=touch.screenX and touch.screenX.head
+        local relayHead=relay.screenX and relay.screenX.head
+        for _,component in ipairs({"endpoint","within","between"}) do
+            if type(touchHead)=="table" and type(relayHead)=="table"
+                and type(touchHead[component])=="number" and type(relayHead[component])=="number" then
+                headDecomposition[component][#headDecomposition[component]+1]=
+                    SEGCFG.roundEssential(relayHead[component]-touchHead[component])
             end
         end
     end
@@ -3812,9 +4183,28 @@ function SEGCFG.aggregateEssentialAnalyses(pairAnalyses)
             frameCount=SEGCFG.essentialDistribution(values.frames),
         }
     end
+    for _,field in ipairs(gapFields) do
+        result.gapDistributions[field]=SEGCFG.essentialDistribution(gapValues[field])
+    end
+    result.initialPoseDistributions={}
+    for _,field in ipairs({"cameraRotationGapDeg","localHeadTranslationGap","animationTimeGap"}) do
+        result.initialPoseDistributions[field]=SEGCFG.essentialDistribution(initialPoseValues[field])
+    end
+    for _,key in ipairs({"head","primary","subject"}) do
+        result.horizontal[key]={
+            touch=SEGCFG.essentialDistribution(horizontal[key].touch),
+            relay=SEGCFG.essentialDistribution(horizontal[key].relay),
+            pairedEffect=SEGCFG.essentialMovingBlock(differences[key]),
+        }
+    end
     result.bootstrap.headHorizontal=SEGCFG.essentialMovingBlock(differences.head)
     result.bootstrap.primaryHorizontal=SEGCFG.essentialMovingBlock(differences.primary)
     result.bootstrap.subjectHorizontal=SEGCFG.essentialMovingBlock(differences.subject)
+    result.bootstrap.headDecomposition={
+        endpoint=SEGCFG.essentialMovingBlock(headDecomposition.endpoint),
+        within=SEGCFG.essentialMovingBlock(headDecomposition.within),
+        between=SEGCFG.essentialMovingBlock(headDecomposition.between),
+    }
     result.method={name="paired moving-block bootstrap over time-ordered matched non-overlapping segment pairs",
         unit="matched segment pair",blockSize=math.max(1,math.min(#(pairAnalyses or {}),tonumber(SEGCFG.bootstrapBlock) or 3)),
         iterations=tonumber(SEGCFG.bootstrapIterations) or 2000,
@@ -3835,14 +4225,98 @@ function SEGCFG.aggregateEssentialAnalyses(pairAnalyses)
     return result
 end
 
-function SEGCFG.analyzeEssentialModel(model)
-    local analyses={}
-    for index,pair in ipairs(model.pairs or {}) do
-        analyses[index]={yawGap=pair.yawGap,netPitchGap=pair.netPitchGap,absPitchGap=pair.absPitchGap,
-            touch=SEGCFG.analyzeEssentialSegment(pair.touch,model),
-            relay=SEGCFG.analyzeEssentialSegment(pair.relay,model)}
+function SEGCFG.controlledDecision(profileAnalyses,requiredPairs)
+    local source=type(profileAnalyses)=="table" and profileAnalyses or {}
+    local profiles=type(source.profiles)=="table" and source.profiles or source
+    local parity=type(source.parity)=="table" and source.parity or {}
+    local moderate=type(profiles.Moderate)=="table" and profiles.Moderate or {}
+    local pairCount=moderate.pairCount
+    local headBootstrap=type(moderate.bootstrap)=="table" and moderate.bootstrap.headHorizontal or nil
+    local minimum=type(requiredPairs)=="number" and requiredPairs or 12
+    local validOverlap=parity.equal==true and type(pairCount)=="number" and pairCount%1==0 and pairCount>=minimum
+        and type(headBootstrap)=="table" and type(headBootstrap.excludesZero)=="boolean"
+        and type(headBootstrap.n)=="number" and headBootstrap.n==pairCount
+    local decision={
+        primaryControlledProfile="Moderate",
+        strictAndBroadRole="sensitivity checks only; not alternative primary results",
+        moderatePairCount=type(pairCount)=="number" and pairCount or 0,
+        requiredControlledPairs=minimum,
+        fullVersusEssentialParity=parity.equal==true,
+        temporalConfoundResolved="unproved: insufficient controlled overlap",
+        initialPoseConfoundResolved="unproved: insufficient controlled overlap",
+        headHorizontalEffectAfterTemporalControl="unproved",
+        firstConcreteGeometricDivergence="unproved: controlled persistence not established",
+        causalMechanismProved=false,
+        implementationTargetIdentified=false,
+        v615Justified=false,
+        astra6MaxJustified=false,
+        pcEquivalenceClaimAllowed=false,
+        qualitativeOnlyEmergencyModeClue="qualitative-only: reported emergency mode looked closer to PC; excluded from features, gates, cost, matching, bootstrap, thresholds, and decision",
+    }
+    if not validOverlap then return decision end
+    decision.temporalConfoundResolved=true
+    decision.initialPoseConfoundResolved=true
+    if not headBootstrap.excludesZero then
+        decision.headHorizontalEffectAfterTemporalControl="not-supported"
+        decision.firstConcreteGeometricDivergence="not evaluated: controlled Head effect not persistent"
+        return decision
     end
-    return SEGCFG.aggregateEssentialAnalyses(analyses)
+    decision.headHorizontalEffectAfterTemporalControl="persists-under-fixed-controls"
+    decision.firstConcreteGeometricDivergence=
+        "unproved: persistent endpoint effect not isolated by decomposition"
+    local decomposition=type(moderate.bootstrap.headDecomposition)=="table"
+        and moderate.bootstrap.headDecomposition or {}
+    for _,component in ipairs({
+        {key="endpoint",label="Head endpoint"},
+        {key="within",label="Head within-update"},
+        {key="between",label="Head between-frame"},
+    }) do
+        local interval=decomposition[component.key]
+        if type(interval)=="table" and interval.excludesZero==true
+            and type(interval.n)=="number" and interval.n==pairCount then
+            decision.firstConcreteGeometricDivergence=component.label
+            break
+        end
+    end
+    return decision
+end
+
+function SEGCFG.resolveAndAnalyzePairSet(model,name)
+    local analyses={}
+    local pairSet=type(model)=="table" and type(model.pairSets)=="table" and model.pairSets[name] or nil
+    local segments=type(model)=="table" and model.segments or nil
+    if type(pairSet)~="table" or type(segments)~="table" then return analyses end
+    for index,pair in ipairs(pairSet) do
+        local touch=type(pair)=="table" and segments[pair.touchKey] or nil
+        local relay=type(pair)=="table" and segments[pair.relayKey] or nil
+        local analysis={touch={},relay={}}
+        if type(pair)=="table" then
+            for _,field in ipairs({
+                "yawGap","netPitchGap","absPitchGap","durationGap","frameCountGap",
+                "animationAdvanceGap","localHeadTranslationGap","localHeadRotationGap",
+                "animationPhaseGap","animationPhaseFraction","cameraPrimaryRotationGap",
+                "initialHeadDepthGap","distance","integerCost",
+            }) do
+                if pair[field]~=nil then analysis[field]=pair[field] end
+            end
+        end
+        if type(touch)=="table" then analysis.touch=SEGCFG.analyzeEssentialSegment(touch,model) end
+        if type(relay)=="table" then analysis.relay=SEGCFG.analyzeEssentialSegment(relay,model) end
+        analyses[index]=analysis
+    end
+    return analyses
+end
+
+function SEGCFG.analyzeEssentialPairSet(model,name)
+    return SEGCFG.aggregateEssentialAnalyses(SEGCFG.resolveAndAnalyzePairSet(model,name))
+end
+
+function SEGCFG.analyzeEssentialModel(model)
+    local output={profiles={}}
+    for _,name in ipairs({"Baseline","Strict","Moderate","Broad"}) do
+        output.profiles[name]=SEGCFG.analyzeEssentialPairSet(model,name)
+    end
+    return output
 end
 
 function SEGCFG.rawSnapshotForAnalysis(snapshot)
@@ -3910,6 +4384,7 @@ function SEGCFG.analyzeRawSegment(segment)
     local pseudoModel={constants={camera={{fieldOfView=firstSnapshot and firstSnapshot.fieldOfView,
         viewport=SEGCFG.essentialArray(firstSnapshot and firstSnapshot.viewport)}}}}
     local pseudoSegment={
+        id=segment.id,route=segment.route,window=segment.window,
         duration=segment.duration,frameCount=segment.frameCount,totalAbsYaw=segment.totalAbsYaw,
         screen={head=SEGCFG.essentialMetric(segment.head),primary=SEGCFG.essentialMetric(segment.primary),
             subject=SEGCFG.essentialMetric(segment.subject)},
@@ -3918,13 +4393,575 @@ function SEGCFG.analyzeRawSegment(segment)
     return SEGCFG.analyzeEssentialSegment(pseudoSegment,pseudoModel)
 end
 
-function SEGCFG.analyzeFullMatchedPairs(matchedPairs)
+-- Fixed temporal/pose candidate gates are deliberately separate from the
+-- baseline matcher.  They only consume the fail-closed feature tables above
+-- and the predeclared profile supplied by controlledProfiles().
+local function controlledCandidateNumber(value)
+    return type(value)=="number" and value==value and math.abs(value)<math.huge
+end
+
+local function controlledCandidateProfile(profile)
+    if type(profile)~="table" then return nil,"missing-profile" end
+    local fields={"yawGap","netPitchGap","absPitchGap","speedGap","weightGap",
+        "durationGap","frameCountGap","animationAdvanceGap","localHeadTranslationGap",
+        "localHeadRotationGap","animationPhaseFraction","cameraPrimaryRotationGap","initialHeadDepthGap"}
+    for _,field in ipairs(fields) do
+        if not controlledCandidateNumber(profile[field]) or profile[field]<=0 then
+            return nil,"missing-profile-"..field
+        end
+    end
+    return profile,nil
+end
+
+local function controlledCandidateTrack(feature)
+    local track=type(feature)=="table" and feature.dominantTrack or nil
+    if type(track)~="table" then return nil,"missing-dominantTrack" end
+    if type(track.key)~="string" or track.key=="" then return nil,"missing-track-key" end
+    if not controlledCandidateNumber(track.length) or track.length<=0 then return nil,"missing-track-length" end
+    if type(track.looped)~="boolean" then return nil,"missing-track-looped" end
+    if not controlledCandidateNumber(track.timePosition) then return nil,"missing-track-timePosition" end
+    if not controlledCandidateNumber(track.speed) then return nil,"missing-track-speed" end
+    if not controlledCandidateNumber(track.weightCurrent) then return nil,"missing-track-weightCurrent" end
+    return track,nil
+end
+
+local function controlledCandidatePairNumbers(touch,relay,fields)
+    for _,field in ipairs(fields) do
+        if not controlledCandidateNumber(touch[field]) or not controlledCandidateNumber(relay[field]) then
+            return nil,"missing-"..field
+        end
+    end
+    return true,nil
+end
+
+local function controlledCandidateGap(value)
+    return SEGCFG.roundEssential(value)
+end
+
+function SEGCFG.controlledIntegerCost(gaps,profile)
+    local valid=controlledCandidateProfile(profile)
+    if not valid or type(gaps)~="table" then return nil,nil end
+    local fields={"yawGap","netPitchGap","absPitchGap","durationGap","frameCountGap",
+        "animationAdvanceGap","localHeadTranslationGap","localHeadRotationGap",
+        "animationPhaseFraction","cameraPrimaryRotationGap","initialHeadDepthGap"}
+    local sumSquared=0
+    for _,field in ipairs(fields) do
+        local gap,caliper=gaps[field],profile[field]
+        if not controlledCandidateNumber(gap) or gap<0 then return nil,nil end
+        local ratio=math.floor((gap/caliper)*1000000+0.5)/1000000
+        sumSquared+=ratio*ratio
+    end
+    local integerCost=math.floor(sumSquared*1000000000000+0.5)
+    return integerCost,math.sqrt(sumSquared)
+end
+
+function SEGCFG.controlledCandidate(touchFeature,relayFeature,profile)
+    if type(touchFeature)~="table" then return nil,"missing-touchFeature" end
+    if type(relayFeature)~="table" then return nil,"missing-relayFeature" end
+    for _,feature in ipairs({touchFeature,relayFeature}) do
+        if feature.valid==false then return nil,feature.invalidReason or "invalid controlled feature" end
+    end
+    local validProfile,profileReason=controlledCandidateProfile(profile)
+    if not validProfile then return nil,profileReason end
+
+    -- Exact initial camera configuration is a categorical control, before
+    -- any numeric caliper is considered.
+    local configFields={"fieldOfView"}
+    local configOK,configReason=controlledCandidatePairNumbers(touchFeature,relayFeature,configFields)
+    if not configOK then return nil,configReason end
+    local touchViewport,relayViewport=touchFeature.viewport,relayFeature.viewport
+    if type(touchViewport)~="table" or type(relayViewport)~="table"
+        or not controlledCandidateNumber(touchViewport[1]) or not controlledCandidateNumber(touchViewport[2])
+        or not controlledCandidateNumber(relayViewport[1]) or not controlledCandidateNumber(relayViewport[2]) then
+        return nil,"missing-viewport"
+    end
+    if touchFeature.fieldOfView~=relayFeature.fieldOfView or touchViewport[1]~=relayViewport[1]
+        or touchViewport[2]~=relayViewport[2] then return nil,"camera-config" end
+
+    local touchTrack,touchTrackReason=controlledCandidateTrack(touchFeature)
+    if not touchTrack then return nil,touchTrackReason end
+    local relayTrack,relayTrackReason=controlledCandidateTrack(relayFeature)
+    if not relayTrack then return nil,relayTrackReason end
+    if touchTrack.key~=relayTrack.key then return nil,"animation-identity" end
+    if type(touchFeature.humanoidState)~="string" or touchFeature.humanoidState==""
+        or type(relayFeature.humanoidState)~="string" or relayFeature.humanoidState=="" then
+        return nil,"missing-humanoidState"
+    end
+    if touchFeature.humanoidState~=relayFeature.humanoidState then return nil,"humanoid-state" end
+    local speedGap=controlledCandidateGap(math.abs(touchTrack.speed-relayTrack.speed))
+    if speedGap>validProfile.speedGap then return nil,"speed-gap" end
+    local weightGap=controlledCandidateGap(math.abs(touchTrack.weightCurrent-relayTrack.weightCurrent))
+    if weightGap>validProfile.weightGap then return nil,"weight-gap" end
+
+    local numericFields={"totalSignedYaw","totalAbsYaw","netPitch","totalAbsPitch","duration",
+        "frameCount","animationAdvance","initialHeadDepth"}
+    local numbersOK,numbersReason=controlledCandidatePairNumbers(touchFeature,relayFeature,numericFields)
+    if not numbersOK then return nil,numbersReason end
+    if not SEGCFG.controlledRotationGapDeg(touchFeature.initialLocalHead,touchFeature.initialLocalHead)
+        or not SEGCFG.controlledRotationGapDeg(relayFeature.initialLocalHead,relayFeature.initialLocalHead) then
+        return nil,"missing-initialLocalHead"
+    end
+    if not SEGCFG.controlledRotationGapDeg(touchFeature.cameraToPrimary,touchFeature.cameraToPrimary)
+        or not SEGCFG.controlledRotationGapDeg(relayFeature.cameraToPrimary,relayFeature.cameraToPrimary) then
+        return nil,"missing-cameraToPrimary"
+    end
+
+    local localHeadTranslationGap=controlledCandidateGap(math.sqrt((touchFeature.initialLocalHead[1]-relayFeature.initialLocalHead[1])^2
+        +(touchFeature.initialLocalHead[2]-relayFeature.initialLocalHead[2])^2
+        +(touchFeature.initialLocalHead[3]-relayFeature.initialLocalHead[3])^2))
+    local localHeadRotationGap=SEGCFG.controlledRotationGapDeg(touchFeature.initialLocalHead,relayFeature.initialLocalHead)
+    local cameraPrimaryRotationGap=SEGCFG.controlledRotationGapDeg(touchFeature.cameraToPrimary,relayFeature.cameraToPrimary)
+    local phaseGap=SEGCFG.controlledCircularPhaseGap(touchTrack.timePosition,relayTrack.timePosition,
+        touchTrack.length,touchTrack.looped)
+    if not controlledCandidateNumber(localHeadRotationGap) or not controlledCandidateNumber(cameraPrimaryRotationGap)
+        or not controlledCandidateNumber(phaseGap) then return nil,"missing-derived-gap" end
+    local gaps={
+        yawGap=controlledCandidateGap(math.abs(touchFeature.totalAbsYaw-relayFeature.totalAbsYaw)),
+        netPitchGap=controlledCandidateGap(math.abs(touchFeature.netPitch-relayFeature.netPitch)),
+        absPitchGap=controlledCandidateGap(math.abs(touchFeature.totalAbsPitch-relayFeature.totalAbsPitch)),
+        durationGap=controlledCandidateGap(math.abs(touchFeature.duration-relayFeature.duration)),
+        frameCountGap=controlledCandidateGap(math.abs(touchFeature.frameCount-relayFeature.frameCount)),
+        animationAdvanceGap=controlledCandidateGap(math.abs(touchFeature.animationAdvance-relayFeature.animationAdvance)),
+        localHeadTranslationGap=localHeadTranslationGap,localHeadRotationGap=localHeadRotationGap,
+        animationPhaseGap=phaseGap,
+        animationPhaseFraction=controlledCandidateGap(phaseGap/touchTrack.length),
+        cameraPrimaryRotationGap=cameraPrimaryRotationGap,
+        initialHeadDepthGap=controlledCandidateGap(math.abs(touchFeature.initialHeadDepth-relayFeature.initialHeadDepth)),
+    }
+    local gates={
+        {"direction",function() return touchFeature.totalSignedYaw*relayFeature.totalSignedYaw>0 end},
+        {"yaw-gap",function() return gaps.yawGap<=validProfile.yawGap end},
+        {"net-pitch-gap",function() return gaps.netPitchGap<=validProfile.netPitchGap end},
+        {"abs-pitch-gap",function() return gaps.absPitchGap<=validProfile.absPitchGap end},
+        {"duration-gap",function() return gaps.durationGap<=validProfile.durationGap end},
+        {"frame-count-gap",function() return gaps.frameCountGap<=validProfile.frameCountGap end},
+        {"animation-advance-gap",function() return gaps.animationAdvanceGap<=validProfile.animationAdvanceGap end},
+        {"local-head-translation-gap",function() return gaps.localHeadTranslationGap<=validProfile.localHeadTranslationGap end},
+        {"local-head-rotation-gap",function() return gaps.localHeadRotationGap<=validProfile.localHeadRotationGap end},
+        {"animation-phase-gap",function() return gaps.animationPhaseFraction<=validProfile.animationPhaseFraction end},
+        {"camera-primary-rotation-gap",function() return gaps.cameraPrimaryRotationGap<=validProfile.cameraPrimaryRotationGap end},
+        {"initial-head-depth-gap",function() return gaps.initialHeadDepthGap<=validProfile.initialHeadDepthGap end},
+    }
+    for _,gate in ipairs(gates) do if not gate[2]() then return nil,gate[1] end end
+    local integerCost,distance=SEGCFG.controlledIntegerCost(gaps,validProfile)
+    if integerCost==nil then return nil,"missing-cost-gap" end
+    local candidate={touch=touchFeature,relay=relayFeature,touchId=touchFeature.id,relayId=relayFeature.id,
+        gaps=gaps,integerCost=integerCost,distance=distance}
+    for field,value in pairs(gaps) do candidate[field]=value end
+    return candidate,nil
+end
+
+function SEGCFG.buildControlledCandidates(touchFeatures,relayFeatures,profile)
+    local candidates,rejectionCounts={},{}
+    if type(touchFeatures)~="table" or type(relayFeatures)~="table" then return candidates,rejectionCounts end
+    for _,touchFeature in ipairs(touchFeatures) do
+        for _,relayFeature in ipairs(relayFeatures) do
+            local candidate,reason=SEGCFG.controlledCandidate(touchFeature,relayFeature,profile)
+            if candidate then candidates[#candidates+1]=candidate
+            else rejectionCounts[reason]=(rejectionCounts[reason] or 0)+1 end
+        end
+    end
+    return candidates,rejectionCounts
+end
+
+-- Controlled matching is optimized in three explicit stages: maximum
+-- cardinality, minimum integer scientific cost, then canonical pair-key
+-- selection.  Stable IDs are never folded into the scientific cost.
+local function controlledSolverFeatureIndex(features)
+    local ids,index={},{}
+    if type(features)~="table" then return ids,index end
+    for _,feature in ipairs(features) do
+        local id=type(feature)=="table" and feature.id or nil
+        if type(id)=="string" and id~="" and not index[id] then
+            index[id]=feature; ids[#ids+1]=id
+        end
+    end
+    table.sort(ids)
+    return ids,index
+end
+
+local function controlledSolverCandidateIds(candidate)
+    if type(candidate)~="table" then return nil,nil end
+    local touchId=candidate.touchId
+    local relayId=candidate.relayId
+    if type(touchId)~="string" and type(candidate.touch)=="table" then touchId=candidate.touch.id end
+    if type(relayId)~="string" and type(candidate.relay)=="table" then relayId=candidate.relay.id end
+    if type(touchId)~="string" or touchId=="" or type(relayId)~="string" or relayId=="" then
+        return nil,nil
+    end
+    return touchId,relayId
+end
+
+local function controlledSolverEdgeKey(touchId,relayId)
+    return touchId.."|"..relayId
+end
+
+local function controlledSolverEdges(touchFeatures,relayFeatures,candidates,requireCost)
+    local _,touchIndex=controlledSolverFeatureIndex(touchFeatures)
+    local _,relayIndex=controlledSolverFeatureIndex(relayFeatures)
+    local edges={}
+    if type(candidates)~="table" then return edges end
+    for _,candidate in ipairs(candidates) do
+        local touchId,relayId=controlledSolverCandidateIds(candidate)
+        local cost=type(candidate)=="table" and candidate.integerCost or nil
+        local costOK=controlledCandidateNumber(cost) and cost>=0 and cost%1==0
+        if touchId and touchIndex[touchId] and relayIndex[relayId] and (not requireCost or costOK) then
+            edges[#edges+1]={candidate=candidate,touchId=touchId,relayId=relayId,
+                key=controlledSolverEdgeKey(touchId,relayId),integerCost=costOK and cost or 0}
+        end
+    end
+    table.sort(edges,function(a,b)
+        if a.touchId~=b.touchId then return a.touchId<b.touchId end
+        if a.relayId~=b.relayId then return a.relayId<b.relayId end
+        return a.integerCost<b.integerCost
+    end)
+    local unique,last={},nil
+    for _,edge in ipairs(edges) do
+        if edge.key~=last then unique[#unique+1]=edge; last=edge.key end
+    end
+    return unique
+end
+
+function SEGCFG.maximumControlledCardinality(touchFeatures,relayFeatures,candidates)
+    local touchIds=controlledSolverFeatureIndex(touchFeatures)
+    local edges=controlledSolverEdges(touchFeatures,relayFeatures,candidates,false)
+    local adjacency={}
+    for _,touchId in ipairs(touchIds) do adjacency[touchId]={} end
+    for _,edge in ipairs(edges) do
+        local list=adjacency[edge.touchId]
+        if list then list[#list+1]=edge.relayId end
+    end
+    local matchedTouchByRelay={}
+    local function augment(touchId,seenRelay)
+        for _,relayId in ipairs(adjacency[touchId] or {}) do
+            if not seenRelay[relayId] then
+                seenRelay[relayId]=true
+                local previous=matchedTouchByRelay[relayId]
+                if not previous or augment(previous,seenRelay) then
+                    matchedTouchByRelay[relayId]=touchId
+                    return true
+                end
+            end
+        end
+        return false
+    end
+    local cardinality=0
+    for _,touchId in ipairs(touchIds) do
+        if augment(touchId,{}) then cardinality+=1 end
+    end
+    return cardinality
+end
+
+local function controlledSolverPathContains(path,node)
+    for _,value in ipairs(path or {}) do if value==node then return true end end
+    return false
+end
+
+local function controlledSolverCopyPath(path,nextNode)
+    local copy={}
+    for index,value in ipairs(path or {}) do copy[index]=value end
+    copy[#copy+1]=nextNode
+    return copy
+end
+
+function SEGCFG.minimumControlledCost(touchFeatures,relayFeatures,candidates,requiredCardinality,locked,excluded)
+    if not controlledCandidateNumber(requiredCardinality) or requiredCardinality<0
+        or requiredCardinality%1~=0 then return nil end
+    local touchIds,touchIndex=controlledSolverFeatureIndex(touchFeatures)
+    local relayIds,relayIndex=controlledSolverFeatureIndex(relayFeatures)
+    local edges=controlledSolverEdges(touchFeatures,relayFeatures,candidates,true)
+    local edgeByKey={}
+    for _,edge in ipairs(edges) do edgeByKey[edge.key]=edge end
+
+    local selected,usedTouch,usedRelay={}, {}, {}
+    local lockedCost=0
+    for _,candidate in ipairs(type(locked)=="table" and locked or {}) do
+        local touchId,relayId=controlledSolverCandidateIds(candidate)
+        local key=touchId and relayId and controlledSolverEdgeKey(touchId,relayId) or nil
+        local edge=key and edgeByKey[key] or nil
+        if not edge or usedTouch[touchId] or usedRelay[relayId]
+            or (type(excluded)=="table" and excluded[key]) then return nil end
+        usedTouch[touchId]=true; usedRelay[relayId]=true
+        lockedCost+=edge.integerCost; selected[#selected+1]=edge.candidate
+    end
+    if #selected>requiredCardinality then return nil end
+    local remaining=requiredCardinality-#selected
+    if remaining==0 then
+        table.sort(selected,function(a,b)
+            local at,ar=controlledSolverCandidateIds(a)
+            local bt,br=controlledSolverCandidateIds(b)
+            return at~=bt and at<bt or at==bt and ar<br
+        end)
+        return lockedCost,selected
+    end
+
+    local graph,nodes,nodeIndex={}, {}, {}
+    local function addNode(label)
+        local index=#nodes+1
+        nodes[index]=label; nodeIndex[label]=index; graph[index]={}
+        return index
+    end
+    local source=addNode("source")
+    for _,touchId in ipairs(touchIds) do
+        if touchIndex[touchId] and not usedTouch[touchId] then addNode("touch\0"..touchId) end
+    end
+    for _,relayId in ipairs(relayIds) do
+        if relayIndex[relayId] and not usedRelay[relayId] then addNode("relay\0"..relayId) end
+    end
+    local sink=addNode("sink")
+
+    local function addArc(fromNode,toNode,cost,pathKey,candidateEdge)
+        local forwardIndex=#graph[fromNode]+1
+        local reverseIndex=#graph[toNode]+1
+        local forward={to=toNode,reverse=reverseIndex,capacity=1,cost=cost,
+            pathKey=pathKey,candidateEdge=candidateEdge}
+        local reverse={to=fromNode,reverse=forwardIndex,capacity=0,cost=-cost,
+            pathKey="reverse|"..pathKey}
+        graph[fromNode][forwardIndex]=forward
+        graph[toNode][reverseIndex]=reverse
+        return forward
+    end
+    for _,touchId in ipairs(touchIds) do
+        local node=nodeIndex["touch\0"..touchId]
+        if node then addArc(source,node,0,"source|"..touchId,nil) end
+    end
+    local candidateArcs={}
+    for _,edge in ipairs(edges) do
+        local touchNode=nodeIndex["touch\0"..edge.touchId]
+        local relayNode=nodeIndex["relay\0"..edge.relayId]
+        if touchNode and relayNode and not (type(excluded)=="table" and excluded[edge.key]) then
+            candidateArcs[#candidateArcs+1]={edge=edge,
+                arc=addArc(touchNode,relayNode,edge.integerCost,"candidate|"..edge.key,edge)}
+        end
+    end
+    for _,relayId in ipairs(relayIds) do
+        local node=nodeIndex["relay\0"..relayId]
+        if node then addArc(node,sink,0,"sink|"..relayId,nil) end
+    end
+
+    local flow,flowCost=0,0
+    while flow<remaining do
+        local distance,pathKey,pathNodes,previousNode,previousArc={},{},{},{},{}
+        distance[source]=0; pathKey[source]=""; pathNodes[source]={source}
+        for _=1,#nodes-1 do
+            local changed=false
+            for fromNode=1,#nodes do
+                if distance[fromNode]~=nil then
+                    for arcIndex,arc in ipairs(graph[fromNode]) do
+                        if arc.capacity>0 and not controlledSolverPathContains(pathNodes[fromNode],arc.to) then
+                            local nextDistance=distance[fromNode]+arc.cost
+                            local nextKey=pathKey[fromNode].."/"..arc.pathKey
+                            if distance[arc.to]==nil or nextDistance<distance[arc.to]
+                                or (nextDistance==distance[arc.to] and nextKey<pathKey[arc.to]) then
+                                distance[arc.to]=nextDistance; pathKey[arc.to]=nextKey
+                                pathNodes[arc.to]=controlledSolverCopyPath(pathNodes[fromNode],arc.to)
+                                previousNode[arc.to]=fromNode; previousArc[arc.to]=arcIndex
+                                changed=true
+                            end
+                        end
+                    end
+                end
+            end
+            if not changed then break end
+        end
+        if distance[sink]==nil then return nil end
+        local node=sink
+        while node~=source do
+            local fromNode,arcIndex=previousNode[node],previousArc[node]
+            if not fromNode or not arcIndex then return nil end
+            local arc=graph[fromNode][arcIndex]
+            arc.capacity-=1
+            graph[node][arc.reverse].capacity+=1
+            node=fromNode
+        end
+        flow+=1; flowCost+=distance[sink]
+    end
+
+    for _,item in ipairs(candidateArcs) do
+        if item.arc.capacity==0 then selected[#selected+1]=item.edge.candidate end
+    end
+    if #selected~=requiredCardinality then return nil end
+    table.sort(selected,function(a,b)
+        local at,ar=controlledSolverCandidateIds(a)
+        local bt,br=controlledSolverCandidateIds(b)
+        return at~=bt and at<bt or at==bt and ar<br
+    end)
+    return lockedCost+flowCost,selected
+end
+
+local function controlledSolverConflicts(candidate,locked)
+    local touchId,relayId=controlledSolverCandidateIds(candidate)
+    for _,edge in ipairs(locked) do
+        local lockedTouch,lockedRelay=controlledSolverCandidateIds(edge)
+        if touchId==lockedTouch or relayId==lockedRelay then return true end
+    end
+    return false
+end
+
+local function controlledSolverChronologicalTime(candidate)
+    local touchEnd=type(candidate.touch)=="table" and candidate.touch.endTime or nil
+    local relayEnd=type(candidate.relay)=="table" and candidate.relay.endTime or nil
+    if not controlledCandidateNumber(touchEnd) then touchEnd=-math.huge end
+    if not controlledCandidateNumber(relayEnd) then relayEnd=-math.huge end
+    return math.max(touchEnd,relayEnd)
+end
+
+function SEGCFG.solveControlledMatching(touchFeatures,relayFeatures,candidates)
+    local cardinality=SEGCFG.maximumControlledCardinality(touchFeatures,relayFeatures,candidates)
+    if cardinality==0 then return {} end
+    local optimalCost=SEGCFG.minimumControlledCost(touchFeatures,relayFeatures,candidates,cardinality)
+    if optimalCost==nil then return {} end
+    local edges=controlledSolverEdges(touchFeatures,relayFeatures,candidates,true)
+    local locked,excluded={},{}
+    for _,edge in ipairs(edges) do
+        if not controlledSolverConflicts(edge.candidate,locked) then
+            local trial={}
+            for index,candidate in ipairs(locked) do trial[index]=candidate end
+            trial[#trial+1]=edge.candidate
+            local trialCost=SEGCFG.minimumControlledCost(touchFeatures,relayFeatures,candidates,
+                cardinality,trial,excluded)
+            if trialCost==optimalCost then locked=trial else excluded[edge.key]=true end
+        end
+        if #locked==cardinality then break end
+    end
+    if #locked~=cardinality then return {} end
+    table.sort(locked,function(a,b)
+        local aTime,bTime=controlledSolverChronologicalTime(a),controlledSolverChronologicalTime(b)
+        if aTime~=bTime then return aTime<bTime end
+        local at,ar=controlledSolverCandidateIds(a)
+        local bt,br=controlledSolverCandidateIds(b)
+        if at~=bt then return at<bt end
+        return ar<br
+    end)
+    return locked
+end
+
+function SEGCFG.runControlledProfile(features,profile)
+    local touchFeatures=type(features)=="table" and features.touch or nil
+    local relayFeatures=type(features)=="table" and features.relay or nil
+    local candidates,rejectionCounts=SEGCFG.buildControlledCandidates(touchFeatures,relayFeatures,profile)
+    local pairs=SEGCFG.solveControlledMatching(touchFeatures,relayFeatures,candidates)
+    local totalCost=0
+    for _,pair in ipairs(pairs) do totalCost+=pair.integerCost end
+    return {pairs=pairs,candidates=candidates,rejectionCounts=rejectionCounts,
+        cardinality=#pairs,totalCost=totalCost}
+end
+
+function SEGCFG.analyzeFullPairSet(rawPairs)
     local analyses={}
-    for index,pair in ipairs(matchedPairs or {}) do
-        analyses[index]={yawGap=pair.yawGap,netPitchGap=pair.netPitchGap,absPitchGap=pair.absPitchGap,
-            touch=SEGCFG.analyzeRawSegment(pair.touch),relay=SEGCFG.analyzeRawSegment(pair.relay)}
+    for index,pair in ipairs(rawPairs or {}) do
+        local touch=type(pair.touch)=="table" and pair.touch.segmentRef or nil
+        local relay=type(pair.relay)=="table" and pair.relay.segmentRef or nil
+        touch=touch or pair.touch; relay=relay or pair.relay
+        local analysis={touch=SEGCFG.analyzeRawSegment(touch),relay=SEGCFG.analyzeRawSegment(relay)}
+        for _,field in ipairs({
+            "yawGap","netPitchGap","absPitchGap","durationGap","frameCountGap",
+            "animationAdvanceGap","localHeadTranslationGap","localHeadRotationGap",
+            "animationPhaseGap","animationPhaseFraction","cameraPrimaryRotationGap",
+            "initialHeadDepthGap","distance","integerCost",
+        }) do
+            if pair[field]~=nil then analysis[field]=pair[field] end
+        end
+        analyses[index]=analysis
     end
     return SEGCFG.aggregateEssentialAnalyses(analyses)
+end
+
+function SEGCFG.analyzeFullMatchedPairs(frozen)
+    local output={profiles={}}
+    output.profiles.Baseline=SEGCFG.analyzeFullPairSet(type(frozen)=="table" and frozen.baseline or nil)
+    for _,name in ipairs({"Strict","Moderate","Broad"}) do
+        local profile=type(frozen)=="table" and type(frozen.profiles)=="table" and frozen.profiles[name] or nil
+        output.profiles[name]=SEGCFG.analyzeFullPairSet(type(profile)=="table" and profile.pairs or nil)
+    end
+    return output
+end
+
+function SEGCFG.essentialDenseArray(value)
+    if type(value)~="table" then return false,0 end
+    local count,maximum=0,0
+    for key in pairs(value) do
+        if type(key)~="number" or key<1 or key%1~=0 then return false,0 end
+        count+=1; maximum=math.max(maximum,key)
+    end
+    if maximum~=count then return false,0 end
+    return true,count
+end
+
+function SEGCFG.essentialSelectionPairIds(pair)
+    if type(pair)~="table" then return nil,nil end
+    local touchId,relayId=pair.touchId,pair.relayId
+    local nestedTouch=type(pair.touch)=="table" and pair.touch.id or nil
+    local nestedRelay=type(pair.relay)=="table" and pair.relay.id or nil
+    if touchId==nil then touchId=nestedTouch
+    elseif type(touchId)~="string" or touchId=="" or nestedTouch~=nil and nestedTouch~=touchId then return nil,nil end
+    if relayId==nil then relayId=nestedRelay
+    elseif type(relayId)~="string" or relayId=="" or nestedRelay~=nil and nestedRelay~=relayId then return nil,nil end
+    if type(touchId)~="string" or touchId=="" or type(relayId)~="string" or relayId=="" then return nil,nil end
+    return touchId,relayId
+end
+
+function SEGCFG.essentialSelectionSnapshot(result,label,mismatches)
+    if type(result)~="table" then mismatches[#mismatches+1]=label..":not-table"; return nil end
+    local dense,count=SEGCFG.essentialDenseArray(result.pairs)
+    if not dense then mismatches[#mismatches+1]=label..":pairs-invalid"; return nil end
+    if not controlledCandidateNumber(result.cardinality) or result.cardinality<0
+        or result.cardinality%1~=0 or result.cardinality~=count then
+        mismatches[#mismatches+1]=label..":cardinality-invalid"; return nil
+    end
+    if not controlledCandidateNumber(result.totalCost) or result.totalCost<0 or result.totalCost%1~=0 then
+        mismatches[#mismatches+1]=label..":totalCost-invalid"; return nil
+    end
+    if type(result.rejectionCounts)~="table" then
+        mismatches[#mismatches+1]=label..":rejectionCounts-invalid"; return nil
+    end
+    local rejections={}
+    for reason,value in pairs(result.rejectionCounts) do
+        if type(reason)~="string" or reason=="" or not controlledCandidateNumber(value)
+            or value<0 or value%1~=0 then
+            mismatches[#mismatches+1]=label..":rejection-invalid"; return nil
+        end
+        rejections[reason]=value
+    end
+    local pairsByKey,usedTouch,usedRelay={}, {}, {}
+    local summedCost=0
+    for index=1,count do
+        local pair=result.pairs[index]
+        local touchId,relayId=SEGCFG.essentialSelectionPairIds(pair)
+        local cost=type(pair)=="table" and pair.integerCost or nil
+        if not touchId or not controlledCandidateNumber(cost) or cost<0 or cost%1~=0 then
+            mismatches[#mismatches+1]=label..":pair-invalid-"..tostring(index); return nil
+        end
+        local key=touchId.."|"..relayId
+        if pairsByKey[key]~=nil or usedTouch[touchId] or usedRelay[relayId] then
+            mismatches[#mismatches+1]=label..":pair-identity-invalid-"..tostring(index); return nil
+        end
+        pairsByKey[key]=cost; usedTouch[touchId]=true; usedRelay[relayId]=true
+        summedCost+=cost
+    end
+    if summedCost~=result.totalCost then mismatches[#mismatches+1]=label..":totalCost-mismatch"; return nil end
+    return {pairs=pairsByKey,rejections=rejections,cardinality=count,totalCost=summedCost}
+end
+
+function SEGCFG.comparePairSelections(expected,actual)
+    local mismatches={}
+    local a=SEGCFG.essentialSelectionSnapshot(expected,"expected",mismatches)
+    local b=SEGCFG.essentialSelectionSnapshot(actual,"actual",mismatches)
+    if not a or not b then return {equal=false,mismatches=mismatches} end
+    if a.cardinality~=b.cardinality then mismatches[#mismatches+1]="cardinality" end
+    if a.totalCost~=b.totalCost then mismatches[#mismatches+1]="totalCost" end
+    for key,cost in pairs(a.pairs) do
+        if b.pairs[key]==nil then mismatches[#mismatches+1]="pair-missing:"..key
+        elseif b.pairs[key]~=cost then mismatches[#mismatches+1]="pair-cost:"..key end
+    end
+    for key in pairs(b.pairs) do if a.pairs[key]==nil then mismatches[#mismatches+1]="pair-extra:"..key end end
+    for reason,count in pairs(a.rejections) do
+        if b.rejections[reason]~=count then mismatches[#mismatches+1]="rejection:"..reason end
+    end
+    for reason in pairs(b.rejections) do
+        if a.rejections[reason]==nil then mismatches[#mismatches+1]="rejection-extra:"..reason end
+    end
+    return {equal=#mismatches==0,mismatches=mismatches}
 end
 
 function SEGCFG.compareEssentialValues(a,b,path,mismatches)
@@ -3941,10 +4978,61 @@ function SEGCFG.compareEssentialValues(a,b,path,mismatches)
     elseif a~=b then mismatches[#mismatches+1]=path..":value" end
 end
 
+function SEGCFG.essentialRequireDecompositions(analysis,label,mismatches)
+    local profiles=type(analysis)=="table" and analysis.profiles or nil
+    if type(profiles)~="table" then mismatches[#mismatches+1]=label..":profiles-missing"; return end
+    for _,name in ipairs({"Baseline","Strict","Moderate","Broad"}) do
+        local profile=profiles[name]
+        local pairs=type(profile)=="table" and profile.pairs or nil
+        local dense,count=SEGCFG.essentialDenseArray(pairs)
+        if not dense then mismatches[#mismatches+1]=label.."."..name..":pairs-invalid"
+        else
+            for index=1,count do
+                for _,route in ipairs({"touch","relay"}) do
+                    local segment=pairs[index][route]
+                    local screenX=type(segment)=="table" and segment.screenX or nil
+                    for _,point in ipairs({"head","primary","subject"}) do
+                        local decomposition=type(screenX)=="table" and screenX[point] or nil
+                        local valid=type(decomposition)=="table"
+                        for _,field in ipairs({"endpoint","within","between","residual","maxAbsResidual"}) do
+                            local value=valid and decomposition[field] or nil
+                            valid=valid and type(value)=="number" and value==value and math.abs(value)<math.huge
+                        end
+                        if not valid then
+                            mismatches[#mismatches+1]=label.."."..name.."."..tostring(index)
+                                .."."..route.."."..point..":decomposition-missing"
+                        end
+                    end
+                end
+            end
+        end
+    end
+end
+
 function SEGCFG.compareAnalysisResults(a,b)
     local mismatches={}
+    SEGCFG.essentialRequireDecompositions(a,"full",mismatches)
+    SEGCFG.essentialRequireDecompositions(b,"essential",mismatches)
     SEGCFG.compareEssentialValues(a,b,"analysis",mismatches)
     return {equal=#mismatches==0,mismatches=mismatches}
+end
+
+function SEGCFG.maximumScreenXResidual(analysis)
+    local mismatches={}
+    SEGCFG.essentialRequireDecompositions(analysis,"analysis",mismatches)
+    if #mismatches>0 then return nil end
+    local maximum,found=0,false
+    for _,name in ipairs({"Baseline","Strict","Moderate","Broad"}) do
+        for _,pair in ipairs(analysis.profiles[name].pairs) do
+            for _,route in ipairs({"touch","relay"}) do
+                for _,point in ipairs({"head","primary","subject"}) do
+                    maximum=math.max(maximum,pair[route].screenX[point].maxAbsResidual)
+                    found=true
+                end
+            end
+        end
+    end
+    return found and SEGCFG.roundEssential(maximum) or nil
 end
 
 
@@ -3989,13 +5077,277 @@ function SEGCFG.solveEssentialReportSize(fullReportChars,payloadChars,builder)
         local chars=utf8.len(text)
         if chars==nil then error("V614 essential report is not valid UTF-8",0) end
         local chunks=math.max(1,math.ceil(chars/payloadChars))
-        local reduction=SEGCFG.roundEssential(fullReportChars>0 and (1-chars/fullReportChars)*100 or 0)
+        local reduction=type(fullReportChars)=="number"
+            and SEGCFG.roundEssential(fullReportChars>0 and (1-chars/fullReportChars)*100 or 0) or "unavailable"
         if chars==size.essentialReportChars and chunks==size.essentialChunks
             and reduction==size.reductionPercent then return text,size end
         size={fullReportChars=fullReportChars,essentialReportChars=chars,
             reductionPercent=reduction,essentialChunks=chunks}
     end
     error("V614 essential report size fields did not stabilize",0)
+end
+
+-- V614 temporal and initial-pose controls. These helpers consume only the
+-- already-captured plain numeric telemetry arrays; they never read Roblox
+-- instances or services.
+function SEGCFG.controlledProfiles()
+    local shared={yawGap=5,netPitchGap=1,absPitchGap=2,speedGap=0.05,weightGap=0.05}
+    local function profile(duration,frames,advance,translation,rotation,phase,cameraRotation,depth)
+        return {
+            yawGap=shared.yawGap,netPitchGap=shared.netPitchGap,absPitchGap=shared.absPitchGap,
+            speedGap=shared.speedGap,weightGap=shared.weightGap,
+            durationGap=duration,frameCountGap=frames,animationAdvanceGap=advance,
+            localHeadTranslationGap=translation,localHeadRotationGap=rotation,
+            animationPhaseFraction=phase,cameraPrimaryRotationGap=cameraRotation,
+            initialHeadDepthGap=depth,
+        }
+    end
+    return {
+        Strict=profile(0.034,2,0.034,0.025,1.0,0.05,2.0,0.025),
+        Moderate=profile(0.067,4,0.067,0.050,2.5,0.10,5.0,0.050),
+        Broad=profile(0.100,6,0.100,0.100,5.0,0.20,10.0,0.100),
+    }
+end
+
+local function controlledNumber(value)
+    return type(value)=="number" and value==value and math.abs(value)<math.huge
+end
+
+function SEGCFG.controlledCircularPhaseGap(a,b,length,looped)
+    if not controlledNumber(a) or not controlledNumber(b) or not controlledNumber(length) or length<=0 then return nil end
+    local delta=math.abs(a-b)
+    if looped==true then
+        delta=delta%length
+        delta=math.min(delta,length-delta)
+    end
+    return SEGCFG.roundEssential(delta)
+end
+
+function SEGCFG.controlledAnimationAdvance(startTime,endTime,length,looped)
+    if not controlledNumber(startTime) or not controlledNumber(endTime)
+        or not controlledNumber(length) or length<=0 then return nil end
+    if looped==true then
+        return SEGCFG.roundEssential((endTime-startTime)%length)
+    end
+    return SEGCFG.roundEssential(endTime-startTime)
+end
+
+local function controlledCFrame(value)
+    if type(value)~="table" or #value<12 then return false end
+    for index=1,12 do if not controlledNumber(value[index]) then return false end end
+    return true
+end
+
+local function controlledAnimationMetadata(track,model)
+    if type(track)~="table" then return nil end
+    local metadata=track
+    if track.metadata~=nil then
+        if type(track.metadata)~="number" or type(model)~="table" or type(model.constants)~="table"
+            or type(model.constants.animations)~="table" then return nil end
+        metadata=model.constants.animations[track.metadata]
+    end
+    if type(metadata)~="table" then return nil end
+    if type(metadata.animationId)~="string" or metadata.animationId==""
+        or type(metadata.name)~="string" or metadata.name==""
+        or type(metadata.priority)~="string" or metadata.priority==""
+        or type(metadata.looped)~="boolean" then return nil end
+    local length=metadata.length
+    if not controlledNumber(length) or length<=0 then return nil end
+    if not controlledNumber(track.timePosition) or not controlledNumber(track.speed)
+        or not controlledNumber(track.weightCurrent) or not controlledNumber(track.weightTarget)
+        or type(track.isPlaying)~="boolean" then return nil end
+    local looped=metadata.looped
+    local animationId=metadata.animationId
+    local name=metadata.name
+    local priority=metadata.priority
+    local key=animationId.."|"..name.."|"..priority.."|"..tostring(looped).."|"
+        ..tostring(SEGCFG.roundEssential(length))
+    return {
+        key=key,animationId=animationId,name=name,priority=priority,looped=looped,length=length,
+        timePosition=track.timePosition,speed=track.speed,
+        weightCurrent=track.weightCurrent,weightTarget=track.weightTarget,
+        weight=track.weightCurrent,isPlaying=track.isPlaying,
+        state=track.state,
+    }
+end
+
+function SEGCFG.controlledDominantTrack(animation,model)
+    if type(animation)~="table" or type(animation.tracks)~="table" then return nil,"missing animation" end
+    if not SEGCFG.essentialDenseArray(animation.tracks) then return nil,"invalid animation track list" end
+    local best=nil
+    local identities={}
+    for _,track in ipairs(animation.tracks) do
+        -- A malformed possibly active track cannot be removed before ranking:
+        -- doing so could promote a known lower-weight track to dominant.
+        if type(track)~="table" or type(track.isPlaying)~="boolean" then
+            return nil,"invalid active animation track"
+        end
+        local candidate=controlledAnimationMetadata(track,model)
+        if track.isPlaying and (not controlledNumber(track.weightCurrent)
+            or track.weightCurrent>0 and not candidate) then
+            return nil,"invalid active animation track"
+        end
+        local weight=candidate and candidate.weightCurrent
+        if candidate and candidate.isPlaying and controlledNumber(weight) and weight>0 then
+            if identities[candidate.key] then return nil,"ambiguous animation track identity" end
+            identities[candidate.key]=true
+            if not best or weight>best.weightCurrent or (weight==best.weightCurrent and candidate.key<best.key) then
+                best=candidate
+            end
+        end
+    end
+    if not best then return nil,"no active animation track" end
+    return best,nil
+end
+
+function SEGCFG.controlledRelativeRotation(primaryCF,cameraCF)
+    if not controlledCFrame(primaryCF) or not controlledCFrame(cameraCF) then return nil end
+    local p,c=primaryCF,cameraCF
+    local r={0,0,0}
+    -- CFrame arrays store translation followed by row-major rotation. The
+    -- requested camera-to-Primary control is R_primary^T * R_camera.
+    for row=0,2 do
+        for col=0,2 do
+            local value=0
+            for k=0,2 do
+                value+=p[4+k*3+row]*c[4+k*3+col]
+            end
+            r[1+row*3+col]=SEGCFG.roundEssential(value)
+        end
+    end
+    return {0,0,0,r[1],r[2],r[3],r[4],r[5],r[6],r[7],r[8],r[9]}
+end
+
+function SEGCFG.controlledRotationGapDeg(a,b)
+    if not controlledCFrame(a) or not controlledCFrame(b) then return nil end
+    local dot=0
+    for index=4,12 do dot+=a[index]*b[index] end
+    local cosine=math.max(-1,math.min(1,(dot-1)*0.5))
+    return SEGCFG.roundEssential(math.deg(math.acos(cosine)))
+end
+
+function SEGCFG.controlledInitialHeadDepth(cameraCF,headCF,cameraConfig)
+    if not controlledCFrame(cameraCF) or not controlledCFrame(headCF) or type(cameraConfig)~="table" then return nil end
+    if not controlledNumber(cameraConfig.fieldOfView) or type(cameraConfig.viewport)~="table"
+        or not controlledNumber(cameraConfig.viewport[1]) or not controlledNumber(cameraConfig.viewport[2]) then return nil end
+    local dx,dy,dz=headCF[1]-cameraCF[1],headCF[2]-cameraCF[2],headCF[3]-cameraCF[3]
+    local depth=-(cameraCF[6]*dx+cameraCF[9]*dy+cameraCF[12]*dz)
+    if not controlledNumber(depth) or depth<=0 then return nil end
+    return SEGCFG.roundEssential(depth)
+end
+
+local function controlledRawBoundary(sample,which)
+    local telemetry=type(sample)=="table" and sample.temporalPoseTelemetry
+    if type(telemetry)~="table" then return nil end
+    local direct=telemetry[which]
+    if type(direct)=="table" then return direct end
+    local calls=telemetry.controllerCalls
+    if type(calls)~="table" or #calls==0 then return nil end
+    if which=="cameraModuleBefore" then return calls[1] and calls[1].before end
+    if which=="cameraModuleAfter" then return calls[#calls] and calls[#calls].after end
+    return nil
+end
+
+local function controlledCameraConfig(snapshot)
+    if type(snapshot)~="table" then return nil end
+    local config=snapshot.cameraConfig
+    if type(config)=="table" then return config end
+    if controlledNumber(snapshot.fieldOfView) and type(snapshot.viewport)=="table" then
+        return {fieldOfView=snapshot.fieldOfView,viewport=SEGCFG.essentialArray(snapshot.viewport)}
+    end
+    return nil
+end
+
+local function controlledTrackByKey(animation,model,key)
+    if type(animation)~="table" or type(animation.tracks)~="table" then return nil end
+    local found=nil
+    for _,track in ipairs(animation.tracks) do
+        local item=controlledAnimationMetadata(track,model)
+        if item and item.key==key then
+            if found then return nil,"ambiguous animation track identity" end
+            found=item
+        end
+    end
+    if found and not found.isPlaying then return nil,"ending animation track inactive" end
+    return found
+end
+
+function SEGCFG.controlledFeatureFromRawSegment(segment)
+    if type(segment)~="table" or type(segment.samples)~="table" or #segment.samples==0 then
+        return nil,"missing segment samples"
+    end
+    local requiredNumbers={"startTime","endTime","duration","frameCount","totalSignedYaw","totalAbsYaw","netPitch","totalAbsPitch"}
+    for _,field in ipairs(requiredNumbers) do
+        if not controlledNumber(segment[field]) then return nil,"missing segment "..field end
+    end
+    if type(segment.id)~="string" or segment.id=="" or type(segment.route)~="string" or segment.route==""
+        or type(segment.window)~="string" or segment.window=="" then return nil,"missing segment identity" end
+    if type(segment.head)~="table" or not controlledNumber(segment.head.x)
+        or type(segment.primary)~="table" or not controlledNumber(segment.primary.x)
+        or type(segment.subject)~="table" or not controlledNumber(segment.subject.x) then
+        return nil,"missing segment geometry metrics"
+    end
+    local firstSample,lastSample=segment.samples[1],segment.samples[#segment.samples]
+    local startSnapshot=controlledRawBoundary(firstSample,"cameraModuleBefore")
+    local finishSnapshot=controlledRawBoundary(lastSample,"cameraModuleAfter")
+    if type(startSnapshot)~="table" or type(finishSnapshot)~="table" then return nil,"missing telemetry boundaries" end
+    local cameraConfig=controlledCameraConfig(startSnapshot)
+    local initialLocalHead=SEGCFG.essentialArray(startSnapshot.primaryToHead)
+    local initialCamera=SEGCFG.essentialArray(startSnapshot.cameraCFrame)
+    local initialPrimary=SEGCFG.essentialArray(startSnapshot.primaryCFrame)
+    if not cameraConfig or not controlledCFrame(initialCamera) or not controlledCFrame(initialPrimary)
+        or not controlledCFrame(startSnapshot.headCFrame) or not controlledCFrame(initialLocalHead) then
+        return nil,"missing initial pose telemetry"
+    end
+    if not controlledNumber(cameraConfig.fieldOfView) or cameraConfig.fieldOfView<=0
+        or type(cameraConfig.viewport)~="table" or not controlledNumber(cameraConfig.viewport[1])
+        or not controlledNumber(cameraConfig.viewport[2]) or cameraConfig.viewport[1]<=0 or cameraConfig.viewport[2]<=0 then
+        return nil,"missing camera configuration"
+    end
+    local finishConfig=controlledCameraConfig(finishSnapshot)
+    local finishLocalHead=SEGCFG.essentialArray(finishSnapshot.primaryToHead)
+    if not finishConfig or not controlledCFrame(finishSnapshot.cameraCFrame)
+        or not controlledCFrame(finishSnapshot.primaryCFrame) or not controlledCFrame(finishSnapshot.headCFrame)
+        or not controlledCFrame(finishLocalHead) then return nil,"missing ending pose telemetry" end
+    if not controlledNumber(finishConfig.fieldOfView) or finishConfig.fieldOfView<=0
+        or type(finishConfig.viewport)~="table" or not controlledNumber(finishConfig.viewport[1])
+        or not controlledNumber(finishConfig.viewport[2]) or finishConfig.viewport[1]<=0 or finishConfig.viewport[2]<=0 then
+        return nil,"missing ending camera configuration"
+    end
+    if type(startSnapshot.animation)~="table" or type(startSnapshot.animation.humanoidState)~="string"
+        or startSnapshot.animation.humanoidState=="" then return nil,"missing humanoid state" end
+    local dominant,reason=SEGCFG.controlledDominantTrack(startSnapshot.animation)
+    if not dominant then return nil,reason end
+    if type(finishSnapshot.animation)~="table" or type(finishSnapshot.animation.humanoidState)~="string"
+        or finishSnapshot.animation.humanoidState=="" then return nil,"missing ending humanoid state" end
+    local ending,endingReason=controlledTrackByKey(finishSnapshot.animation,nil,dominant.key)
+    if not ending then return nil,endingReason or "missing ending animation track" end
+    if finishSnapshot.animation.humanoidState~=startSnapshot.animation.humanoidState then
+        return nil,"animation humanoid state mismatch"
+    end
+    local advance=SEGCFG.controlledAnimationAdvance(dominant.timePosition,ending.timePosition,dominant.length,dominant.looped)
+    if advance==nil then return nil,"missing animation timing" end
+    local feature={
+        id=segment.id,route=segment.route,window=segment.window,
+        startTime=segment.startTime,endTime=segment.endTime,duration=segment.duration,frameCount=segment.frameCount,
+        totalSignedYaw=segment.totalSignedYaw,totalAbsYaw=segment.totalAbsYaw,netPitch=segment.netPitch,totalAbsPitch=segment.totalAbsPitch,
+        initialLocalHead=SEGCFG.essentialArray(initialLocalHead),initialCamera=SEGCFG.essentialArray(initialCamera),
+        initialPrimary=SEGCFG.essentialArray(initialPrimary),
+        cameraToPrimary=SEGCFG.controlledRelativeRotation(initialPrimary,initialCamera),
+        initialHeadDepth=SEGCFG.controlledInitialHeadDepth(initialCamera,SEGCFG.essentialArray(startSnapshot.headCFrame),cameraConfig),
+        fieldOfView=cameraConfig.fieldOfView,viewport=SEGCFG.essentialArray(cameraConfig.viewport),
+        humanoidState=startSnapshot.animation and startSnapshot.animation.humanoidState or nil,
+        dominantTrack=dominant,animationAdvance=advance,
+        animationPhase=dominant.length and dominant.length>0 and SEGCFG.roundEssential((dominant.timePosition%dominant.length)/dominant.length) or nil,
+        headHorizontal=segment.head and segment.head.x or segment.screen and segment.screen.head and segment.screen.head.x or nil,
+        primaryHorizontal=segment.primary and segment.primary.x or segment.screen and segment.screen.primary and segment.screen.primary.x or nil,
+        subjectHorizontal=segment.subject and segment.subject.x or segment.screen and segment.screen.subject and segment.screen.subject.x or nil,
+        segmentRef=segment,
+    }
+    feature.animationPhaseFraction=feature.animationPhase
+    dominant.phaseFraction=feature.animationPhase
+    if feature.initialHeadDepth==nil or feature.cameraToPrimary==nil then return nil,"invalid initial pose telemetry" end
+    return feature,nil
 end
 -- END V614 ESSENTIAL REPORT PURE HELPERS
 end
@@ -4013,9 +5365,11 @@ function SEGCFG.deserializeEssentialModel(text)
 end
 
 function SEGCFG.buildProductionEssentialBundle()
-    local matched=SEGCFG.matchSegments()
+    local frozen=SEGCFG.getFrozenMatchingResults() or SEGCFG.prepareControlledMatching()
+    if type(frozen)~="table" then error("V614 controlled matching results unavailable for Essential R2",0) end
+    local matched=frozen.baseline
     local diagnostics=getgenv().PCV614Diagnostics()
-    local model=SEGCFG.buildEssentialModel(matched,diagnostics)
+    local model=SEGCFG.buildEssentialModel(frozen,diagnostics)
     model.config={
         sequence=SEGCFG.deepCopyEssential(SEGCFG.sequence),phaseEligibleTarget=SEGCFG.phaseEligibleTarget,
         routeEligibleTarget=SEGCFG.routeEligibleTarget,requiredMatchedPairs=SEGCFG.minMatched,
@@ -4057,21 +5411,40 @@ function SEGCFG.buildProductionEssentialBundle()
         coverageSufficient=#matched>=SEGCFG.minMatched,
         yawMatchQuality=diagnostics.yawMatchQuality,pitchMatchQuality=diagnostics.pitchMatchQuality,
         counterbalancingMethod=diagnostics.counterbalancingMethod,
+        profiles=SEGCFG.deepCopyEssential(model.pairSetStats),
     }
 
     -- A reads complete runtime telemetry. B reads a JSON round-trip containing
     -- only the values that will be transported in the essential report.
-    local analysisA=SEGCFG.analyzeFullMatchedPairs(matched)
+    local analysisA=SEGCFG.analyzeFullMatchedPairs(frozen)
     local dataOnlyJson=SEGCFG.serializeEssentialModel(model)
     local decoded=SEGCFG.deserializeEssentialModel(dataOnlyJson)
+    local matchingParity={}
+    local matchingEqual=true
+    local profiles=SEGCFG.controlledProfiles()
+    for _,name in ipairs({"Strict","Moderate","Broad"}) do
+        local rebuilt=SEGCFG.runControlledProfile(decoded.eligibleFeatures,profiles[name])
+        matchingParity[name]=SEGCFG.comparePairSelections(frozen.profiles[name],rebuilt)
+        matchingEqual=matchingEqual and matchingParity[name].equal
+    end
     local analysisB=SEGCFG.analyzeEssentialModel(decoded)
-    local parity=SEGCFG.compareAnalysisResults(analysisA,analysisB)
+    local analysisParity=SEGCFG.compareAnalysisResults(analysisA,analysisB)
+    local maxResidual=SEGCFG.maximumScreenXResidual(analysisB)
+    local parity={
+        equal=matchingEqual and analysisParity.equal and maxResidual==0,
+        matching=matchingParity,matchingEqual=matchingEqual,
+        analysisEqual=analysisParity.equal,mismatches=analysisParity.mismatches,
+        maxResidual=maxResidual,
+    }
     model.analysis=analysisB
     model.parity={
-        equal=parity.equal,mismatches=parity.mismatches,
+        equal=parity.equal,matching=matchingParity,matchingEqual=matchingEqual,
+        analysisEqual=analysisParity.equal,mismatches=analysisParity.mismatches,
+        maxResidual=maxResidual,
         fullDigest=SEGCFG.essentialDigest(analysisA),essentialDigest=SEGCFG.essentialDigest(analysisB),
         precisionDecimals=7,
     }
+    model.decision=SEGCFG.controlledDecision({profiles=model.analysis.profiles,parity=model.parity},SEGCFG.minMatched)
     local modelJson=SEGCFG.serializeEssentialModel(model)
     return {matched=matched,diagnostics=diagnostics,model=model,modelJson=modelJson,
         analysisA=analysisA,analysisB=analysisB,parity=parity}
@@ -4084,15 +5457,55 @@ end
 
 function SEGCFG.essentialPairSummary(pair,index)
     local touch,relay=pair.touch,pair.relay
+    local function numberText(value,format)
+        if type(value)~="number" or value~=value or math.abs(value)==math.huge then return "unavailable" end
+        return string.format(format,value)
+    end
     return string.format(
-        "pair=%d touch=%s(%s) relay=%s(%s) yawGap=%.7f netPitchGap=%.7f absPitchGap=%.7f touchDuration=%.7f relayDuration=%.7f touchFrames=%d relayFrames=%d",
+        "pair=%d touch=%s(%s) relay=%s(%s) yawGap=%.7f netPitchGap=%.7f absPitchGap=%.7f touchDuration=%s relayDuration=%s touchFrames=%s relayFrames=%s",
         index,tostring(touch.id),tostring(touch.window),tostring(relay.id),tostring(relay.window),
-        pair.yawGap,pair.netPitchGap,pair.absPitchGap,touch.duration,relay.duration,touch.frameCount,relay.frameCount)
+        pair.yawGap,pair.netPitchGap,pair.absPitchGap,numberText(touch.duration,"%.7f"),
+        numberText(relay.duration,"%.7f"),numberText(touch.frameCount,"%d"),numberText(relay.frameCount,"%d"))
+end
+
+function SEGCFG.appendControlledProfileReport(lines,title,name,analysis,stats,requiredPairs)
+    local pairCount=type(analysis)=="table" and tonumber(analysis.pairCount) or 0
+    local required=tonumber(requiredPairs) or 12
+    local coverage=required>0 and pairCount/required or 0
+    lines[#lines+1]=""
+    lines[#lines+1]=title
+    lines[#lines+1]="controlledProfile = "..tostring(name)
+    lines[#lines+1]="controlledPairCount = "..tostring(pairCount)
+    lines[#lines+1]="controlledCandidateCount = "..tostring(stats and stats.candidateCount or 0)
+    lines[#lines+1]="controlledCoverage = "..essentialJsonValue({pairCount=pairCount,requiredPairs=required,
+        fractionOfRequired=SEGCFG.roundEssential(coverage),sufficient=pairCount>=required})
+    lines[#lines+1]="controlledGapDistributions = "..essentialJsonValue(analysis and analysis.gapDistributions or {})
+    lines[#lines+1]="controlledRouteDistributions = "..essentialJsonValue(analysis and analysis.aggregates or {})
+    lines[#lines+1]="controlledInitialPoseDistributions = "
+        ..essentialJsonValue(analysis and analysis.initialPoseDistributions or {})
+    lines[#lines+1]="controlledHorizontalResults = "..essentialJsonValue(analysis and analysis.horizontal or {})
+    lines[#lines+1]="controlledBootstrap = "..essentialJsonValue(analysis and analysis.bootstrap or {})
+    lines[#lines+1]="controlledRejectionCounts = "..essentialJsonValue(stats and stats.rejectionCounts or {})
+    for index,pair in ipairs(analysis and analysis.pairs or {}) do
+        lines[#lines+1]="controlledPairIdentity = "..tostring(name).."#"..tostring(index).." "
+            ..essentialJsonValue({touch={id=pair.touch and pair.touch.id or nil,
+                window=pair.touch and pair.touch.window or nil},relay={id=pair.relay and pair.relay.id or nil,
+                window=pair.relay and pair.relay.window or nil}})
+        lines[#lines+1]="controlledPairDecomposition = "..tostring(name).."#"..tostring(index).." "
+            ..essentialJsonValue({gaps={yawGap=pair.yawGap,netPitchGap=pair.netPitchGap,
+                absPitchGap=pair.absPitchGap,durationGap=pair.durationGap,frameCountGap=pair.frameCountGap,
+                animationAdvanceGap=pair.animationAdvanceGap,localHeadTranslationGap=pair.localHeadTranslationGap,
+                localHeadRotationGap=pair.localHeadRotationGap,animationPhaseGap=pair.animationPhaseGap,
+                animationPhaseFraction=pair.animationPhaseFraction,
+                cameraPrimaryRotationGap=pair.cameraPrimaryRotationGap,initialHeadDepthGap=pair.initialHeadDepthGap},
+                touch=pair.touch and pair.touch.screenX or nil,relay=pair.relay and pair.relay.screenX or nil})
+    end
 end
 
 function SEGCFG.buildEssentialReportText(bundle,size)
     local diagnostics,model=bundle.diagnostics,bundle.model
-    local analysis=model.analysis
+    local profiles=model.analysis.profiles
+    local analysis=profiles.Baseline
     local lines={"=== PC MOVEMENT V614 ESSENTIAL REPORT ==="}
     lines[#lines+1]="essentialSchema = "..tostring(model.schema)
     lines[#lines+1]="version = "..tostring(diagnostics.version)
@@ -4125,13 +5538,46 @@ function SEGCFG.buildEssentialReportText(bundle,size)
     lines[#lines+1]="windowA2 = "..essentialJsonValue(model.windows.A2)
 
     lines[#lines+1]=""
-    lines[#lines+1]="=== V614 ESSENTIAL MATCHED PAIRS ==="
+    lines[#lines+1]="=== V614 BASELINE MATCHER (UNCHANGED) ==="
+    lines[#lines+1]="publishedBaselineHeadEffectStatus = descriptive route-conditioned effect; remains non-causal until controlled Moderate coverage and parity pass"
+    lines[#lines+1]="baselinePairCount = "..tostring(analysis.pairCount)
     for index,pair in ipairs(bundle.matched) do
         lines[#lines+1]=SEGCFG.essentialPairSummary(pair,index)
-        lines[#lines+1]="pairAnalysis="..tostring(index).." "..essentialJsonValue(analysis.pairs[index])
+        lines[#lines+1]="baselinePairAnalysis="..tostring(index).." "..essentialJsonValue(analysis.pairs[index])
     end
-    lines[#lines+1]="aggregateAnalysis = "..essentialJsonValue(analysis.aggregates)
-    lines[#lines+1]="bootstrapAnalysis = "..essentialJsonValue(analysis.bootstrap)
+    lines[#lines+1]="baselineAggregateAnalysis = "..essentialJsonValue(analysis.aggregates)
+    lines[#lines+1]="baselineBootstrapAnalysis = "..essentialJsonValue(analysis.bootstrap)
+
+    SEGCFG.appendControlledProfileReport(lines,"=== V614 CONTROLLED STRICT ===","Strict",
+        profiles.Strict,model.pairSetStats.Strict,SEGCFG.minMatched)
+    SEGCFG.appendControlledProfileReport(lines,"=== V614 CONTROLLED MODERATE (PRIMARY) ===","Moderate",
+        profiles.Moderate,model.pairSetStats.Moderate,SEGCFG.minMatched)
+    SEGCFG.appendControlledProfileReport(lines,"=== V614 CONTROLLED BROAD ===","Broad",
+        profiles.Broad,model.pairSetStats.Broad,SEGCFG.minMatched)
+
+    lines[#lines+1]=""
+    lines[#lines+1]="=== V614 CONTROLLED SENSITIVITY SUMMARY ==="
+    lines[#lines+1]="primaryResult = Moderate"
+    lines[#lines+1]="sensitivityRole = Strict and Broad are sensitivity checks only; neither is an alternative primary result"
+    lines[#lines+1]="strictSensitivity = "..essentialJsonValue({pairCount=profiles.Strict.pairCount,
+        headHorizontal=profiles.Strict.bootstrap.headHorizontal})
+    lines[#lines+1]="broadSensitivity = "..essentialJsonValue({pairCount=profiles.Broad.pairCount,
+        headHorizontal=profiles.Broad.bootstrap.headHorizontal})
+
+    lines[#lines+1]=""
+    lines[#lines+1]="=== V614 TEMPORAL + INITIAL-POSE DECISION ==="
+    local decisionKeys={"primaryControlledProfile","strictAndBroadRole","moderatePairCount",
+        "requiredControlledPairs","fullVersusEssentialParity","temporalConfoundResolved",
+        "initialPoseConfoundResolved","headHorizontalEffectAfterTemporalControl",
+        "firstConcreteGeometricDivergence","causalMechanismProved","implementationTargetIdentified",
+        "v615Justified","astra6MaxJustified","pcEquivalenceClaimAllowed",
+        "qualitativeOnlyEmergencyModeClue"}
+    for _,key in ipairs(decisionKeys) do lines[#lines+1]=key.." = "..tostring(model.decision[key]) end
+    lines[#lines+1]="matchingCriteriaChanged = false"
+    lines[#lines+1]="calipersChanged = false"
+    lines[#lines+1]="gainChanged = false"
+    lines[#lines+1]="cameraCorrectionAdded = false"
+    lines[#lines+1]="v615Created = false"
 
     lines[#lines+1]=""
     lines[#lines+1]="=== V614 ESSENTIAL OMISSION MANIFEST ==="
@@ -4153,33 +5599,51 @@ function SEGCFG.buildEssentialReportText(bundle,size)
     lines[#lines+1]="analysisParityMismatches = "..(#model.parity.mismatches==0 and "none" or table.concat(model.parity.mismatches," | "))
 
     lines[#lines+1]=""
-    lines[#lines+1]="=== V614 ESSENTIAL CAUSAL DECISION ==="
-    local decisionKeys={"temporalConfoundResolved","initialPoseConfoundResolved","rootMotionContribution",
-        "jointTransformContribution","animationProgressContribution","projectionDepthContribution",
-        "headHorizontalEffectAfterTemporalControl","firstConcreteGeometricDivergence",
-        "causalMechanismProved","implementationTargetIdentified","v615Justified","astra6MaxJustified"}
-    for _,key in ipairs(decisionKeys) do lines[#lines+1]=key.." = "..tostring(analysis.decisions[key]) end
-    lines[#lines+1]="pcEquivalenceClaimAllowed = false"
-    lines[#lines+1]="matchingCriteriaChanged = false"
-    lines[#lines+1]="calipersChanged = false"
-    lines[#lines+1]="gainChanged = false"
-    lines[#lines+1]="cameraCorrectionAdded = false"
-    lines[#lines+1]="v615Created = false"
-
-    lines[#lines+1]=""
     lines[#lines+1]="=== V614 ESSENTIAL SIZE ==="
     lines[#lines+1]="fullReportChars = "..tostring(size.fullReportChars)
     lines[#lines+1]="essentialReportChars = "..tostring(size.essentialReportChars)
-    lines[#lines+1]="reductionPercent = "..tostring(SEGCFG.roundEssential(size.reductionPercent))
+    lines[#lines+1]="reductionPercent = "..tostring(type(size.reductionPercent)=="number"
+        and SEGCFG.roundEssential(size.reductionPercent) or size.reductionPercent)
     lines[#lines+1]="essentialChunks = "..tostring(size.essentialChunks)
     return table.concat(lines,"\n")
 end
 
+function SEGCFG.buildEssentialDiagnosticText(reason,legacyError,size)
+    local lines={"=== PC MOVEMENT V614 ESSENTIAL DIAGNOSTIC ===",
+        "essentialSchema = V614-EssentialDiagnosticR1","diagnosticOnly = true",
+        "analysisStatus = unavailable: controlled preparation or report construction failed",
+        "reportError = "..tostring(reason),"analysisParity = false",
+        "validationReadyEssential = false",
+        "temporalConfoundResolved = unproved: diagnostic-only report",
+        "initialPoseConfoundResolved = unproved: diagnostic-only report"}
+    for index,entry in ipairs(SEGCFG.controlledPreparationErrors or {}) do
+        lines[#lines+1]="preparationError = "..tostring(index).." stage="..tostring(entry.stage)
+            .." code="..tostring(entry.code).." route="..tostring(entry.route)
+            .." index="..tostring(entry.index).." segmentId="..tostring(entry.segmentId)
+            .." profile="..tostring(entry.profile).." field="..tostring(entry.field)
+            .." reason="..tostring(entry.reason)
+    end
+    for _,flag in ipairs({"causalMechanismProved","implementationTargetIdentified",
+        "v615Justified","astra6MaxJustified","pcEquivalenceClaimAllowed"}) do
+        lines[#lines+1]=flag.." = false"
+    end
+    if legacyError then lines[#lines+1]="legacyReportError = "..tostring(legacyError) end
+    for _,field in ipairs({"fullReportChars","essentialReportChars","reductionPercent","essentialChunks"}) do
+        lines[#lines+1]=field.." = "..tostring(size[field])
+    end
+    return table.concat(lines,"\n")
+end
+
 getgenv().PCV614EssentialReport=function()
-    local bundle=SEGCFG.buildProductionEssentialBundle()
-    local fullReportChars=SEGCFG.buildLegacyReport(true,true)
+    local bundleOK,bundle=pcall(SEGCFG.buildProductionEssentialBundle)
+    local legacyOK,fullReportChars=pcall(SEGCFG.buildLegacyReport,true,true)
+    local legacyError=not legacyOK and tostring(fullReportChars) or nil
+    if not legacyOK then fullReportChars="unavailable" end
     local text,size=SEGCFG.solveEssentialReportSize(fullReportChars,SEGCFG.reportPayloadMaxChars,
-        function(current) return SEGCFG.buildEssentialReportText(bundle,current) end)
+        function(current)
+            if bundleOK then return SEGCFG.buildEssentialReportText(bundle,current) end
+            return SEGCFG.buildEssentialDiagnosticText(bundle,legacyError,current)
+        end)
     if SEGCFG.reportCharCount(text)~=size.essentialReportChars then
         error("V614 essential report size self-check failed",0)
     end
@@ -4568,5 +6032,5 @@ getgenv().__PCMobileAimCleanup=function()
     getgenv().__PCMobileAimCleanup=nil
 end
 
-addEvidence("READY","V614 TemporalPoseTelemetryR1 ready; Acquisition R2 and controlled matching unchanged; read-only matched telemetry")
-warn("[V614 TemporalPoseTelemetryR1] ready | use mobile panel")
+addEvidence("READY","V614 TemporalPoseControlR2 ready; Acquisition R2 and controlled matching unchanged; read-only matched telemetry")
+warn("[V614 TemporalPoseControlR2] ready | use mobile panel")

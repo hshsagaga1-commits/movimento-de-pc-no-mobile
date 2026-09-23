@@ -26,8 +26,8 @@ def luau_binary() -> Path:
 
 source = RUNTIME.read_text(encoding="utf-8")
 loader_source = LOADER.read_text(encoding="utf-8")
-if 'local revision="V614-TemporalPoseTelemetryR1-EssentialReportR1-FullClipboardR1"' not in loader_source:
-    raise SystemExit("RED: Loader cache revision was not updated for FullClipboardR1")
+if 'local revision="V614-TemporalPoseControlR2-FullClipboardR1"' not in loader_source:
+    raise SystemExit("RED: Loader cache revision was not updated for TemporalPoseControlR2-FullClipboardR1")
 match = re.search(re.escape(START) + r"\n(.*?)\n" + re.escape(END), source, re.S)
 if not match:
     raise SystemExit("RED: production report-transport helper block is missing")

@@ -105,24 +105,38 @@ local function inputClass()
     return "OTHER", ps
 end
 
+local pmCache = {instance=nil, module=nil, cameras=nil, controls=nil}
 local function getPlayerModuleState()
     local playerScripts = player and player:FindFirstChild("PlayerScripts")
     local pm = playerScripts and playerScripts:FindFirstChild("PlayerModule")
     if not pm then return nil, nil, nil, nil end
 
-    local module = safe(function() return require(pm) end, nil)
+    if pmCache.instance ~= pm or type(pmCache.module) ~= "table" then
+        pmCache.instance = pm
+        pmCache.module = safe(function() return require(pm) end, nil)
+        pmCache.cameras = nil
+        pmCache.controls = nil
+    end
+
+    local module = pmCache.module
     if type(module) ~= "table" then return module, nil, nil, nil end
 
-    local cameras = safe(function()
-        if type(module.GetCameras) == "function" then return module:GetCameras() end
-        return rawget(module, "cameras")
-    end, rawget(module, "cameras"))
+    if type(pmCache.cameras) ~= "table" then
+        pmCache.cameras = safe(function()
+            if type(module.GetCameras) == "function" then return module:GetCameras() end
+            return rawget(module, "cameras")
+        end, rawget(module, "cameras"))
+    end
 
-    local controls = safe(function()
-        if type(module.GetControls) == "function" then return module:GetControls() end
-        return rawget(module, "controls")
-    end, rawget(module, "controls"))
+    if type(pmCache.controls) ~= "table" then
+        pmCache.controls = safe(function()
+            if type(module.GetControls) == "function" then return module:GetControls() end
+            return rawget(module, "controls")
+        end, rawget(module, "controls"))
+    end
 
+    local cameras = pmCache.cameras
+    local controls = pmCache.controls
     local cameraController = nil
     if type(cameras) == "table" then
         cameraController = rawget(cameras, "activeCameraController")
@@ -210,7 +224,7 @@ local function getControlController(controls)
     end, nil)
 end
 
-local function captureState()
+local function captureState(includeDigests)
     local _, cameras, controls, controller = getPlayerModuleState()
     local controlController = getControlController(controls)
     local phase, preferredText = inputClass()
@@ -325,10 +339,12 @@ local function captureState()
         end
     end
 
-    s.cameraControllerDigest = scalarDigest(controller, 48)
-    s.camerasDigest = scalarDigest(cameras, 36)
-    s.controlsDigest = scalarDigest(controls, 36)
-    s.controlControllerDigest = scalarDigest(controlController, 36)
+    if includeDigests then
+        s.cameraControllerDigest = scalarDigest(controller, 48)
+        s.camerasDigest = scalarDigest(cameras, 36)
+        s.controlsDigest = scalarDigest(controls, 36)
+        s.controlControllerDigest = scalarDigest(controlController, 36)
+    end
 
     return s
 end
@@ -371,7 +387,10 @@ local statFields = {
     "headLocalX","headLocalY","headLocalZ","headScreenDX",
     "rootMinusCameraYawDeg","controller_currentSubjectDistance",
     "cameraPitchDeg","cameraYawDeg","focusLocalX","focusLocalY","focusLocalZ",
-    "subjectLocalX","subjectLocalY","subjectLocalZ"
+    "subjectLocalX","subjectLocalY","subjectLocalZ",
+    "cameraUpdateYawDeltaDeg","cameraUpdatePitchDeltaDeg",
+    "cameraUpdateRootLocalXDelta","cameraUpdateRootScreenDXDelta",
+    "cameraUpdateHeadLocalXDelta","cameraUpdateHeadScreenDXDelta"
 }
 
 local function newStat()
@@ -481,7 +500,7 @@ local function updatePendingTransitions(s)
         for _, off in ipairs(tr.offsets) do
             local key = tostring(off)
             if age >= off and tr.states[key] == nil then
-                tr.states[key] = s
+                tr.states[key] = (off == 8) and captureState(true) or s
             end
         end
         if age >= 8 then
@@ -551,7 +570,7 @@ local function startCapture()
     lastTimelineAt = -math.huge
     pendingTransitions = {}
 
-    local s = captureState()
+    local s = captureState(true)
     currentPhase = s.phase
     lastState = s
     reportData.startState = s
@@ -584,7 +603,7 @@ end
 local function stopCapture(autoStop)
     if not captureRunning then return ENV.GamepadBuracoX9Report and ENV.GamepadBuracoX9Report() or "" end
 
-    local s = captureState()
+    local s = captureState(true)
     reportData.stopState = s
     event("STOP", "phase=" .. tostring(s.phase) .. (autoStop and " auto=true" or ""))
     reportData.duration = os.clock() - captureStart
@@ -733,6 +752,24 @@ local function copyReport()
     return report
 end
 
+local function angleDeltaDeg(a, b)
+    if type(a) ~= "number" or type(b) ~= "number" then return nil end
+    local d = a - b
+    while d > 180 do d = d - 360 end
+    while d < -180 do d = d + 360 end
+    return round(d, 6)
+end
+
+local function numDelta(a, b)
+    if type(a) ~= "number" or type(b) ~= "number" then return nil end
+    return round(a - b, 7)
+end
+
+local function firstNonNil(a, b)
+    if a ~= nil then return a end
+    return b
+end
+
 local function renderPost()
     if not captureRunning then
         if phaseLabel then
@@ -744,12 +781,29 @@ local function renderPost()
 
     frameIndex = frameIndex + 1
     local t = os.clock() - captureStart
-    local s = captureState()
+    local s = captureState(false)
+
+    if preStateFrame then
+        s.cameraUpdateYawDeltaDeg = angleDeltaDeg(s.cameraYawDeg, preStateFrame.cameraYawDeg)
+        s.cameraUpdatePitchDeltaDeg = angleDeltaDeg(s.cameraPitchDeg, preStateFrame.cameraPitchDeg)
+        s.cameraUpdateRootLocalXDelta = numDelta(s.rootLocalX, preStateFrame.rootLocalX)
+        s.cameraUpdateRootScreenDXDelta = numDelta(s.rootScreenDX, preStateFrame.rootScreenDX)
+        s.cameraUpdateHeadLocalXDelta = numDelta(s.headLocalX, preStateFrame.headLocalX)
+        s.cameraUpdateHeadScreenDXDelta = numDelta(s.headScreenDX, preStateFrame.headScreenDX)
+    end
 
     if phaseLabel then phaseLabel.Text = "INPUT ATUAL: " .. tostring(s.phase) end
 
     if currentPhase ~= s.phase then
-        scheduleTransition(currentPhase, s.phase, lastState, s)
+        local detailed = captureState(true)
+        detailed.cameraUpdateYawDeltaDeg = s.cameraUpdateYawDeltaDeg
+        detailed.cameraUpdatePitchDeltaDeg = s.cameraUpdatePitchDeltaDeg
+        detailed.cameraUpdateRootLocalXDelta = s.cameraUpdateRootLocalXDelta
+        detailed.cameraUpdateRootScreenDXDelta = s.cameraUpdateRootScreenDXDelta
+        detailed.cameraUpdateHeadLocalXDelta = s.cameraUpdateHeadLocalXDelta
+        detailed.cameraUpdateHeadScreenDXDelta = s.cameraUpdateHeadScreenDXDelta
+        scheduleTransition(currentPhase, s.phase, lastState, detailed)
+        s = detailed
         currentPhase = s.phase
     end
 
@@ -771,8 +825,8 @@ local function renderPost()
             tostring(s.lastInputType),
             tostring(s.cameraControllerId),
             tostring(s.controlControllerId),
-            str(s.controller_inMouseLockedMode ~= nil and s.controller_inMouseLockedMode or s.moduleLocked),
-            str(s.controller_mouseLockOffset ~= nil and s.controller_mouseLockOffset or s.moduleOffset),
+            str(firstNonNil(s.controller_inMouseLockedMode, s.moduleLocked)),
+            str(firstNonNil(s.controller_mouseLockOffset, s.moduleOffset)),
             str(s.rootLocalX),
             str(s.rootScreenDX),
             str(s.headLocalX),
@@ -788,7 +842,7 @@ end
 local preStateFrame = nil
 local function renderPre()
     if captureRunning then
-        preStateFrame = captureState()
+        preStateFrame = captureState(false)
     end
 end
 

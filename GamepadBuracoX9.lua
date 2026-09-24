@@ -46,6 +46,8 @@ local function safe(fn, fallback)
     return fallback
 end
 
+local UGS = safe(function() return UserSettings():GetService("UserGameSettings") end, nil)
+
 local function str(v)
     if v == nil then return "nil" end
     local tv = typeof(v)
@@ -235,7 +237,7 @@ local function captureState(includeDigests)
     local head = char and char:FindFirstChild("Head")
     local lock = getCameraModuleLockState(cameras, controller)
 
-    local ugs = safe(function() return UserSettings():GetService("UserGameSettings") end, nil)
+    local ugs = UGS
 
     local s = {
         phase = phase,
@@ -428,6 +430,7 @@ local gui = nil
 local statusLabel = nil
 local phaseLabel = nil
 local copyButton = nil
+local preStateFrame = nil
 
 local function notify(title, text, duration)
     pcall(function()
@@ -752,6 +755,36 @@ local function copyReport()
     return report
 end
 
+local function capturePreGeometry()
+    local cam = Workspace.CurrentCamera
+    if not cam then return nil end
+
+    local s = {}
+    local rx, ry = cam.CFrame:ToOrientation()
+    s.cameraPitchDeg = round(math.deg(rx), 4)
+    s.cameraYawDeg = round(math.deg(ry), 4)
+
+    local char = player and player.Character
+    local root = char and (char:FindFirstChild("HumanoidRootPart") or char.PrimaryPart)
+    local head = char and char:FindFirstChild("Head")
+
+    if root then
+        local lp = cam.CFrame:PointToObjectSpace(root.Position)
+        local sp = cam:WorldToViewportPoint(root.Position)
+        s.rootLocalX = round(lp.X, 6)
+        s.rootScreenDX = cam.ViewportSize.X > 0 and round(sp.X / cam.ViewportSize.X - 0.5, 7) or nil
+    end
+
+    if head then
+        local hp = cam.CFrame:PointToObjectSpace(head.Position)
+        local sp = cam:WorldToViewportPoint(head.Position)
+        s.headLocalX = round(hp.X, 6)
+        s.headScreenDX = cam.ViewportSize.X > 0 and round(sp.X / cam.ViewportSize.X - 0.5, 7) or nil
+    end
+
+    return s
+end
+
 local function angleDeltaDeg(a, b)
     if type(a) ~= "number" or type(b) ~= "number" then return nil end
     local d = a - b
@@ -839,10 +872,11 @@ local function renderPost()
     lastState = s
 end
 
-local preStateFrame = nil
 local function renderPre()
     if captureRunning then
-        preStateFrame = captureState(false)
+        preStateFrame = capturePreGeometry()
+    else
+        preStateFrame = nil
     end
 end
 

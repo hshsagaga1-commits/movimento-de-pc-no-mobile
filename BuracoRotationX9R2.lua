@@ -556,7 +556,8 @@ local function postFrame()
 
     if t - lastTimelineAt >= TIMELINE_DT and #timeline < 120 then
         lastTimelineAt = t
-        local prx,pry = pre and v2xy(pre.rotateInput) or nil,nil
+        local prx,pry = nil,nil
+        if pre then prx,pry = v2xy(pre.rotateInput) end
         local pox,poy = v2xy(post.rotateInput)
         local gpx,gpy = v2xy(post.gamepadPanningCamera)
         timeline[#timeline+1] = string.format(

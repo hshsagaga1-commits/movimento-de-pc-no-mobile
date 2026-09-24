@@ -735,15 +735,14 @@ end
 local function copyReport()
     local report = formatReport()
     local copied = false
-    for _, fn in ipairs({
-        ENV.setclipboard, ENV.toclipboard,
-        type(setclipboard) == "function" and setclipboard or nil,
-        type(toclipboard) == "function" and toclipboard or nil
-    }) do
-        if type(fn) == "function" then
-            local ok = pcall(fn, report)
-            if ok then copied = true break end
-        end
+    local clipboardFns = {}
+    if type(ENV.setclipboard) == "function" then clipboardFns[#clipboardFns + 1] = ENV.setclipboard end
+    if type(ENV.toclipboard) == "function" then clipboardFns[#clipboardFns + 1] = ENV.toclipboard end
+    if type(setclipboard) == "function" then clipboardFns[#clipboardFns + 1] = setclipboard end
+    if type(toclipboard) == "function" then clipboardFns[#clipboardFns + 1] = toclipboard end
+    for _, fn in ipairs(clipboardFns) do
+        local ok = pcall(fn, report)
+        if ok then copied = true break end
     end
     if type(writefile) == "function" then
         pcall(writefile, "GamepadBuracoX9_Report.txt", report)

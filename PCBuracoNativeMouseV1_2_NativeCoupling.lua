@@ -8,8 +8,10 @@
 -- V1.1 writes the equivalent measured mouse contribution to rotateInput,
 -- which Roblox consumes normally in its own camera Update.
 --
--- No Camera.CFrame / Focus / RootPart.CFrame writes. No smoothing. No forced
--- MouseBehavior, RotationType, FOV, zoom or mouse-lock offset.
+-- No Camera.CFrame / Focus / RootPart/Head CFrame writes and no smoothing.
+-- V1.2 deliberately restores native PC lock state: CameraRelative,
+-- LockCenter, controller mouse-lock/offset and Evade CamStats.MouseEnabled.
+-- FOV, zoom, WalkSpeed and physical velocity remain untouched.
 
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")

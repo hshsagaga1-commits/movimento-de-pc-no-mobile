@@ -31,7 +31,7 @@ end
 
 -- Keep the approved V1.1 camera path. Movement is V5.9-identical except\n-- the continuous digital W/A/S/D refresh runs at Input-1 instead of Input+8,\n-- so direction transitions are emitted before ControlModule reads movement.\n-- Buffered jump servicing remains at Input+8.
 do
-    local url = "https://raw.githubusercontent.com/hshsagaga1-commits/movimento-de-pc-no-mobile/119a891d3966527607774f9e710c91c86f35f68c/PCModeLockV5_10_InputOrder.lua?_cb="
+    local url = "https://raw.githubusercontent.com/hshsagaga1-commits/movimento-de-pc-no-mobile/41d76e4aee0c99368e0182d1623ad85953e9d3fe/PCModeLockV5_10_InputOrder.lua?_cb="
         .. HttpService:GenerateGUID(false)
     local source = game:HttpGet(url, true)
     local chunk, err = loadstring(source)

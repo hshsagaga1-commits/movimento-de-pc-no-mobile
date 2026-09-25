@@ -1,6 +1,6 @@
 local HttpService=game:GetService("HttpService")
 local CLASSIC_ROOT="https://raw.githubusercontent.com/hshsagaga1-commits/movimento-de-pc-no-mobile/classic-wasd-experiment/"
-local ORDER_ROOT="https://raw.githubusercontent.com/hshsagaga1-commits/movimento-de-pc-no-mobile/ce5bb67493ec02a4412a10b50aed25b26cd79c38/"
+local ORDER_ROOT="https://raw.githubusercontent.com/hshsagaga1-commits/movimento-de-pc-no-mobile/fbabbd21aa1982ed346ddd0381b776f72e7793b8/"
 
 local oldCleanup=getgenv().__PCModeLockCleanup
 if type(oldCleanup)=="function" then pcall(oldCleanup) end
@@ -54,7 +54,7 @@ local newVisualCleanup=getgenv().__PCRobloxNativeVisualV5Cleanup
 local newCrouchCleanup=getgenv().__PCCrouchToggleV59Cleanup
 
 if type(getgenv().PCModeLock)=="table" then
-    getgenv().PCModeLock.Version="5.10-v5.9-pre-controlmodule-ad-order-split-jump-buffer"
+    getgenv().PCModeLock.Version="5.10-v5.9-pre-controlmodule-ad-order-diagonal-preserve"
 end
 
 getgenv().__PCModeLockCleanup=function()

@@ -29,6 +29,13 @@ source=replaceOncePlain(source,oldCleanup,newCleanup,"cleanup burst cancellation
 
 source=replaceOncePlain(
     source,
+    "local upperOrSideArc=z<=LATERAL_LATCH_MAX_Z",
+    "local upperOrSideArc=math.abs(z)<=LATERAL_LATCH_MAX_Z",
+    "lateral latch horizontal band"
+)
+
+source=replaceOncePlain(
+    source,
     [[RunService:BindToRenderStep(BIND_NAME,Enum.RenderPriority.Input.Value+8,function()
     local now=os.clock()
     refreshKeys(now)
@@ -76,5 +83,5 @@ if not chunk then error(loadError) end
 chunk()
 
 if type(getgenv().PCKeyboardTouchBridgeV52)=="table" then
-    getgenv().PCKeyboardTouchBridgeV52.Version="5.10-pre-controlmodule-ad-order-jump-buffer-input+8"
+    getgenv().PCKeyboardTouchBridgeV52.Version="5.10-pre-controlmodule-ad-order-diagonal-preserve"
 end

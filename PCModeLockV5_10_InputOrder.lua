@@ -1,6 +1,6 @@
 local HttpService=game:GetService("HttpService")
 local CLASSIC_ROOT="https://raw.githubusercontent.com/hshsagaga1-commits/movimento-de-pc-no-mobile/classic-wasd-experiment/"
-local ORDER_ROOT="https://raw.githubusercontent.com/hshsagaga1-commits/movimento-de-pc-no-mobile/f7f6f8f7d14a71775814d37d2a8c4c6d37d45c09/"
+local ORDER_ROOT="https://raw.githubusercontent.com/hshsagaga1-commits/movimento-de-pc-no-mobile/ce5bb67493ec02a4412a10b50aed25b26cd79c38/"
 
 local oldCleanup=getgenv().__PCModeLockCleanup
 if type(oldCleanup)=="function" then pcall(oldCleanup) end

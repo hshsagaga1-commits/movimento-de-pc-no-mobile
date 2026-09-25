@@ -1,13 +1,13 @@
 local HttpService=game:GetService("HttpService")
 local CLASSIC_ROOT="https://raw.githubusercontent.com/hshsagaga1-commits/movimento-de-pc-no-mobile/classic-wasd-experiment/"
-local ORDER_ROOT="https://raw.githubusercontent.com/hshsagaga1-commits/movimento-de-pc-no-mobile/8b47e98ff8bbfcfc48d635749562072d77971088/"
+local ORDER_ROOT="https://raw.githubusercontent.com/hshsagaga1-commits/movimento-de-pc-no-mobile/f7f6f8f7d14a71775814d37d2a8c4c6d37d45c09/"
 
 local oldCleanup=getgenv().__PCModeLockCleanup
 if type(oldCleanup)=="function" then pcall(oldCleanup) end
 local oldCrouchCleanup=getgenv().__PCCrouchToggleV59Cleanup
 if type(oldCrouchCleanup)=="function" then pcall(oldCrouchCleanup) end
 
--- Preserve V5.9 architecture. Only the keyboard-touch bridge scheduling changes.
+-- Preserve V5.9 architecture. Only the keyboard-touch bridge scheduling changes:\n-- continuous W/A/S/D refresh runs at Input-1; buffered jump service remains Input+8.\n-- The V5.5 keyboard-controller wake helper also runs at Input-1, so callback order\n-- between wake and movement refresh at that same priority is not guaranteed.
 local baseSource=game:HttpGet(
     CLASSIC_ROOT.."PCModeLockV5_7.lua?_cb="..HttpService:GenerateGUID(false),
     true
@@ -54,7 +54,7 @@ local newVisualCleanup=getgenv().__PCRobloxNativeVisualV5Cleanup
 local newCrouchCleanup=getgenv().__PCCrouchToggleV59Cleanup
 
 if type(getgenv().PCModeLock)=="table" then
-    getgenv().PCModeLock.Version="5.10-v5.9-pre-controlmodule-ad-order"
+    getgenv().PCModeLock.Version="5.10-v5.9-pre-controlmodule-ad-order-split-jump-buffer"
 end
 
 getgenv().__PCModeLockCleanup=function()

@@ -29,9 +29,9 @@ if type(ENV.__PCBuracoNativeMouseV11Cleanup) == "function" then
     pcall(ENV.__PCBuracoNativeMouseV11Cleanup)
 end
 
--- Keep the approved V1.1 camera path. Movement is V5.9-identical except\n-- the digital joystick refresh now runs at Input-1 instead of Input+8, so\n-- A/D transitions are emitted before ControlModule reads movement at Input.
+-- Keep the approved V1.1 camera path. Movement is V5.9-identical except\n-- the continuous digital W/A/S/D refresh runs at Input-1 instead of Input+8,\n-- so direction transitions are emitted before ControlModule reads movement.\n-- Buffered jump servicing remains at Input+8.
 do
-    local url = "https://raw.githubusercontent.com/hshsagaga1-commits/movimento-de-pc-no-mobile/69d89efb0b29d39c3fa48539da7b39203f85853f/PCModeLockV5_10_InputOrder.lua?_cb="
+    local url = "https://raw.githubusercontent.com/hshsagaga1-commits/movimento-de-pc-no-mobile/7df6903857da5b73b196588c5b3cc697ae40a652/PCModeLockV5_10_InputOrder.lua?_cb="
         .. HttpService:GenerateGUID(false)
     local source = game:HttpGet(url, true)
     local chunk, err = loadstring(source)

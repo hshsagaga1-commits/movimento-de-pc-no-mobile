@@ -1,11 +1,14 @@
 local HttpService=game:GetService("HttpService")
 local CLASSIC_ROOT="https://raw.githubusercontent.com/hshsagaga1-commits/movimento-de-pc-no-mobile/classic-wasd-experiment/"
 local ORDER_ROOT="https://raw.githubusercontent.com/hshsagaga1-commits/movimento-de-pc-no-mobile/fbabbd21aa1982ed346ddd0381b776f72e7793b8/"
+local LATERAL_ROOT="https://raw.githubusercontent.com/hshsagaga1-commits/movimento-de-pc-no-mobile/45f57bbf3fd0b9beee32be1a952b3d9e8232be72/"
 
 local oldCleanup=getgenv().__PCModeLockCleanup
 if type(oldCleanup)=="function" then pcall(oldCleanup) end
 local oldCrouchCleanup=getgenv().__PCCrouchToggleV59Cleanup
 if type(oldCrouchCleanup)=="function" then pcall(oldCrouchCleanup) end
+local oldLateralCleanup=getgenv().__PCFullLateralV510Cleanup
+if type(oldLateralCleanup)=="function" then pcall(oldLateralCleanup) end
 
 -- Preserve V5.9 architecture. Only the keyboard-touch bridge scheduling changes:\n-- continuous W/A/S/D refresh runs at Input-1; buffered jump service remains Input+8.\n-- The V5.5 keyboard-controller wake helper also runs at Input-1, so callback order\n-- between wake and movement refresh at that same priority is not guaranteed.
 local baseSource=game:HttpGet(
@@ -30,6 +33,17 @@ local bridgeChunk,bridgeError=loadstring(bridgeSource)
 if not bridgeChunk then error(bridgeError) end
 bridgeChunk()
 
+-- Keep A/D and lateral diagonals at a full camera-relative digital magnitude.
+-- This changes only the movement-vector transform; it never writes Player:Move,
+-- character CFrames, camera CFrames, speed, or velocity.
+local lateralSource=game:HttpGet(
+    LATERAL_ROOT.."PCFullLateralV5_10.lua?_cb="..HttpService:GenerateGUID(false),
+    true
+)
+local lateralChunk,lateralError=loadstring(lateralSource)
+if not lateralChunk then error(lateralError) end
+lateralChunk()
+
 -- Reapply exact Roblox mobile visuals to the recreated bridge.
 local visualSource=game:HttpGet(
     CLASSIC_ROOT.."PCRobloxNativeVisualV5.lua?_cb="..HttpService:GenerateGUID(false),
@@ -52,13 +66,15 @@ local baseCleanup=getgenv().__PCModeLockCleanup
 local newBridgeCleanup=getgenv().__PCKeyboardTouchBridgeV52Cleanup
 local newVisualCleanup=getgenv().__PCRobloxNativeVisualV5Cleanup
 local newCrouchCleanup=getgenv().__PCCrouchToggleV59Cleanup
+local newLateralCleanup=getgenv().__PCFullLateralV510Cleanup
 
 if type(getgenv().PCModeLock)=="table" then
-    getgenv().PCModeLock.Version="5.10-v5.9-pre-controlmodule-ad-order-diagonal-preserve"
+    getgenv().PCModeLock.Version="5.10-v5.9-full-lateral-ad-order"
 end
 
 getgenv().__PCModeLockCleanup=function()
     if type(newCrouchCleanup)=="function" then pcall(newCrouchCleanup) end
+    if type(newLateralCleanup)=="function" then pcall(newLateralCleanup) end
     if type(newVisualCleanup)=="function" then pcall(newVisualCleanup) end
     if type(newBridgeCleanup)=="function" then pcall(newBridgeCleanup) end
     if type(baseCleanup)=="function" then pcall(baseCleanup) end

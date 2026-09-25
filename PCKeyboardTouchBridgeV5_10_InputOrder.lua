@@ -24,7 +24,7 @@ source=replaceOncePlain(source,oldCleanup,newCleanup,"cleanup burst cancellation
 
 local chunk,loadError=loadstring(source)
 ]]
-local replacement=[[
+local replacement=[=[
 source=replaceOncePlain(source,oldCleanup,newCleanup,"cleanup burst cancellation")
 
 source=replaceOncePlain(
@@ -68,7 +68,7 @@ source=replaceOncePlain(
 )
 
 local chunk,loadError=loadstring(source)
-]]
+]=]
 source=replaceOncePlain(source,anchor,replacement,"V5.9 compile anchor")
 
 local chunk,loadError=loadstring(source)

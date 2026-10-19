@@ -209,7 +209,8 @@ local function refreshKeys(now)
             if ax<=0.0001 then return {W=true} end
             local ratio=ax/az
             if ratio<=FORWARD_W_MAX_RATIO then
-                return {W=true}
+                -- Straight-forward input uses the combined W+A+D chord as requested.
+                return {W=true,A=true,D=true}
             end
             if radius>=FORWARD_DIAGONAL_MIN_RADIUS and ratio<=FORWARD_DIAGONAL_MAX_RATIO then
                 return {W=true,[horizontalKey]=true}

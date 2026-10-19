@@ -96,6 +96,7 @@ local ACTIVE_CHORDS={
     ["A"]=true,
     ["D"]=true,
     ["W"]=true,
+    ["W+A+D"]=true,
     ["W+A"]=true,
     ["W+D"]=true,
 }
@@ -120,6 +121,9 @@ local function desiredMove(chord)
             desired=forward-right
         elseif chord=="W+D" then
             desired=forward+right
+        elseif chord=="W+A+D" then
+            -- A and D are both held, but forward remains the intended net direction.
+            desired=forward
         end
         if desired.Magnitude>1e-5 then return desired.Unit end
     end

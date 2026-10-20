@@ -148,6 +148,9 @@ local function refreshKeys(now)
     if not enabled or movementTouch==nil then
         resetAxis(axisX)
         resetAxis(axisZ)
+        pendingChord=nil
+        pendingChordSince=0
+        stableChordKey="-"
         releaseKeys()
         return
     end

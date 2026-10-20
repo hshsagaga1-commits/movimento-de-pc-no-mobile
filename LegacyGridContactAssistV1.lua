@@ -21,8 +21,8 @@ local EDGE_DROP_MIN=0.55
 
 -- Hold only modifies character physics; it never calls Player:Move and never
 -- captures/touches the joystick GUI.
-local WALL_INWARD_SPEED=5.25
-local EDGE_INWARD_SPEED=4.25
+local WALL_INWARD_SPEED=7.50
+local EDGE_INWARD_SPEED=6.25
 local CONTACT_GRACE_SECONDS=0.24
 local MIN_PROJECTED_INPUT=0.10
 local SEED_SPEED_FACTOR=0.92
@@ -269,7 +269,7 @@ local function applyAssist(contact,desired)
     if desired.Magnitude>=MIN_PROJECTED_INPUT then
         -- Pure A/D strafe uses 50% of the current horizontal motor speed.
         -- W and diagonal chords keep the original speed unchanged.
-        local lateralFactor=(activeChord=="A" or activeChord=="D") and 0.75 or 1.0
+        local lateralFactor=(activeChord=="A" or activeChord=="D") and 0.50 or 1.0
         drive=desired.Unit*speed*lateralFactor
     elseif horizontal.Magnitude>0.05 then
         drive=horizontal

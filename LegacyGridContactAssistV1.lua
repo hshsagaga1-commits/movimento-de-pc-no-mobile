@@ -267,7 +267,10 @@ local function applyAssist(contact,desired)
 
     local drive=Vector3.zero
     if desired.Magnitude>=MIN_PROJECTED_INPUT then
-        drive=desired.Unit*speed
+        -- Pure A/D strafe uses 50% of the current horizontal motor speed.
+        -- W and diagonal chords keep the original speed unchanged.
+        local lateralFactor=(activeChord=="A" or activeChord=="D") and 0.50 or 1.0
+        drive=desired.Unit*speed*lateralFactor
     elseif horizontal.Magnitude>0.05 then
         drive=horizontal
     end

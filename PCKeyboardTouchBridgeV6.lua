@@ -42,7 +42,11 @@ local latestZ=0
 local pressed={W=false,A=false,S=false,D=false}
 local axisX={state=0,releaseAt=nil}
 local axisZ={state=0,releaseAt=nil}
-local latestChord="-"
+local latestChord="-" 
+local pendingChord=nil
+local pendingChordSince=0
+local stableChordKey="-" 
+local CHORD_STABILITY_SECONDS=0.035
 local connections={}
 local lastJumpPulse=-math.huge
 local pendingJumpDeadline=nil
@@ -244,7 +248,28 @@ local function refreshKeys(now)
         return {S=true,[horizontalKey]=true}
     end
 
-    applyKeys(chooseDigitalChord(latestX,latestZ))
+    local desired=chooseDigitalChord(latestX,latestZ)
+    local names={}
+    for _,name in ipairs({"W","A","S","D"}) do
+        if desired[name] then names[#names+1]=name end
+    end
+    local desiredKey=#names>0 and table.concat(names,"+") or "-"
+
+    -- Only commit a chord that remains the current destination briefly.
+    -- Tiny transient chords crossed while dragging the thumb are discarded.
+    if desiredKey==stableChordKey then
+        pendingChord=nil
+        pendingChordSince=0
+        applyKeys(desired)
+    elseif desiredKey~=pendingChord then
+        pendingChord=desiredKey
+        pendingChordSince=now
+    elseif now-pendingChordSince>=CHORD_STABILITY_SECONDS then
+        stableChordKey=desiredKey
+        pendingChord=nil
+        pendingChordSince=0
+        applyKeys(desired)
+    end
 end
 
 local gui=Instance.new("ScreenGui")

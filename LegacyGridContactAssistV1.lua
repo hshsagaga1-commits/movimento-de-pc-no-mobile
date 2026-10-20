@@ -287,6 +287,16 @@ local function applyAssist(contact,desired)
 
     pcall(function()
         root.AssemblyLinearVelocity=Vector3.new(corrected.X,velocity.Y,corrected.Z)
+
+        -- On the inverted grid, pure A/D should turn the avatar fully sideways,
+        -- not merely preserve a lateral velocity vector. Apply orientation only
+        -- while the grid contact assist is active and the chord is pure A or D.
+        if activeChord=="A" or activeChord=="D" then
+            local facing=desired.Magnitude>1e-5 and desired.Unit or Vector3.zero
+            if facing.Magnitude>0.5 then
+                root.CFrame=CFrame.lookAt(root.Position,root.Position+facing)
+            end
+        end
     end)
     assistedFrames+=1
 end

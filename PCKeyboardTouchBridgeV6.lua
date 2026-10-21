@@ -8,7 +8,7 @@ local playerGui=player:WaitForChild("PlayerGui")
 
 local BIND_NAME="__PCKeyboardTouchBridgeV52"
 local GUI_NAME="PCKeyboardTouchBridgeV52Overlay"
-local MOVEMENT_HALF=0.50
+local MOVEMENT_HALF=0.98
 local PRESS_THRESHOLD=0.30
 local RELEASE_THRESHOLD=0.18
 local DIRECTION_LATCH_SECONDS=0.09
@@ -49,7 +49,7 @@ local stableChordKey="-"
 local CHORD_STABILITY_SECONDS=0.001
 -- Fast staged sweep when crossing the forward arc from A to D (or back).
 -- 20 ms per intermediate chord keeps the sequence visible and quick.
-local SWEEP_STAGE_SECONDS=0.020
+local SWEEP_STAGE_SECONDS=0.016
 local sweepPlan=nil
 local sweepIndex=0
 local sweepNextAt=0

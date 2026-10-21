@@ -48,8 +48,8 @@ local pendingChordSince=0
 local stableChordKey="-" 
 local CHORD_STABILITY_SECONDS=0.001
 -- Fast staged sweep when crossing the forward arc from A to D (or back).
--- 25 ms per intermediate chord keeps the sequence visible without feeling slow.
-local SWEEP_STAGE_SECONDS=0.025
+-- 20 ms per intermediate chord keeps the sequence visible and quick.
+local SWEEP_STAGE_SECONDS=0.020
 local sweepPlan=nil
 local sweepIndex=0
 local sweepNextAt=0

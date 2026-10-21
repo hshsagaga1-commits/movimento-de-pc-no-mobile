@@ -52,6 +52,8 @@ local wallFrames=0
 local edgeFrames=0
 local noContactFrames=0
 local activeChord="-"
+local smoothedDirection=Vector3.zero
+local lastHeartbeatAt=os.clock()
 
 local function flat(v)
     return Vector3.new(v.X,0,v.Z)
@@ -308,15 +310,45 @@ heartbeatConnection=RunService.Heartbeat:Connect(function()
     if humanoid.Health<=0 then return end
 
     local chord=readChord()
+    local previousChord=activeChord
     activeChord=chord
-    local desired=desiredMove(chord)
+    local targetDirection=desiredMove(chord)
+    local now=os.clock()
+    local dt=math.clamp(now-lastHeartbeatAt,0,0.05)
+    lastHeartbeatAt=now
+
+    -- Smooth only the forward sweep/diagonal transitions. Pure lateral A<->D
+    -- remains instant unless the bridge has staged the W+diagonal chords.
+    if targetDirection.Magnitude<=0.05 then
+        smoothedDirection=Vector3.zero
+    else
+        local directLateralSwap=
+            (previousChord=="A" and chord=="D") or
+            (previousChord=="D" and chord=="A")
+        if directLateralSwap then
+            smoothedDirection=targetDirection.Unit
+        else
+            local responseSeconds=0.065
+            local alpha=1-math.exp(-dt/responseSeconds)
+            if smoothedDirection.Magnitude<=0.05 then
+                smoothedDirection=targetDirection.Unit
+            else
+                smoothedDirection=smoothedDirection:Lerp(targetDirection.Unit,alpha)
+                if smoothedDirection.Magnitude>1e-5 then
+                    smoothedDirection=smoothedDirection.Unit
+                end
+            end
+        end
+    end
+    local desired=smoothedDirection
 
     -- Explicitly support the requested PC chords. If the bridge is not loaded,
     -- Humanoid.MoveDirection is still accepted as a fallback.
     if not ACTIVE_CHORDS[chord] and desired.Magnitude<=0.05 then return end
 
     -- A/D facing must not depend on ground, wall, or edge contact.
-    -- Apply it every frame, including while airborne.
+    -- Apply it every frame, including while airborne; the smoothed vector avoids
+    -- snapping on staged diagonal transitions while retaining direct A<->D swaps.
     if chord=="A" or chord=="D" then
         local facing=desired.Magnitude>1e-5 and desired.Unit or Vector3.zero
         if facing.Magnitude>0.5 then
@@ -326,7 +358,6 @@ heartbeatConnection=RunService.Heartbeat:Connect(function()
         end
     end
 
-    local now=os.clock()
     local contact=getContact(now)
     if not contact then
         noContactFrames+=1
@@ -338,7 +369,7 @@ heartbeatConnection=RunService.Heartbeat:Connect(function()
 end)
 
 env.LegacyGridContactAssistV1={
-    Version="3.1-same-motor-rotated-W-A-D-WA-WD",
+    Version="3.2-fast-smoothed-forward-sweep",
     Enabled=enabled,
     GetState=function()
         return {

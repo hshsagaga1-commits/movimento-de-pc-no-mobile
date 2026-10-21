@@ -3,8 +3,11 @@ local RunService=game:GetService("RunService")
 local UserInputService=game:GetService("UserInputService")
 
 local player=Players.LocalPlayer
+local playerGui=player:WaitForChild("PlayerGui")
 local BIND_NAME="__PCCameraTouchRightHalfGateV5"
-local SPLIT=0.50
+-- Reserve only the joystick itself (98% of its radius), not the whole joystick deadzone.
+-- This lets the camera use the rest of the screen while keeping the controls separate.
+local DEADZONE_RADIUS_SCALE=0.98
 
 local oldCleanup=getgenv().__PCCameraTouchRightHalfGateV5Cleanup
 if type(oldCleanup)=="function" then pcall(oldCleanup) end
@@ -25,26 +28,39 @@ local rightEndsPassed=0
 local installErrors=0
 local reinstallCount=0
 
-local function viewportWidth()
-    local camera=workspace.CurrentCamera
-    return camera and camera.ViewportSize.X or 1108
-end
-
 local function isTouch(input)
     local t=nil
     pcall(function() t=input.UserInputType end)
     return t==Enum.UserInputType.Touch
 end
 
-local function inputX(input)
-    local x=nil
-    pcall(function() x=input.Position.X end)
-    return x
+local function touchPosition(input)
+    local position=nil
+    pcall(function() position=input.Position end)
+    if typeof(position)=="Vector3" then
+        return Vector2.new(position.X,position.Y)
+    elseif typeof(position)=="Vector2" then
+        return position
+    end
+    return nil
 end
 
-local function onLeftHalf(input)
-    local x=inputX(input)
-    return type(x)=="number" and x<=viewportWidth()*SPLIT
+local function inJoystickDeadzone(input)
+    local position=touchPosition(input)
+    if not position then return false end
+
+    local overlay=playerGui:FindFirstChild("PCKeyboardTouchBridgeV52Overlay")
+    local joystick=overlay and overlay:FindFirstChild("PCJoystick",true)
+    if not joystick or not joystick:IsA("GuiObject") then
+        -- Safe fallback while the movement UI is initializing.
+        local camera=workspace.CurrentCamera
+        local width=camera and camera.ViewportSize.X or 1108
+        return position.X<=width*0.50
+    end
+
+    local center=joystick.AbsolutePosition+(joystick.AbsoluteSize/2)
+    local radius=math.min(joystick.AbsoluteSize.X,joystick.AbsoluteSize.Y)*0.5*DEADZONE_RADIUS_SCALE
+    return (position-center).Magnitude<=radius
 end
 
 local function getMeta(tbl)
@@ -164,7 +180,7 @@ local function installForController(controller)
     local beganOk=installOne(began,function(callOriginal)
         return function(self,input,...)
             if self==getActiveController() and isTouch(input) then
-                if onLeftHalf(input) then
+                if inJoystickDeadzone(input) then
                     blockedTouches[input]=true
                     rightTouches[input]=nil
                     leftBeginsBlocked+=1
@@ -188,9 +204,9 @@ local function installForController(controller)
                 end
 
                 -- Defensive fallback: if Changed arrives before Began was observed,
-                -- classify from its current position. A left-half touch must never
+                -- classify from its current position. A joystick deadzone touch must never
                 -- enter camera rotation.
-                if rightTouches[input]~=true and onLeftHalf(input) then
+                if rightTouches[input]~=true and inJoystickDeadzone(input) then
                     blockedTouches[input]=true
                     leftChangesBlocked+=1
                     return nil
@@ -199,7 +215,7 @@ local function installForController(controller)
                 -- A camera touch that began on the right may temporarily cross the
                 -- split. Freeze camera rotation while it is physically on the left,
                 -- but keep its original Began/Ended lifecycle so BaseCamera can clean up.
-                if rightTouches[input]==true and onLeftHalf(input) then
+                if rightTouches[input]==true and inJoystickDeadzone(input) then
                     leftChangesBlocked+=1
                     return nil
                 end
@@ -247,8 +263,8 @@ RunService:BindToRenderStep(BIND_NAME,Enum.RenderPriority.Camera.Value-6,functio
 end)
 
 getgenv().PCCameraTouchRightHalfGateV5={
-    Version="5.3-camera-touch-right-half-only",
-    Split=SPLIT,
+    Version="5.4-joystick-local-deadzone-98",
+    DeadzoneRadiusScale=DEADZONE_RADIUS_SCALE,
     GetState=function()
         return {
             installedHooks=#installedHooks,

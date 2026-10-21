@@ -133,7 +133,7 @@ local function applyNativeLayout()
     local minAxis=math.min(viewport.X,viewport.Y)
     local isSmallScreen=minAxis<=500
 
-    -- Preserve Roblox's responsive mobile sizing; only reapply it if another script changes it.
+    -- Exact TouchThumbstick ResizeThumbstick sizing/placement from PlayerModule.
     local thumbstickSize=isSmallScreen and 70 or 120
     local thumbstickPosition=isSmallScreen
         and UDim2.new(0,(thumbstickSize/2)-10,1,-thumbstickSize-20)
@@ -156,7 +156,7 @@ local function applyNativeLayout()
         knob.Position=UDim2.fromOffset(thumbstickSize/2,thumbstickSize/2)
     end
 
-    -- Preserve Roblox's responsive jump-button sizing and placement.
+    -- Exact TouchJump ResizeJumpButton sizing/placement from PlayerModule.
     local jumpButtonSize=isSmallScreen and 70 or 120
     local jumpPosition=isSmallScreen
         and UDim2.new(1,-(jumpButtonSize*1.5-10),1,-jumpButtonSize-20)
@@ -167,20 +167,6 @@ local function applyNativeLayout()
 end
 
 applyNativeLayout()
-
--- Reassert the chosen layout if another UI script changes either control.
-local enforcingLayout=false
-local function enforceLayout()
-    if enforcingLayout then return end
-    enforcingLayout=true
-    applyNativeLayout()
-    enforcingLayout=false
-end
-for _,object in ipairs({joystick,jumpButton}) do
-    for _,property in ipairs({"Size","Position"}) do
-        connections[#connections+1]=object:GetPropertyChangedSignal(property):Connect(enforceLayout)
-    end
-end
 
 -- Match Roblox's pressed jump sprite.
 connections[#connections+1]=jumpButton.InputBegan:Connect(function(input)
@@ -210,7 +196,7 @@ bindCameraViewport()
 connections[#connections+1]=Workspace:GetPropertyChangedSignal("CurrentCamera"):Connect(bindCameraViewport)
 
 getgenv().PCRobloxNativeVisualV5={
-    Version="5.9-native-size-ignore-external-resize",
+    Version="5.7-exact-roblox-touchthumbstick-touchjump",
     GetState=function()
         local viewport=viewportSize()
         local isSmallScreen=math.min(viewport.X,viewport.Y)<=500

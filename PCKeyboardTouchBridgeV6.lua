@@ -98,15 +98,29 @@ end
 
 local function applyKeys(desired)
     desired=desired or {}
+
+    -- On an A<->D swap, press the destination first so the transition
+    -- briefly overlaps (A+D), like a fast keyboard handoff on PC.
+    local swappingSides=(pressed.A and desired.D) or (pressed.D and desired.A)
+    if swappingSides then
+        for _,name in ipairs({"W","A","S","D"}) do
+            if desired[name] and not pressed[name] then
+                if sendKey(name,true) then pressed[name]=true end
+            end
+        end
+    end
+
     for _,name in ipairs({"W","A","S","D"}) do
         if pressed[name] and not desired[name] then
             sendKey(name,false)
             pressed[name]=false
         end
     end
-    for _,name in ipairs({"W","A","S","D"}) do
-        if desired[name] and not pressed[name] then
-            if sendKey(name,true) then pressed[name]=true end
+    if not swappingSides then
+        for _,name in ipairs({"W","A","S","D"}) do
+            if desired[name] and not pressed[name] then
+                if sendKey(name,true) then pressed[name]=true end
+            end
         end
     end
     rebuildChord()
@@ -375,58 +389,6 @@ local function releaseMovement()
     knob.Position=UDim2.fromScale(0.5,0.5)
 end
 
--- Keep pure sideways movement facing the camera-relative A/D direction.
--- This runs independently of grid contact, so it also applies in the air.
-local sidewaysFacingHumanoid=nil
-local sidewaysOriginalAutoRotate=nil
-
-local function restoreSidewaysFacing()
-    if sidewaysFacingHumanoid and sidewaysOriginalAutoRotate~=nil then
-        pcall(function()
-            sidewaysFacingHumanoid.AutoRotate=sidewaysOriginalAutoRotate
-        end)
-    end
-    sidewaysFacingHumanoid=nil
-    sidewaysOriginalAutoRotate=nil
-end
-
-local function updateSidewaysFacing()
-    local chord=stableChordKey
-    if not enabled or movementTouch==nil or (chord~="A" and chord~="D") then
-        restoreSidewaysFacing()
-        return
-    end
-
-    local character=player.Character
-    local humanoid=character and character:FindFirstChildOfClass("Humanoid")
-    local root=character and character:FindFirstChild("HumanoidRootPart")
-    local camera=workspace.CurrentCamera
-    if not humanoid or not root or not camera then
-        restoreSidewaysFacing()
-        return
-    end
-
-    if sidewaysFacingHumanoid~=humanoid then
-        restoreSidewaysFacing()
-        sidewaysFacingHumanoid=humanoid
-        sidewaysOriginalAutoRotate=humanoid.AutoRotate
-    end
-
-    -- Disable Roblox's gradual AutoRotate only while pure A/D is held;
-    -- restore the original setting immediately when the input changes.
-    pcall(function() humanoid.AutoRotate=false end)
-
-    local right=camera.CFrame.RightVector
-    local flatRight=Vector3.new(right.X,0,right.Z)
-    if flatRight.Magnitude<1e-4 then return end
-    local direction=flatRight.Unit
-    if chord=="A" then direction=-direction end
-
-    pcall(function()
-        root.CFrame=CFrame.lookAt(root.Position,root.Position+direction)
-    end)
-end
-
 local function pulseJump()
     lastJumpPulse=os.clock()
     pendingJumpDeadline=nil
@@ -516,7 +478,6 @@ end)
 RunService:BindToRenderStep(BIND_NAME,Enum.RenderPriority.Input.Value+8,function()
     local now=os.clock()
     refreshKeys(now)
-    updateSidewaysFacing()
     if pendingJumpDeadline then
         if now>pendingJumpDeadline then
             pendingJumpDeadline=nil
@@ -548,7 +509,6 @@ getgenv().PCKeyboardTouchBridgeV52={
 getgenv().__PCKeyboardTouchBridgeV52Cleanup=function()
     enabled=false
     releaseMovement()
-    restoreSidewaysFacing()
     pendingJumpDeadline=nil
     jumpBurstToken+=1
     pendingSpaceReleaseToken+=1

@@ -160,7 +160,7 @@ local function refreshKeys(now)
     local BACK_DIAGONAL_MIN_RATIO=0.65
     local BACK_DIAGONAL_MAX_RATIO=1.54
     local SIDE_SWEEP_MAX_ABS_Z=0.24
-    local SIDE_SWAP_X=0.0
+    local SIDE_SWAP_X=0.08
     local SIDE_SWEEP_CENTER_GRACE=0.0
 
     local function chooseDigitalChord(x,z)

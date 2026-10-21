@@ -8,7 +8,7 @@ local playerGui=player:WaitForChild("PlayerGui")
 
 local BIND_NAME="__PCKeyboardTouchBridgeV52"
 local GUI_NAME="PCKeyboardTouchBridgeV52Overlay"
-local MOVEMENT_HALF=0.98
+local MOVEMENT_HALF=0.80
 local PRESS_THRESHOLD=0.30
 local RELEASE_THRESHOLD=0.18
 local DIRECTION_LATCH_SECONDS=0.09

@@ -133,11 +133,10 @@ local function applyNativeLayout()
     local minAxis=math.min(viewport.X,viewport.Y)
     local isSmallScreen=minAxis<=500
 
-    -- Exact TouchThumbstick ResizeThumbstick sizing/placement from PlayerModule.
-    local thumbstickSize=isSmallScreen and 70 or 120
-    local thumbstickPosition=isSmallScreen
-        and UDim2.new(0,(thumbstickSize/2)-10,1,-thumbstickSize-20)
-        or UDim2.new(0,thumbstickSize/2,1,-thumbstickSize*1.75)
+    -- Keep controls at a stable 120px on phones too; external UI scripts
+    -- (including BloxTrap-style resizers) should not shrink the touch targets.
+    local thumbstickSize=120
+    local thumbstickPosition=UDim2.new(0,thumbstickSize/2,1,-thumbstickSize*1.75)
 
     setProp(joystick,"Size",UDim2.fromOffset(thumbstickSize,thumbstickSize))
     setProp(joystick,"Position",thumbstickPosition)
@@ -156,11 +155,9 @@ local function applyNativeLayout()
         knob.Position=UDim2.fromOffset(thumbstickSize/2,thumbstickSize/2)
     end
 
-    -- Exact TouchJump ResizeJumpButton sizing/placement from PlayerModule.
-    local jumpButtonSize=isSmallScreen and 70 or 120
-    local jumpPosition=isSmallScreen
-        and UDim2.new(1,-(jumpButtonSize*1.5-10),1,-jumpButtonSize-20)
-        or UDim2.new(1,-(jumpButtonSize*1.5-10),1,-jumpButtonSize*1.75)
+    -- Keep jump target at the same stable size as the joystick on phones.
+    local jumpButtonSize=120
+    local jumpPosition=UDim2.new(1,-(jumpButtonSize*1.5-10),1,-jumpButtonSize*1.75)
 
     setProp(jumpButton,"Size",UDim2.fromOffset(jumpButtonSize,jumpButtonSize))
     setProp(jumpButton,"Position",jumpPosition)
@@ -196,7 +193,7 @@ bindCameraViewport()
 connections[#connections+1]=Workspace:GetPropertyChangedSignal("CurrentCamera"):Connect(bindCameraViewport)
 
 getgenv().PCRobloxNativeVisualV5={
-    Version="5.7-exact-roblox-touchthumbstick-touchjump",
+    Version="5.8-fixed-120px-ignore-external-resize",
     GetState=function()
         local viewport=viewportSize()
         local isSmallScreen=math.min(viewport.X,viewport.Y)<=500
@@ -204,7 +201,7 @@ getgenv().PCRobloxNativeVisualV5={
             thumbstickSheet=THUMBSTICK_SHEET,
             jumpSheet=JUMP_SHEET,
             isSmallScreen=isSmallScreen,
-            nativeSize=isSmallScreen and 70 or 120,
+            nativeSize=120,
             debugHidden=true,
         }
     end,

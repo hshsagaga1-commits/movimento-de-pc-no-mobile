@@ -315,6 +315,17 @@ heartbeatConnection=RunService.Heartbeat:Connect(function()
     -- Humanoid.MoveDirection is still accepted as a fallback.
     if not ACTIVE_CHORDS[chord] and desired.Magnitude<=0.05 then return end
 
+    -- A/D facing must not depend on ground, wall, or edge contact.
+    -- Apply it every frame, including while airborne.
+    if chord=="A" or chord=="D" then
+        local facing=desired.Magnitude>1e-5 and desired.Unit or Vector3.zero
+        if facing.Magnitude>0.5 then
+            pcall(function()
+                root.CFrame=CFrame.lookAt(root.Position,root.Position+facing)
+            end)
+        end
+    end
+
     local now=os.clock()
     local contact=getContact(now)
     if not contact then

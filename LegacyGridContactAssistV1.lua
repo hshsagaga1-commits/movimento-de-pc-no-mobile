@@ -317,26 +317,19 @@ heartbeatConnection=RunService.Heartbeat:Connect(function()
     local dt=math.clamp(now-lastHeartbeatAt,0,0.05)
     lastHeartbeatAt=now
 
-    -- Smooth only the forward sweep/diagonal transitions. Pure lateral A<->D
-    -- remains instant unless the bridge has staged the W+diagonal chords.
+    -- Smooth the whole staged forward sweep, including its first A<->D reversal.
+    -- The bridge stages WA -> WAD -> WD so the turn is fluid without becoming slow.
     if targetDirection.Magnitude<=0.05 then
         smoothedDirection=Vector3.zero
     else
-        local directLateralSwap=
-            (previousChord=="A" and chord=="D") or
-            (previousChord=="D" and chord=="A")
-        if directLateralSwap then
+        local responseSeconds=0.025
+        local alpha=1-math.exp(-dt/responseSeconds)
+        if smoothedDirection.Magnitude<=0.05 then
             smoothedDirection=targetDirection.Unit
         else
-            local responseSeconds=0.065
-            local alpha=1-math.exp(-dt/responseSeconds)
-            if smoothedDirection.Magnitude<=0.05 then
-                smoothedDirection=targetDirection.Unit
-            else
-                smoothedDirection=smoothedDirection:Lerp(targetDirection.Unit,alpha)
-                if smoothedDirection.Magnitude>1e-5 then
-                    smoothedDirection=smoothedDirection.Unit
-                end
+            smoothedDirection=smoothedDirection:Lerp(targetDirection.Unit,alpha)
+            if smoothedDirection.Magnitude>1e-5 then
+                smoothedDirection=smoothedDirection.Unit
             end
         end
     end
@@ -369,7 +362,7 @@ heartbeatConnection=RunService.Heartbeat:Connect(function()
 end)
 
 env.LegacyGridContactAssistV1={
-    Version="3.2-fast-smoothed-forward-sweep",
+    Version="3.3-quick-smoothed-forward-sweep",
     Enabled=enabled,
     GetState=function()
         return {

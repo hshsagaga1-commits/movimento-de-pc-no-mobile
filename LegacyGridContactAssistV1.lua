@@ -290,15 +290,7 @@ local function applyAssist(contact,desired)
     pcall(function()
         root.AssemblyLinearVelocity=Vector3.new(corrected.X,velocity.Y,corrected.Z)
 
-        -- On the inverted grid, pure A/D should turn the avatar fully sideways,
-        -- not merely preserve a lateral velocity vector. Apply orientation only
-        -- while the grid contact assist is active and the chord is pure A or D.
-        if activeChord=="A" or activeChord=="D" then
-            local facing=desired.Magnitude>1e-5 and desired.Unit or Vector3.zero
-            if facing.Magnitude>0.5 then
-                root.CFrame=CFrame.lookAt(root.Position,root.Position+facing)
-            end
-        end
+        -- Facing is handled by the smoothed rotation in the heartbeat loop.
     end)
     assistedFrames+=1
 end
@@ -317,20 +309,22 @@ heartbeatConnection=RunService.Heartbeat:Connect(function()
     local dt=math.clamp(now-lastHeartbeatAt,0,0.05)
     lastHeartbeatAt=now
 
-    -- Smooth the whole staged forward sweep, including its first A<->D reversal.
-    -- The bridge stages WA -> WAD -> WD so the turn is fluid without becoming slow.
+    -- Smooth direction in rotation space, not Vector3.Lerp: A<->D is a
+    -- near-180-degree turn, where vector lerp collapses through zero and snaps.
+    -- 55 ms keeps the turn alive and rounded without making it sluggish.
     if targetDirection.Magnitude<=0.05 then
         smoothedDirection=Vector3.zero
     else
-        local responseSeconds=0.025
-        local alpha=1-math.exp(-dt/responseSeconds)
+        local targetUnit=targetDirection.Unit
         if smoothedDirection.Magnitude<=0.05 then
-            smoothedDirection=targetDirection.Unit
+            smoothedDirection=targetUnit
         else
-            smoothedDirection=smoothedDirection:Lerp(targetDirection.Unit,alpha)
-            if smoothedDirection.Magnitude>1e-5 then
-                smoothedDirection=smoothedDirection.Unit
-            end
+            local responseSeconds=0.055
+            local alpha=1-math.exp(-dt/responseSeconds)
+            local currentRotation=CFrame.lookAt(Vector3.zero,smoothedDirection.Unit)
+            local targetRotation=CFrame.lookAt(Vector3.zero,targetUnit)
+            smoothedDirection=currentRotation:Lerp(targetRotation,alpha).LookVector
+            smoothedDirection=flatUnit(smoothedDirection)
         end
     end
     local desired=smoothedDirection
@@ -339,16 +333,14 @@ heartbeatConnection=RunService.Heartbeat:Connect(function()
     -- Humanoid.MoveDirection is still accepted as a fallback.
     if not ACTIVE_CHORDS[chord] and desired.Magnitude<=0.05 then return end
 
-    -- A/D facing must not depend on ground, wall, or edge contact.
-    -- Apply it every frame, including while airborne; the smoothed vector avoids
-    -- snapping on staged diagonal transitions while retaining direct A<->D swaps.
-    if chord=="A" or chord=="D" then
-        local facing=desired.Magnitude>1e-5 and desired.Unit or Vector3.zero
-        if facing.Magnitude>0.5 then
-            pcall(function()
-                root.CFrame=CFrame.lookAt(root.Position,root.Position+facing)
-            end)
-        end
+    -- Smooth avatar facing independently of contact, including while airborne.
+    -- Never assign the target CFrame directly: that was the hard, lifeless snap.
+    if desired.Magnitude>0.5 and (chord=="A" or chord=="D" or chord=="W+A" or chord=="W+D" or chord=="W+A+D") then
+        local targetCFrame=CFrame.lookAt(root.Position,root.Position+desired.Unit)
+        local faceAlpha=1-math.exp(-dt/0.055)
+        pcall(function()
+            root.CFrame=root.CFrame:Lerp(targetCFrame,faceAlpha)
+        end)
     end
 
     local contact=getContact(now)
@@ -362,7 +354,7 @@ heartbeatConnection=RunService.Heartbeat:Connect(function()
 end)
 
 env.LegacyGridContactAssistV1={
-    Version="3.3-quick-smoothed-forward-sweep",
+    Version="3.4-rotation-smoothed-sweep",
     Enabled=enabled,
     GetState=function()
         return {

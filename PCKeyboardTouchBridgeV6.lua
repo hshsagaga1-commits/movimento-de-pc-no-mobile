@@ -98,29 +98,15 @@ end
 
 local function applyKeys(desired)
     desired=desired or {}
-
-    -- On an A<->D swap, press the destination first so the transition
-    -- briefly overlaps (A+D), like a fast keyboard handoff on PC.
-    local swappingSides=(pressed.A and desired.D) or (pressed.D and desired.A)
-    if swappingSides then
-        for _,name in ipairs({"W","A","S","D"}) do
-            if desired[name] and not pressed[name] then
-                if sendKey(name,true) then pressed[name]=true end
-            end
-        end
-    end
-
     for _,name in ipairs({"W","A","S","D"}) do
         if pressed[name] and not desired[name] then
             sendKey(name,false)
             pressed[name]=false
         end
     end
-    if not swappingSides then
-        for _,name in ipairs({"W","A","S","D"}) do
-            if desired[name] and not pressed[name] then
-                if sendKey(name,true) then pressed[name]=true end
-            end
+    for _,name in ipairs({"W","A","S","D"}) do
+        if desired[name] and not pressed[name] then
+            if sendKey(name,true) then pressed[name]=true end
         end
     end
     rebuildChord()

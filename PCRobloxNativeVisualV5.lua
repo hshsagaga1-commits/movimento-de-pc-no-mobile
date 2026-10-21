@@ -165,6 +165,20 @@ end
 
 applyNativeLayout()
 
+-- Reassert the chosen layout if another UI script changes either control.
+local enforcingLayout=false
+local function enforceLayout()
+    if enforcingLayout then return end
+    enforcingLayout=true
+    applyNativeLayout()
+    enforcingLayout=false
+end
+for _,object in ipairs({joystick,jumpButton}) do
+    for _,property in ipairs({"Size","Position"}) do
+        connections[#connections+1]=object:GetPropertyChangedSignal(property):Connect(enforceLayout)
+    end
+end
+
 -- Match Roblox's pressed jump sprite.
 connections[#connections+1]=jumpButton.InputBegan:Connect(function(input)
     if input.UserInputType==Enum.UserInputType.Touch then

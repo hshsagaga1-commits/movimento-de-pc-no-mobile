@@ -17,11 +17,14 @@ runModule("PCModeLockV6.lua")
 -- Then start wall/rail/edge assistance.
 runModule("LegacyGridContactAssistV1.lua")
 
+-- Explicit exclusion: this loader must never fetch, execute, modify, or repair the user's separate Evade/Legecy loader.
+-- Excluded loader: https://raw.githubusercontent.com/StyearX/solasmotaryx/main/Evade/Legecy
+-- Recovery below is restricted to PCKeyboardTouchBridgeV52Overlay, owned by Bloxtrap.
 -- Bloxtrap-only UI recovery for Evade.
 -- If the game's map/round transition destroys or partially rebuilds our own
 -- movement overlay, wait for the UI to settle, then reload ONLY the movement
--- module. Never rerun LegacyGridContactAssistV1.lua or the user's separate
--- Evade/Legecy loader from this recovery loop.
+-- module. Never rerun LegacyGridContactAssistV1.lua or the excluded Evade/Legecy
+-- loader. The recovery loop only looks for Bloxtrap-owned GUI objects.
 local EVADE_GAME_ID=3647333358
 local OVERLAY_NAME="PCKeyboardTouchBridgeV52Overlay"
 local player=Players.LocalPlayer

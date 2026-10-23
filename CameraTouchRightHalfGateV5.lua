@@ -51,14 +51,15 @@ local function inJoystickDeadzone(input)
     local position=touchPosition(input)
     if not position then return false end
 
-    -- Universal mobile layout: reserve the lower-left quadrant for movement.
-    -- Do not depend on a game-specific joystick GUI or this script's overlay.
+    -- Camera dead zone: ignore camera touches across the leftmost 80% of
+    -- the actual game viewport. This also covers the lower-left joystick,
+    -- but only filters BaseCamera input; it does not sink gameplay input.
+    -- The rightmost 20% remains available for camera rotation.
     local camera=workspace.CurrentCamera
     local viewport=camera and camera.ViewportSize
     local width=viewport and viewport.X or 1108
-    local height=viewport and viewport.Y or 622
 
-    return position.X<=width*0.45 and position.Y>=height*0.45
+    return position.X<=width*0.80
 end
 
 local function getTouchId(input)
@@ -310,7 +311,7 @@ RunService:BindToRenderStep(BIND_NAME,Enum.RenderPriority.Camera.Value-6,functio
 end)
 
 getgenv().PCCameraTouchRightHalfGateV5={
-    Version="5.7-universal-lower-left-touch-zone",
+    Version="5.8-camera-deadzone-left-80-percent",
     DeadzoneRadiusScale=DEADZONE_RADIUS_SCALE,
     GetState=function()
         return {

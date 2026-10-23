@@ -51,30 +51,17 @@ local function inJoystickDeadzone(input)
     local position=touchPosition(input)
     if not position then return false end
 
-    -- Only exclude touches that land on our own custom joystick GUI.
-    -- Do not use a screen-corner fallback: that accidentally blocks camera
-    -- touches that begin outside the joystick but happen to be in the left half.
-    local ok,objects=pcall(function()
-        return playerGui:GetGuiObjectsAtPosition(position.X,position.Y)
-    end)
-    if not ok or type(objects)~="table" then return false end
+    -- Match the exact custom joystick by its current rendered rectangle.
+    -- This avoids hit-test inconsistencies caused by the native-look image overlay,
+    -- while not blocking the rest of the left half of the screen.
+    local overlay=playerGui:FindFirstChild("PCKeyboardTouchBridgeV52Overlay")
+    local joystick=overlay and overlay:FindFirstChild("PCJoystick",true)
+    if not joystick or not joystick:IsA("GuiObject") then return false end
 
-    for _,object in ipairs(objects) do
-        local current=object
-        for _=1,8 do
-            if not current then break end
-            if current.Name=="PCJoystick"
-                and current:IsA("GuiObject")
-                and current:IsDescendantOf(playerGui) then
-                local overlay=current.Parent
-                if overlay and overlay.Name=="PCKeyboardTouchBridgeV52Overlay" then
-                    return true
-                end
-            end
-            current=current.Parent
-        end
-    end
-    return false
+    local p=joystick.AbsolutePosition
+    local s=joystick.AbsoluteSize
+    return position.X>=p.X and position.X<=p.X+s.X
+        and position.Y>=p.Y and position.Y<=p.Y+s.Y
 end
 
 local function getTouchId(input)

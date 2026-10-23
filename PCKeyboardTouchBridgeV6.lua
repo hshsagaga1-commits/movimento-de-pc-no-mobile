@@ -547,6 +547,9 @@ getgenv().PCKeyboardTouchBridgeV52={
         return {
             chord=latestChord,
             movementTouchActive=movementTouch~=nil,
+            -- Expose the exact captured InputObject so the camera gate can
+            -- ignore this finger until release without changing joystick logic.
+            movementTouch=movementTouch,
             movementCaptures=movementCaptures,
             movementUpdates=movementUpdates,
             keyEvents=keyEvents,

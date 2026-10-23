@@ -5,9 +5,9 @@ local UserInputService=game:GetService("UserInputService")
 local player=Players.LocalPlayer
 local playerGui=player:WaitForChild("PlayerGui")
 local BIND_NAME="__PCCameraTouchRightHalfGateV5"
--- Reserve only the joystick itself (98% of its radius), not the whole joystick deadzone.
--- This lets the camera use the rest of the screen while keeping the controls separate.
-local DEADZONE_RADIUS_SCALE=0.98
+-- Camera-only touch separation: once a finger starts on the movement joystick,
+-- keep that entire finger excluded from camera input until it lifts.
+local DEADZONE_RADIUS_SCALE=1.0
 
 local oldCleanup=getgenv().__PCCameraTouchRightHalfGateV5Cleanup
 if type(oldCleanup)=="function" then pcall(oldCleanup) end
@@ -19,6 +19,8 @@ local activeController=nil
 local installedHooks={}
 local blockedTouches=setmetatable({}, {__mode="k"})
 local rightTouches=setmetatable({}, {__mode="k"})
+local blockedTouchIds={}
+local inputConnections={}
 local leftBeginsBlocked=0
 local leftChangesBlocked=0
 local leftEndsBlocked=0
@@ -52,20 +54,58 @@ local function inJoystickDeadzone(input)
     local overlay=playerGui:FindFirstChild("PCKeyboardTouchBridgeV52Overlay")
     local joystick=overlay and overlay:FindFirstChild("PCJoystick",true)
     if not joystick or not joystick:IsA("GuiObject") then
-        -- Safe fallback while the movement UI is initializing.
         local camera=workspace.CurrentCamera
         local width=camera and camera.ViewportSize.X or 1108
         return position.X<=width*0.50
     end
 
-    -- Camera-only exclusion: treat the whole visible joystick hitbox as
-    -- movement input, not just an inner circle. The previous circular test
-    -- allowed touches near the button's rim to leak into camera rotation.
     local topLeft=joystick.AbsolutePosition
     local bottomRight=topLeft+joystick.AbsoluteSize
     return position.X>=topLeft.X and position.X<=bottomRight.X
         and position.Y>=topLeft.Y and position.Y<=bottomRight.Y
 end
+
+local function getTouchId(input)
+    local id=nil
+    pcall(function() id=input.TouchId end)
+    if type(id)=="number" then return id end
+    return nil
+end
+
+local function bridgeOwnsTouch(input)
+    local bridge=getgenv().PCKeyboardTouchBridgeV52
+    if type(bridge)=="table" and type(bridge.GetState)=="function" then
+        local ok,state=pcall(bridge.GetState)
+        if ok and type(state)=="table" and state.movementTouch==input then
+            return true
+        end
+    end
+    return false
+end
+
+local function isBlockedTouch(input)
+    local id=getTouchId(input)
+    return blockedTouches[input]==true
+        or (id~=nil and blockedTouchIds[id]==true)
+        or bridgeOwnsTouch(input)
+end
+
+-- Track touches at the global input layer, even when the joystick GUI captures
+-- Began before BaseCamera sees it. Keep each touch blocked until that finger lifts.
+inputConnections[#inputConnections+1]=UserInputService.InputBegan:Connect(function(input)
+    if isTouch(input) and inJoystickDeadzone(input) then
+        blockedTouches[input]=true
+        local id=getTouchId(input)
+        if id~=nil then blockedTouchIds[id]=true end
+    end
+end)
+inputConnections[#inputConnections+1]=UserInputService.InputEnded:Connect(function(input)
+    if isTouch(input) then
+        blockedTouches[input]=nil
+        local id=getTouchId(input)
+        if id~=nil then blockedTouchIds[id]=nil end
+    end
+end)
 
 local function getMeta(tbl)
     local mt=nil
@@ -184,8 +224,10 @@ local function installForController(controller)
     local beganOk=installOne(began,function(callOriginal)
         return function(self,input,...)
             if self==getActiveController() and isTouch(input) then
-                if inJoystickDeadzone(input) then
+                if isBlockedTouch(input) or inJoystickDeadzone(input) then
                     blockedTouches[input]=true
+                    local id=getTouchId(input)
+                    if id~=nil then blockedTouchIds[id]=true end
                     rightTouches[input]=nil
                     leftBeginsBlocked+=1
                     return nil
@@ -202,7 +244,10 @@ local function installForController(controller)
     local changedOk=installOne(changed,function(callOriginal)
         return function(self,input,...)
             if self==getActiveController() and isTouch(input) then
-                if blockedTouches[input] then
+                if isBlockedTouch(input) then
+                    blockedTouches[input]=true
+                    local id=getTouchId(input)
+                    if id~=nil then blockedTouchIds[id]=true end
                     leftChangesBlocked+=1
                     return nil
                 end
@@ -233,8 +278,10 @@ local function installForController(controller)
     local endedOk=installOne(ended,function(callOriginal)
         return function(self,input,...)
             if self==getActiveController() and isTouch(input) then
-                if blockedTouches[input] then
+                if isBlockedTouch(input) then
                     blockedTouches[input]=nil
+                    local id=getTouchId(input)
+                    if id~=nil then blockedTouchIds[id]=nil end
                     rightTouches[input]=nil
                     leftEndsBlocked+=1
                     return nil
@@ -267,7 +314,7 @@ RunService:BindToRenderStep(BIND_NAME,Enum.RenderPriority.Camera.Value-6,functio
 end)
 
 getgenv().PCCameraTouchRightHalfGateV5={
-    Version="5.5-camera-excludes-full-joystick-hitbox",
+    Version="5.6-camera-ignores-whole-joystick-touch-lifecycle",
     DeadzoneRadiusScale=DEADZONE_RADIUS_SCALE,
     GetState=function()
         return {
@@ -286,6 +333,9 @@ getgenv().PCCameraTouchRightHalfGateV5={
 
 getgenv().__PCCameraTouchRightHalfGateV5Cleanup=function()
     pcall(function() RunService:UnbindFromRenderStep(BIND_NAME) end)
+    for _,connection in ipairs(inputConnections) do pcall(function() connection:Disconnect() end) end
+    table.clear(inputConnections)
+    table.clear(blockedTouchIds)
     restoreHooks()
     blockedTouches=setmetatable({}, {__mode="k"})
     rightTouches=setmetatable({}, {__mode="k"})

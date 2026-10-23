@@ -495,22 +495,19 @@ local function requestJump()
     end)
 end
 
-local function controlAtPosition(position)
-    local ok,objects=pcall(function()
-        return playerGui:GetGuiObjectsAtPosition(position.X,position.Y)
-    end)
-    if not ok or type(objects)~="table" then return nil end
+local function containsPoint(guiObject,position)
+    if not guiObject or not guiObject.Parent then return false end
+    local p=guiObject.AbsolutePosition
+    local s=guiObject.AbsoluteSize
+    return position.X>=p.X and position.X<=p.X+s.X
+        and position.Y>=p.Y and position.Y<=p.Y+s.Y
+end
 
-    for _,object in ipairs(objects) do
-        local current=object
-        for _=1,10 do
-            if not current then break end
-            if current==joystick or current==jumpButton then
-                return current
-            end
-            current=current.Parent
-        end
-    end
+-- Use the actual rendered button rectangles. GetGuiObjectsAtPosition can return
+-- a nested visual image (or no hit target) after the native-look overlay is applied.
+local function controlAtPosition(position)
+    if containsPoint(joystick,position) then return joystick end
+    if containsPoint(jumpButton,position) then return jumpButton end
     return nil
 end
 

@@ -51,35 +51,30 @@ local function inJoystickDeadzone(input)
     local position=touchPosition(input)
     if not position then return false end
 
-    -- First, detect the actual Roblox mobile thumbstick GUI if it is exposed
-    -- by hit-testing. Only this touch is excluded from camera input.
+    -- Only exclude touches that land on our own custom joystick GUI.
+    -- Do not use a screen-corner fallback: that accidentally blocks camera
+    -- touches that begin outside the joystick but happen to be in the left half.
     local ok,objects=pcall(function()
         return playerGui:GetGuiObjectsAtPosition(position.X,position.Y)
     end)
-    if ok and type(objects)=="table" then
-        for _,object in ipairs(objects) do
-            local current=object
-            for _=1,6 do
-                if not current then break end
-                local name=string.lower(current.Name or "")
-                if string.find(name,"dynamicthumbstick",1,true)
-                    or string.find(name,"thumbstick",1,true)
-                    or string.find(name,"joystick",1,true) then
+    if not ok or type(objects)~="table" then return false end
+
+    for _,object in ipairs(objects) do
+        local current=object
+        for _=1,8 do
+            if not current then break end
+            if current.Name=="PCJoystick"
+                and current:IsA("GuiObject")
+                and current:IsDescendantOf(playerGui) then
+                local overlay=current.Parent
+                if overlay and overlay.Name=="PCKeyboardTouchBridgeV52Overlay" then
                     return true
                 end
-                current=current.Parent
             end
+            current=current.Parent
         end
     end
-
-    -- Fallback for Roblox's transparent thumbstick hit area, which may not
-    -- appear in GUI hit-testing. Keep this limited to the lower-left corner;
-    -- the rest of the screen remains available for normal camera movement.
-    local camera=workspace.CurrentCamera
-    local viewport=camera and camera.ViewportSize
-    local width=viewport and viewport.X or 1108
-    local height=viewport and viewport.Y or 512
-    return position.X<=width*0.42 and position.Y>=height*0.48
+    return false
 end
 
 local function getTouchId(input)
@@ -331,7 +326,7 @@ RunService:BindToRenderStep(BIND_NAME,Enum.RenderPriority.Camera.Value-6,functio
 end)
 
 getgenv().PCCameraTouchRightHalfGateV5={
-    Version="5.9-joystick-only-touch-gate",
+    Version="6.0-custom-PCJoystick-only-touch-gate",
     DeadzoneRadiusScale=DEADZONE_RADIUS_SCALE,
     GetState=function()
         return {

@@ -495,17 +495,43 @@ local function requestJump()
     end)
 end
 
-connections[#connections+1]=joystick.InputBegan:Connect(function(input)
-    if not enabled or movementTouch~=nil then return end
-    if input.UserInputType~=Enum.UserInputType.Touch then return end
+local function controlAtPosition(position)
+    local ok,objects=pcall(function()
+        return playerGui:GetGuiObjectsAtPosition(position.X,position.Y)
+    end)
+    if not ok or type(objects)~="table" then return nil end
+
+    for _,object in ipairs(objects) do
+        local current=object
+        for _=1,10 do
+            if not current then break end
+            if current==joystick or current==jumpButton then
+                return current
+            end
+            current=current.Parent
+        end
+    end
+    return nil
+end
+
+-- Capture touches at the global input layer instead of relying on a GuiObject's
+-- InputBegan event, which can be bypassed by nested native-look ImageLabels.
+connections[#connections+1]=UserInputService.InputBegan:Connect(function(input,gameProcessed)
+    if not enabled or input.UserInputType~=Enum.UserInputType.Touch then return end
     local p=Vector2.new(input.Position.X,input.Position.Y)
-    if not onMovementHalf(p) then return end
-    movementTouch=input
-    movementCenter=joystick.AbsolutePosition+joystick.AbsoluteSize/2
-    movementRadius=math.max(46,math.min(joystick.AbsoluteSize.X,joystick.AbsoluteSize.Y)*0.42)
-    movementCaptures+=1
-    updateMovement(input.Position)
-    refreshKeys(os.clock())
+    local control=controlAtPosition(p)
+
+    if control==joystick then
+        if movementTouch~=nil or not onMovementHalf(p) then return end
+        movementTouch=input
+        movementCenter=joystick.AbsolutePosition+joystick.AbsoluteSize/2
+        movementRadius=math.max(46,math.min(joystick.AbsoluteSize.X,joystick.AbsoluteSize.Y)*0.42)
+        movementCaptures+=1
+        updateMovement(input.Position)
+        refreshKeys(os.clock())
+    elseif control==jumpButton then
+        requestJump()
+    end
 end)
 
 connections[#connections+1]=UserInputService.InputChanged:Connect(function(input)
@@ -523,11 +549,6 @@ connections[#connections+1]=UserInputService.InputEnded:Connect(function(input)
     if input==movementTouch then releaseMovement() end
 end)
 
-connections[#connections+1]=jumpButton.InputBegan:Connect(function(input)
-    if enabled and input.UserInputType==Enum.UserInputType.Touch then
-        requestJump()
-    end
-end)
 
 RunService:BindToRenderStep(BIND_NAME,Enum.RenderPriority.Input.Value+8,function()
     local now=os.clock()

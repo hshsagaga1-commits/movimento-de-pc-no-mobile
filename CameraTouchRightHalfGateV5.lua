@@ -251,23 +251,10 @@ local function installForController(controller)
                     return nil
                 end
 
-                -- Defensive fallback: if Changed arrives before Began was observed,
-                -- classify from its current position. A joystick deadzone touch must never
-                -- enter camera rotation.
-                if rightTouches[input]~=true and inJoystickDeadzone(input) then
-                    blockedTouches[input]=true
-                    leftChangesBlocked+=1
-                    return nil
-                end
-
-                -- A camera touch that began on the right may temporarily cross the
-                -- split. Freeze camera rotation while it is physically on the left,
-                -- but keep its original Began/Ended lifecycle so BaseCamera can clean up.
-                if rightTouches[input]==true and inJoystickDeadzone(input) then
-                    leftChangesBlocked+=1
-                    return nil
-                end
-
+                -- Only block the exact finger that began on the joystick.
+                -- Do not filter camera movement by its current position: doing so can
+                -- drop intermediate deltas and make camera drags on the left feel slower.
+                -- Touch ownership is decided at InputBegan and remains stable until lift.
                 rightChangesPassed+=1
             end
             return callOriginal(self,input,...)

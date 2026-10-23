@@ -58,9 +58,13 @@ local function inJoystickDeadzone(input)
         return position.X<=width*0.50
     end
 
-    local center=joystick.AbsolutePosition+(joystick.AbsoluteSize/2)
-    local radius=math.min(joystick.AbsoluteSize.X,joystick.AbsoluteSize.Y)*0.5*DEADZONE_RADIUS_SCALE
-    return (position-center).Magnitude<=radius
+    -- Camera-only exclusion: treat the whole visible joystick hitbox as
+    -- movement input, not just an inner circle. The previous circular test
+    -- allowed touches near the button's rim to leak into camera rotation.
+    local topLeft=joystick.AbsolutePosition
+    local bottomRight=topLeft+joystick.AbsoluteSize
+    return position.X>=topLeft.X and position.X<=bottomRight.X
+        and position.Y>=topLeft.Y and position.Y<=bottomRight.Y
 end
 
 local function getMeta(tbl)
@@ -263,7 +267,7 @@ RunService:BindToRenderStep(BIND_NAME,Enum.RenderPriority.Camera.Value-6,functio
 end)
 
 getgenv().PCCameraTouchRightHalfGateV5={
-    Version="5.4-joystick-local-deadzone-98",
+    Version="5.5-camera-excludes-full-joystick-hitbox",
     DeadzoneRadiusScale=DEADZONE_RADIUS_SCALE,
     GetState=function()
         return {

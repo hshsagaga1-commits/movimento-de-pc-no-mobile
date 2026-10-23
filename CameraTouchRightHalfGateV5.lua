@@ -19,6 +19,8 @@ local activeController=nil
 local installedHooks={}
 local blockedTouches=setmetatable({}, {__mode="k"})
 local blockedTouchIds={}
+local activeTouches=setmetatable({}, {__mode="k"})
+local activeTouchCount=0
 local inputConnections={}
 local leftBeginsBlocked=0
 local leftChangesBlocked=0
@@ -91,7 +93,17 @@ end
 -- Track touches at the global input layer, even when the joystick GUI captures
 -- Began before BaseCamera sees it. Keep each touch blocked until that finger lifts.
 inputConnections[#inputConnections+1]=UserInputService.InputBegan:Connect(function(input)
-    if isTouch(input) and inJoystickDeadzone(input) then
+    if not isTouch(input) then return end
+
+    if not activeTouches[input] then
+        activeTouches[input]=true
+        activeTouchCount+=1
+    end
+
+    -- Allow at most TWO simultaneous fingers total: one for the joystick
+    -- and one for normal camera movement. Any additional finger is ignored
+    -- until it lifts, preventing TouchPlayer from receiving extra touches.
+    if inJoystickDeadzone(input) or activeTouchCount>2 then
         blockedTouches[input]=true
         local id=getTouchId(input)
         if id~=nil then blockedTouchIds[id]=true end
@@ -102,6 +114,10 @@ inputConnections[#inputConnections+1]=UserInputService.InputEnded:Connect(functi
         blockedTouches[input]=nil
         local id=getTouchId(input)
         if id~=nil then blockedTouchIds[id]=nil end
+        if activeTouches[input] then
+            activeTouches[input]=nil
+            activeTouchCount=math.max(0,activeTouchCount-1)
+        end
     end
 end)
 
@@ -310,6 +326,8 @@ getgenv().__PCCameraTouchRightHalfGateV5Cleanup=function()
     for _,connection in ipairs(inputConnections) do pcall(function() connection:Disconnect() end) end
     table.clear(inputConnections)
     table.clear(blockedTouchIds)
+    table.clear(activeTouches)
+    activeTouchCount=0
     restoreHooks()
     blockedTouches=setmetatable({}, {__mode="k"})
     getgenv().PCCameraTouchRightHalfGateV5=nil

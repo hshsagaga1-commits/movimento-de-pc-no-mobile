@@ -331,7 +331,7 @@ RunService:BindToRenderStep(BIND_NAME,Enum.RenderPriority.Camera.Value-6,functio
 end)
 
 getgenv().PCCameraTouchRightHalfGateV5={
-    Version="5.8-camera-deadzone-left-80-percent",
+    Version="5.9-joystick-only-touch-gate",
     DeadzoneRadiusScale=DEADZONE_RADIUS_SCALE,
     GetState=function()
         return {

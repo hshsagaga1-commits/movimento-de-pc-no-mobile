@@ -51,18 +51,14 @@ local function inJoystickDeadzone(input)
     local position=touchPosition(input)
     if not position then return false end
 
-    local overlay=playerGui:FindFirstChild("PCKeyboardTouchBridgeV52Overlay")
-    local joystick=overlay and overlay:FindFirstChild("PCJoystick",true)
-    if not joystick or not joystick:IsA("GuiObject") then
-        local camera=workspace.CurrentCamera
-        local width=camera and camera.ViewportSize.X or 1108
-        return position.X<=width*0.50
-    end
+    -- Universal mobile layout: reserve the lower-left quadrant for movement.
+    -- Do not depend on a game-specific joystick GUI or this script's overlay.
+    local camera=workspace.CurrentCamera
+    local viewport=camera and camera.ViewportSize
+    local width=viewport and viewport.X or 1108
+    local height=viewport and viewport.Y or 622
 
-    local topLeft=joystick.AbsolutePosition
-    local bottomRight=topLeft+joystick.AbsoluteSize
-    return position.X>=topLeft.X and position.X<=bottomRight.X
-        and position.Y>=topLeft.Y and position.Y<=bottomRight.Y
+    return position.X<=width*0.45 and position.Y>=height*0.45
 end
 
 local function getTouchId(input)
@@ -314,7 +310,7 @@ RunService:BindToRenderStep(BIND_NAME,Enum.RenderPriority.Camera.Value-6,functio
 end)
 
 getgenv().PCCameraTouchRightHalfGateV5={
-    Version="5.6-camera-ignores-whole-joystick-touch-lifecycle",
+    Version="5.7-universal-lower-left-touch-zone",
     DeadzoneRadiusScale=DEADZONE_RADIUS_SCALE,
     GetState=function()
         return {

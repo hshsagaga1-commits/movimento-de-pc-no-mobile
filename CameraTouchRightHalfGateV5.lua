@@ -18,7 +18,6 @@ local cameras=nil
 local activeController=nil
 local installedHooks={}
 local blockedTouches=setmetatable({}, {__mode="k"})
-local rightTouches=setmetatable({}, {__mode="k"})
 local blockedTouchIds={}
 local inputConnections={}
 local leftBeginsBlocked=0
@@ -213,7 +212,6 @@ end
 local function installForController(controller)
     restoreHooks()
     blockedTouches=setmetatable({}, {__mode="k"})
-    rightTouches=setmetatable({}, {__mode="k"})
     if type(controller)~="table" then return false end
 
     local began=findMethod(controller,"OnInputBegan")
@@ -227,11 +225,9 @@ local function installForController(controller)
                     blockedTouches[input]=true
                     local id=getTouchId(input)
                     if id~=nil then blockedTouchIds[id]=true end
-                    rightTouches[input]=nil
                     leftBeginsBlocked+=1
                     return nil
                 else
-                    rightTouches[input]=true
                     blockedTouches[input]=nil
                     rightBeginsPassed+=1
                 end
@@ -251,10 +247,8 @@ local function installForController(controller)
                     return nil
                 end
 
-                -- Only block the exact finger that began on the joystick.
-                -- Do not filter camera movement by its current position: doing so can
-                -- drop intermediate deltas and make camera drags on the left feel slower.
-                -- Touch ownership is decided at InputBegan and remains stable until lift.
+                -- Every non-joystick touch follows Roblox's original camera path across
+                -- the ENTIRE screen. Never classify by left/right side or current position.
                 rightChangesPassed+=1
             end
             return callOriginal(self,input,...)
@@ -268,14 +262,8 @@ local function installForController(controller)
                     blockedTouches[input]=nil
                     local id=getTouchId(input)
                     if id~=nil then blockedTouchIds[id]=nil end
-                    rightTouches[input]=nil
                     leftEndsBlocked+=1
                     return nil
-                end
-                if rightTouches[input] then
-                    rightTouches[input]=nil
-                    rightEndsPassed+=1
-                    return callOriginal(self,input,...)
                 end
             end
             return callOriginal(self,input,...)
@@ -300,7 +288,7 @@ RunService:BindToRenderStep(BIND_NAME,Enum.RenderPriority.Camera.Value-6,functio
 end)
 
 getgenv().PCCameraTouchRightHalfGateV5={
-    Version="6.0-custom-PCJoystick-only-touch-gate",
+    Version="6.1-fullscreen-normal-camera-except-joystick",
     DeadzoneRadiusScale=DEADZONE_RADIUS_SCALE,
     GetState=function()
         return {
@@ -324,7 +312,6 @@ getgenv().__PCCameraTouchRightHalfGateV5Cleanup=function()
     table.clear(blockedTouchIds)
     restoreHooks()
     blockedTouches=setmetatable({}, {__mode="k"})
-    rightTouches=setmetatable({}, {__mode="k"})
     getgenv().PCCameraTouchRightHalfGateV5=nil
     getgenv().__PCCameraTouchRightHalfGateV5Cleanup=nil
 end

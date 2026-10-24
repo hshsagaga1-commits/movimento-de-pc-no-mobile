@@ -519,7 +519,7 @@ connections[#connections+1]=UserInputService.InputBegan:Connect(function(input,g
     local control=controlAtPosition(p)
 
     if control==joystick then
-        if movementTouch~=nil or not onMovementHalf(p) then return end
+        if movementTouch~=nil then return end
         movementTouch=input
         movementCenter=joystick.AbsolutePosition+joystick.AbsoluteSize/2
         movementRadius=math.max(46,math.min(joystick.AbsoluteSize.X,joystick.AbsoluteSize.Y)*0.42)

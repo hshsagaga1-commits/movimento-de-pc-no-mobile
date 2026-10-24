@@ -533,11 +533,10 @@ end)
 
 connections[#connections+1]=UserInputService.InputChanged:Connect(function(input)
     if enabled and input==movementTouch then
-        local p=Vector2.new(input.Position.X,input.Position.Y)
-        if not onMovementHalf(p) then
-            releaseMovement()
-            return
-        end
+        -- Once the joystick owns a finger, keep tracking it anywhere on screen.
+        -- Do not impose a left/right screen boundary; only the joystick and jump
+        -- button capture new touches, so all other screen touches remain available
+        -- to the game's camera and controls.
         updateMovement(input.Position)
     end
 end)

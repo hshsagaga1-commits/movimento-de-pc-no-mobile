@@ -284,74 +284,21 @@ local function refreshKeys(now)
     end
     local desiredKey=#names>0 and table.concat(names,"+") or "-"
 
-    -- If the thumb sweeps through the forward half from one side to the
-    -- other, guarantee the intermediate overlapping chords even when a fast
-    -- swipe skips a narrow diagonal zone between RenderStep samples.
-    if sweepPlan then
-        local targetOnLeft=(desiredKey=="A" or desiredKey=="W+A")
-        local targetOnRight=(desiredKey=="D" or desiredKey=="W+D")
-        local plannedRight=(sweepPlan[#sweepPlan]=="D" or sweepPlan[#sweepPlan]=="W+D")
-        if (plannedRight and targetOnLeft) or (not plannedRight and targetOnRight) then
-            sweepPlan=nil
-            sweepIndex=0
-        end
-    end
+    -- Apply every joystick direction immediately. Do not stage A/D sweeps
+    -- through intermediate chords, since those timed stages feel like input lag.
+    sweepPlan=nil
+    sweepIndex=0
+    sweepNextAt=0
 
-    if not sweepPlan and latestZ < -0.24 then
-        local fromLeft=(stableChordKey=="A" or stableChordKey=="W+A")
-        local fromRight=(stableChordKey=="D" or stableChordKey=="W+D")
-        local toLeft=(desiredKey=="A" or desiredKey=="W+A")
-        local toRight=(desiredKey=="D" or desiredKey=="W+D")
-        if fromLeft and toRight then
-            sweepPlan = stableChordKey=="A"
-                and (desiredKey=="D" and {"W+A","W+A+D","W+D","D"} or {"W+A","W+A+D","W+D"})
-                or (desiredKey=="D" and {"W+A+D","W+D","D"} or {"W+A+D","W+D"})
-            sweepIndex=1
-            applyChordName(sweepPlan[sweepIndex])
-            sweepNextAt=now+SWEEP_STAGE_SECONDS
-        elseif fromRight and toLeft then
-            sweepPlan = stableChordKey=="D"
-                and (desiredKey=="A" and {"W+D","W+A+D","W+A","A"} or {"W+D","W+A+D","W+A"})
-                or (desiredKey=="A" and {"W+A+D","W+A","A"} or {"W+A+D","W+A"})
-            sweepIndex=1
-            applyChordName(sweepPlan[sweepIndex])
-            sweepNextAt=now+SWEEP_STAGE_SECONDS
-        end
-    end
-
-    if sweepPlan then
-        if now>=sweepNextAt then
-            sweepIndex+=1
-            if sweepIndex>#sweepPlan then
-                sweepPlan=nil
-                sweepIndex=0
-            else
-                applyChordName(sweepPlan[sweepIndex])
-                sweepNextAt=now+SWEEP_STAGE_SECONDS
-            end
-        end
+    if desiredKey==stableChordKey then
+        pendingChord=nil
+        pendingChordSince=0
+        applyKeys(desired)
     else
-        -- Tiny non-sweep transients remain filtered as before.
-        if desiredKey==stableChordKey then
-            pendingChord=nil
-            pendingChordSince=0
-            applyKeys(desired)
-        elseif CHORD_STABILITY_SECONDS<=0 then
-            -- With stability disabled, apply the new chord on this same input event.
-            -- Do not wait for another touch update or the next RenderStep.
-            stableChordKey=desiredKey
-            pendingChord=nil
-            pendingChordSince=0
-            applyKeys(desired)
-        elseif desiredKey~=pendingChord then
-            pendingChord=desiredKey
-            pendingChordSince=now
-        elseif now-pendingChordSince>=CHORD_STABILITY_SECONDS then
-            stableChordKey=desiredKey
-            pendingChord=nil
-            pendingChordSince=0
-            applyKeys(desired)
-        end
+        stableChordKey=desiredKey
+        pendingChord=nil
+        pendingChordSince=0
+        applyKeys(desired)
     end
 end
 

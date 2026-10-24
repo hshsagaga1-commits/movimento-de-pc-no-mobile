@@ -46,7 +46,7 @@ local latestChord="-"
 local pendingChord=nil
 local pendingChordSince=0
 local stableChordKey="-" 
-local CHORD_STABILITY_SECONDS=0.001
+local CHORD_STABILITY_SECONDS=0
 -- Fast staged sweep when crossing the forward arc from A to D (or back).
 -- 20 ms per intermediate chord keeps the sequence visible and quick.
 local SWEEP_STAGE_SECONDS=0.016
@@ -334,7 +334,7 @@ local function refreshKeys(now)
         elseif desiredKey~=pendingChord then
             pendingChord=desiredKey
             pendingChordSince=now
-        elseif now-pendingChordSince>=CHORD_STABILITY_SECONDS then
+        elseif CHORD_STABILITY_SECONDS<=0 or now-pendingChordSince>=CHORD_STABILITY_SECONDS then
             stableChordKey=desiredKey
             pendingChord=nil
             pendingChordSince=0
@@ -538,11 +538,18 @@ connections[#connections+1]=UserInputService.InputChanged:Connect(function(input
         -- button capture new touches, so all other screen touches remain available
         -- to the game's camera and controls.
         updateMovement(input.Position)
+        -- Process each joystick movement event immediately instead of waiting for the next render frame.
+        refreshKeys(os.clock())
     end
 end)
 
 connections[#connections+1]=UserInputService.InputEnded:Connect(function(input)
-    if input==movementTouch then releaseMovement() end
+    if input==movementTouch then
+        -- Flush the last position before releasing, so a quick finger movement isn't lost between frames.
+        updateMovement(input.Position)
+        refreshKeys(os.clock())
+        releaseMovement()
+    end
 end)
 
 

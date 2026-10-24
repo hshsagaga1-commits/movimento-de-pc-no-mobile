@@ -100,10 +100,10 @@ inputConnections[#inputConnections+1]=UserInputService.InputBegan:Connect(functi
         activeTouchCount+=1
     end
 
-    -- Allow at most TWO simultaneous fingers total: one for the joystick
-    -- and one for normal camera movement. Any additional finger is ignored
-    -- until it lifts, preventing TouchPlayer from receiving extra touches.
-    if inJoystickDeadzone(input) or activeTouchCount>2 then
+    -- Block only a touch that starts on the movement joystick.
+    -- Do not suppress camera touches based on a global finger count: a stale
+    -- count can make later touches appear ignored until a gesture settles.
+    if inJoystickDeadzone(input) then
         blockedTouches[input]=true
         local id=getTouchId(input)
         if id~=nil then blockedTouchIds[id]=true end

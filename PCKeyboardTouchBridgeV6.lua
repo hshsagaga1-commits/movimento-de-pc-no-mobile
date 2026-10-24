@@ -169,6 +169,11 @@ local function refreshKeys(now)
     if not enabled or movementTouch==nil then
         resetAxis(axisX)
         resetAxis(axisZ)
+        lateralLatch=nil
+        lateralLatchCenterDeadline=nil
+        sweepPlan=nil
+        sweepIndex=0
+        sweepNextAt=0
         pendingChord=nil
         pendingChordSince=0
         stableChordKey="-"
@@ -331,10 +336,17 @@ local function refreshKeys(now)
             pendingChord=nil
             pendingChordSince=0
             applyKeys(desired)
+        elseif CHORD_STABILITY_SECONDS<=0 then
+            -- With stability disabled, apply the new chord on this same input event.
+            -- Do not wait for another touch update or the next RenderStep.
+            stableChordKey=desiredKey
+            pendingChord=nil
+            pendingChordSince=0
+            applyKeys(desired)
         elseif desiredKey~=pendingChord then
             pendingChord=desiredKey
             pendingChordSince=now
-        elseif CHORD_STABILITY_SECONDS<=0 or now-pendingChordSince>=CHORD_STABILITY_SECONDS then
+        elseif now-pendingChordSince>=CHORD_STABILITY_SECONDS then
             stableChordKey=desiredKey
             pendingChord=nil
             pendingChordSince=0
@@ -439,6 +451,13 @@ local function releaseMovement()
     lateralLatchCenterDeadline=nil
     resetAxis(axisX)
     resetAxis(axisZ)
+    -- A released finger must never leave a staged A/D sweep for the next touch.
+    sweepPlan=nil
+    sweepIndex=0
+    sweepNextAt=0
+    pendingChord=nil
+    pendingChordSince=0
+    stableChordKey="-"
     releaseKeys()
     knob.Position=UDim2.fromScale(0.5,0.5)
 end

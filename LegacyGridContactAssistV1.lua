@@ -7,14 +7,14 @@ local EVADE_GAME_ID=3647333358
 
 -- Vertical wall/rail contact.
 local WALL_RADIUS=4.00
-local WALL_RAYS=32
+local WALL_RAYS=16
 local WALL_NORMAL_Y_MAX=0.48
-local WALL_HEIGHTS={-0.55,-0.10,0.35,0.80,1.25}
+local WALL_HEIGHTS={-0.10,0.55,1.15}
 
 -- Ledge/grid-edge contact. The reference video is mostly an edge/curb contact,
 -- not a flat vertical wall, so horizontal-normal-only probes miss it.
 local EDGE_PROBE_RADIUS=2.15
-local EDGE_SAMPLES=20
+local EDGE_SAMPLES=16
 local EDGE_RAY_UP=2.75
 local EDGE_RAY_DOWN=7.00
 local EDGE_DROP_MIN=0.55
@@ -24,6 +24,8 @@ local EDGE_DROP_MIN=0.55
 local WALL_INWARD_SPEED=7.50
 local EDGE_INWARD_SPEED=6.25
 local CONTACT_GRACE_SECONDS=0.24
+local CONTACT_SCAN_INTERVAL=0.08
+local FACING_UPDATE_INTERVAL=1/30
 local MIN_PROJECTED_INPUT=0.10
 local SEED_SPEED_FACTOR=0.92
 
@@ -54,6 +56,9 @@ local noContactFrames=0
 local activeChord="-"
 local smoothedDirection=Vector3.zero
 local lastHeartbeatAt=os.clock()
+local lastContactScanAt=-math.huge
+local cachedContact=nil
+local lastFacingUpdateAt=-math.huge
 
 local function flat(v)
     return Vector3.new(v.X,0,v.Z)
@@ -231,16 +236,37 @@ local function chooseContact()
 end
 
 local function getContact(now)
-    local contact=chooseContact()
-    if contact then
-        lastNormal=contact.normal
-        lastContactUntil=now+CONTACT_GRACE_SECONDS
-        lastHeight=contact.height or 0
-        lastHitName=contact.name or "?"
-        lastMode=contact.mode or "?"
-        return contact
+    -- Spatial probes are expensive: scan at 12.5 Hz and reuse the cached result
+    -- between scans. Contact grace preserves the existing short hold behavior.
+    if now-lastContactScanAt>=CONTACT_SCAN_INTERVAL then
+        lastContactScanAt=now
+        local contact=chooseContact()
+        if contact then
+            lastNormal=contact.normal
+            lastContactUntil=now+CONTACT_GRACE_SECONDS
+            lastHeight=contact.height or 0
+            lastHitName=contact.name or "?"
+            lastMode=contact.mode or "?"
+            cachedContact=contact
+            return contact
+        end
+
+        if lastNormal.Magnitude>0 and now<=lastContactUntil then
+            cachedContact={
+                normal=lastNormal,
+                name=lastHitName,
+                height=lastHeight,
+                mode=lastMode,
+                held=true,
+            }
+            return cachedContact
+        end
+
+        cachedContact=nil
+        return nil
     end
 
+    if cachedContact then return cachedContact end
     if lastNormal.Magnitude>0 and now<=lastContactUntil then
         return {
             normal=lastNormal,
@@ -250,7 +276,6 @@ local function getContact(now)
             held=true,
         }
     end
-
     return nil
 end
 
@@ -335,7 +360,10 @@ heartbeatConnection=RunService.Heartbeat:Connect(function()
 
     -- Smooth avatar facing independently of contact, including while airborne.
     -- Never assign the target CFrame directly: that was the hard, lifeless snap.
-    if desired.Magnitude>0.5 and (chord=="A" or chord=="D" or chord=="W+A" or chord=="W+D" or chord=="W+A+D") then
+    if now-lastFacingUpdateAt>=FACING_UPDATE_INTERVAL
+        and desired.Magnitude>0.5
+        and (chord=="A" or chord=="D" or chord=="W+A" or chord=="W+D" or chord=="W+A+D") then
+        lastFacingUpdateAt=now
         local targetCFrame=CFrame.lookAt(root.Position,root.Position+desired.Unit)
         local faceAlpha=1-math.exp(-dt/0.055)
         pcall(function()
@@ -354,7 +382,7 @@ heartbeatConnection=RunService.Heartbeat:Connect(function()
 end)
 
 env.LegacyGridContactAssistV1={
-    Version="3.4-rotation-smoothed-sweep",
+    Version="3.5-low-stutter-throttled-contact-scan",
     Enabled=enabled,
     GetState=function()
         return {

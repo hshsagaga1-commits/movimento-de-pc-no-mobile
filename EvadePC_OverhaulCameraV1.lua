@@ -14,14 +14,14 @@ local player=Players.LocalPlayer
 local playerGui=player:WaitForChild("PlayerGui")
 local ENV=(type(getgenv)=="function" and getgenv()) or _G
 
-local VERSION="EvadePC-OverhaulCamera-V1.2-retouch-first-delta-guard"
+local VERSION="EvadePC-OverhaulCamera-V1.3-stronger-axis-precision-retouch-guard"
 local EVADE_GAME_ID=3647333358
 local LEGACY_PLACE_ID=96537472072550
 local BIND_NAME="__EvadePCOverhaulCameraV1"
 local GUI_NAME="EvadePCOverhaulCameraV1Gui"
 
-local AXIS_SNAP_RATIO=0.12
-local AXIS_MINOR_MAX=0.006
+local AXIS_SNAP_RATIO=0.18
+local AXIS_MINOR_MAX=0.010
 local MIN_MULTIPLIER=0.1
 local MAX_MULTIPLIER=2.0
 local MULTIPLIER_STEP=0.1

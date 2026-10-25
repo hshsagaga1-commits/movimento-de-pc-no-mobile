@@ -49,10 +49,6 @@ local stableChordKey="-"
 local CHORD_STABILITY_SECONDS=0
 -- Fast staged sweep when crossing the forward arc from A to D (or back).
 -- 20 ms per intermediate chord keeps the sequence visible and quick.
-local SWEEP_STAGE_SECONDS=0.016
-local sweepPlan=nil
-local sweepIndex=0
-local sweepNextAt=0
 local connections={}
 local lastJumpPulse=-math.huge
 local pendingJumpDeadline=nil
@@ -171,9 +167,6 @@ local function refreshKeys(now)
         resetAxis(axisZ)
         lateralLatch=nil
         lateralLatchCenterDeadline=nil
-        sweepPlan=nil
-        sweepIndex=0
-        sweepNextAt=0
         pendingChord=nil
         pendingChordSince=0
         stableChordKey="-"
@@ -284,75 +277,12 @@ local function refreshKeys(now)
     end
     local desiredKey=#names>0 and table.concat(names,"+") or "-"
 
-    -- If the thumb sweeps through the forward half from one side to the
-    -- other, guarantee the intermediate overlapping chords even when a fast
-    -- swipe skips a narrow diagonal zone between RenderStep samples.
-    if sweepPlan then
-        local targetOnLeft=(desiredKey=="A" or desiredKey=="W+A")
-        local targetOnRight=(desiredKey=="D" or desiredKey=="W+D")
-        local plannedRight=(sweepPlan[#sweepPlan]=="D" or sweepPlan[#sweepPlan]=="W+D")
-        if (plannedRight and targetOnLeft) or (not plannedRight and targetOnRight) then
-            sweepPlan=nil
-            sweepIndex=0
-        end
-    end
-
-    if not sweepPlan and latestZ < -0.24 then
-        local fromLeft=(stableChordKey=="A" or stableChordKey=="W+A")
-        local fromRight=(stableChordKey=="D" or stableChordKey=="W+D")
-        local toLeft=(desiredKey=="A" or desiredKey=="W+A")
-        local toRight=(desiredKey=="D" or desiredKey=="W+D")
-        if fromLeft and toRight then
-            sweepPlan = stableChordKey=="A"
-                and (desiredKey=="D" and {"W+A","W+A+D","W+D","D"} or {"W+A","W+A+D","W+D"})
-                or (desiredKey=="D" and {"W+A+D","W+D","D"} or {"W+A+D","W+D"})
-            sweepIndex=1
-            applyChordName(sweepPlan[sweepIndex])
-            sweepNextAt=now+SWEEP_STAGE_SECONDS
-        elseif fromRight and toLeft then
-            sweepPlan = stableChordKey=="D"
-                and (desiredKey=="A" and {"W+D","W+A+D","W+A","A"} or {"W+D","W+A+D","W+A"})
-                or (desiredKey=="A" and {"W+A+D","W+A","A"} or {"W+A+D","W+A"})
-            sweepIndex=1
-            applyChordName(sweepPlan[sweepIndex])
-            sweepNextAt=now+SWEEP_STAGE_SECONDS
-        end
-    end
-
-    if sweepPlan then
-        if now>=sweepNextAt then
-            sweepIndex+=1
-            if sweepIndex>#sweepPlan then
-                sweepPlan=nil
-                sweepIndex=0
-            else
-                applyChordName(sweepPlan[sweepIndex])
-                sweepNextAt=now+SWEEP_STAGE_SECONDS
-            end
-        end
-    else
-        -- Tiny non-sweep transients remain filtered as before.
-        if desiredKey==stableChordKey then
-            pendingChord=nil
-            pendingChordSince=0
-            applyKeys(desired)
-        elseif CHORD_STABILITY_SECONDS<=0 then
-            -- With stability disabled, apply the new chord on this same input event.
-            -- Do not wait for another touch update or the next RenderStep.
-            stableChordKey=desiredKey
-            pendingChord=nil
-            pendingChordSince=0
-            applyKeys(desired)
-        elseif desiredKey~=pendingChord then
-            pendingChord=desiredKey
-            pendingChordSince=now
-        elseif now-pendingChordSince>=CHORD_STABILITY_SECONDS then
-            stableChordKey=desiredKey
-            pendingChord=nil
-            pendingChordSince=0
-            applyKeys(desired)
-        end
-    end
+    -- Low-stutter direct chord changes. applyKeys presses newly needed keys before
+    -- releasing obsolete ones, so A->D stays continuous without a staged multi-frame sweep.
+    stableChordKey=desiredKey
+    pendingChord=nil
+    pendingChordSince=0
+    applyKeys(desired)
 end
 
 local gui=Instance.new("ScreenGui")
@@ -452,9 +382,6 @@ local function releaseMovement()
     resetAxis(axisX)
     resetAxis(axisZ)
     -- A released finger must never leave a staged A/D sweep for the next touch.
-    sweepPlan=nil
-    sweepIndex=0
-    sweepNextAt=0
     pendingChord=nil
     pendingChordSince=0
     stableChordKey="-"
@@ -585,7 +512,7 @@ RunService:BindToRenderStep(BIND_NAME,Enum.RenderPriority.Input.Value+8,function
 end)
 
 getgenv().PCKeyboardTouchBridgeV52={
-    Version="6.8-direct-v59-jump-2d-zones",
+    Version="6.9-low-stutter-direct-chords",
     GetState=function()
         return {
             chord=latestChord,

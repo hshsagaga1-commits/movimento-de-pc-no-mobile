@@ -14,7 +14,7 @@ local player=Players.LocalPlayer
 local playerGui=player:WaitForChild("PlayerGui")
 local ENV=(type(getgenv)=="function" and getgenv()) or _G
 
-local VERSION="EvadePC-OverhaulCamera-V1.1-axis-clean-toggle-native-touch"
+local VERSION="EvadePC-OverhaulCamera-V1.2-retouch-first-delta-guard"
 local EVADE_GAME_ID=3647333358
 local LEGACY_PLACE_ID=96537472072550
 local BIND_NAME="__EvadePCOverhaulCameraV1"
@@ -69,6 +69,8 @@ multiplier=math.clamp(multiplier,MIN_MULTIPLIER,MAX_MULTIPLIER)
 local cameraInput=nil
 local originalGetRotation=nil
 local rotationWrapper=nil
+local suppressFirstRotationSample=false
+local suppressedRetouchSamples=0
 local playerModule=nil
 local cameras=nil
 local activeController=nil
@@ -151,6 +153,17 @@ local function attachRotation()
     local function wrapper(...)
         local rotation=original(...)
         if not enabled then return rotation end
+
+        -- On a fresh camera touch, discard only the first non-zero rotation sample.
+        -- This targets the re-touch spike observed during Evade bhop/trimp without
+        -- applying temporal easing or changing the sensitivity multiplier.
+        if suppressFirstRotationSample and typeof(rotation)=="Vector2"
+            and rotation.Magnitude>0.0001 then
+            suppressFirstRotationSample=false
+            suppressedRetouchSamples+=1
+            return Vector2.zero
+        end
+
         return cleanAxis(rotation)
     end
 
@@ -527,6 +540,19 @@ end
 
 connections[#connections+1]=bar.InputBegan:Connect(beginSlide)
 connections[#connections+1]=knob.InputBegan:Connect(beginSlide)
+
+-- Arm the first-delta guard for camera-area touches only. Ignore the sensitivity
+-- panel and the custom joystick/jump controls so they don't consume camera input.
+connections[#connections+1]=UserInputService.TouchStarted:Connect(function(input)
+    if not enabled or not input or input.UserInputType~=Enum.UserInputType.Touch then
+        return
+    end
+    local pos=Vector2.new(input.Position.X,input.Position.Y)
+    if pointInside(frame,pos,4) or isOwnedTouch(input) then
+        return
+    end
+    suppressFirstRotationSample=true
+end)
 connections[#connections+1]=precisionButton.MouseButton1Click:Connect(function()
     precisionEnabled=not precisionEnabled
     ENV.EvadePCOverhaulPrecisionEnabled=precisionEnabled
@@ -632,6 +658,8 @@ local api={
             activeController=activeController~=nil,
             writesCameraCFrame=false,
             usesTemporalSmoothing=false,
+            suppressFirstRotationSample=suppressFirstRotationSample,
+            suppressedRetouchSamples=suppressedRetouchSamples,
         }
     end,
 }

@@ -230,15 +230,27 @@ local function chooseContact()
     return wall
 end
 
+-- Run the expensive wall/edge raycast sweep at 30 Hz instead of every
+-- Heartbeat. Keep the complete probe layout; only spread the scan frequency.
+local CONTACT_SCAN_INTERVAL=1/30
+local lastContactScanAt=-math.huge
+local cachedContact=nil
+
 local function getContact(now)
-    local contact=chooseContact()
-    if contact then
-        lastNormal=contact.normal
-        lastContactUntil=now+CONTACT_GRACE_SECONDS
-        lastHeight=contact.height or 0
-        lastHitName=contact.name or "?"
-        lastMode=contact.mode or "?"
-        return contact
+    if now-lastContactScanAt>=CONTACT_SCAN_INTERVAL then
+        lastContactScanAt=now
+        cachedContact=chooseContact()
+        if cachedContact then
+            lastNormal=cachedContact.normal
+            lastContactUntil=now+CONTACT_GRACE_SECONDS
+            lastHeight=cachedContact.height or 0
+            lastHitName=cachedContact.name or "?"
+            lastMode=cachedContact.mode or "?"
+        end
+    end
+
+    if cachedContact then
+        return cachedContact
     end
 
     if lastNormal.Magnitude>0 and now<=lastContactUntil then
@@ -354,7 +366,7 @@ heartbeatConnection=RunService.Heartbeat:Connect(function()
 end)
 
 env.LegacyGridContactAssistV1={
-    Version="3.4-rotation-smoothed-sweep",
+    Version="3.6-contact-scan-30hz-smooth-facing",
     Enabled=enabled,
     GetState=function()
         return {

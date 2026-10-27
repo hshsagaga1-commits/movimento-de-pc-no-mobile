@@ -139,19 +139,40 @@ local function desiredMove(chord)
     return Vector3.zero
 end
 
--- Only activate on actual grid/fence geometry, not ordinary walls, floors, or ledges.
--- Check ancestors too, because individual bars are often generically named Parts.
+-- Grid collision may be a separate invisible hitbox, so recognize both
+-- named fence/grid pieces and small collision/barrier parts near them.
+-- Explicit map-boundary names are rejected to avoid activating at the map edge.
 local FENCE_NAME_TOKENS={"fence","grid","grate","railing","rail","gate","mesh","cage","cerca","grade"}
+local INVISIBLE_BARRIER_TOKENS={"invisible","barrier","collision","clip","hitbox","blocker"}
+local MAP_BOUNDARY_TOKENS={"boundary","border","mapedge","map_edge","worldedge","void","killplane","kill_plane"}
 
-local function isFenceLike(instance)
+local function hasNameToken(instance,tokens)
     local current=instance
     for _=1,6 do
         if not current then break end
         local name=string.lower(current.Name or "")
-        for _,token in ipairs(FENCE_NAME_TOKENS) do
+        for _,token in ipairs(tokens) do
             if string.find(name,token,1,true) then return true end
         end
         current=current.Parent
+    end
+    return false
+end
+
+local function isFenceLike(instance)
+    if not instance then return false end
+    if hasNameToken(instance,MAP_BOUNDARY_TOKENS) then return false end
+    if hasNameToken(instance,FENCE_NAME_TOKENS) then return true end
+
+    -- Separate invisible collision volumes are often named generically.
+    -- Accept these only when they are reasonably sized, not giant map blockers.
+    if hasNameToken(instance,INVISIBLE_BARRIER_TOKENS) then
+        local part=instance:IsA("BasePart") and instance or nil
+        if not part then return false end
+        local size=part.Size
+        local largest=math.max(size.X,size.Y,size.Z)
+        local smallest=math.min(size.X,size.Y,size.Z)
+        return largest<=24 and smallest<=3
     end
     return false
 end
@@ -398,7 +419,7 @@ heartbeatConnection=RunService.Heartbeat:Connect(function()
 end)
 
 env.LegacyGridContactAssistV1={
-    Version="3.7-fence-grid-only",
+    Version="3.8-invisible-grid-hitbox",
     Enabled=enabled,
     GetState=function()
         return {

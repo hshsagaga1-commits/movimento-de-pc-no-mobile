@@ -14,7 +14,7 @@ local player=Players.LocalPlayer
 local playerGui=player:WaitForChild("PlayerGui")
 local ENV=(type(getgenv)=="function" and getgenv()) or _G
 
-local VERSION="EvadePC-UniversalCamera-V1.4-legacy-support-touch-retouch-guard"
+local VERSION="EvadePC-UniversalCamera-V1.5-legacy-native-sensitivity-retouch-guard"
 local EVADE_GAME_ID=3647333358
 local LEGACY_PLACE_ID=96537472072550
 local BIND_NAME="__EvadePCOverhaulCameraV1"
@@ -69,6 +69,8 @@ multiplier=math.clamp(multiplier,MIN_MULTIPLIER,MAX_MULTIPLIER)
 local cameraInput=nil
 local originalGetRotation=nil
 local rotationWrapper=nil
+local legacyRotationHook=nil
+local legacyHookController=nil
 local suppressFirstRotationSample=false
 local suppressedRetouchSamples=0
 local playerModule=nil
@@ -133,6 +135,7 @@ local function findCameraInputModule()
 end
 
 local function attachRotation()
+    if game.PlaceId==LEGACY_PLACE_ID then return false end
     local module=findCameraInputModule()
     if not module then return false end
 
@@ -210,6 +213,61 @@ local function findMethod(root,name)
         return nil
     end
     return visit(root,0)
+end
+
+-- Legacy uses BaseCamera input translation instead of the newer CameraInput
+-- module. Scale that returned rotation directly, only in the Legacy place.
+local function restoreLegacyRotation()
+    if legacyRotationHook then
+        pcall(function()
+            if rawget(legacyRotationHook.owner,legacyRotationHook.name)==legacyRotationHook.wrapper then
+                rawset(legacyRotationHook.owner,legacyRotationHook.name,legacyRotationHook.original)
+            end
+        end)
+    end
+    legacyRotationHook=nil
+    legacyHookController=nil
+end
+
+local function attachLegacyRotation(controller)
+    if game.PlaceId~=LEGACY_PLACE_ID or type(controller)~="table" then
+        restoreLegacyRotation()
+        return false
+    end
+
+    if legacyRotationHook and legacyHookController==controller
+        and rawget(legacyRotationHook.owner,legacyRotationHook.name)==legacyRotationHook.wrapper then
+        return true
+    end
+
+    restoreLegacyRotation()
+    local target=findMethod(controller,"InputTranslationToCameraAngleChange")
+    if not target or type(target.fn)~="function" then
+        hookErrors+=1
+        return false
+    end
+
+    local original=target.fn
+    local wrapper=function(self,...)
+        local result=original(self,...)
+        if not enabled then return result end
+        if suppressFirstRotationSample and typeof(result)=="Vector2"
+            and result.Magnitude>0.0001 then
+            suppressFirstRotationSample=false
+            suppressedRetouchSamples+=1
+            return Vector2.zero
+        end
+        return cleanAxis(result)
+    end
+
+    local ok=pcall(function() rawset(target.owner,target.name,wrapper) end)
+    if not ok then
+        hookErrors+=1
+        return false
+    end
+    legacyRotationHook={owner=target.owner,name=target.name,original=original,wrapper=wrapper}
+    legacyHookController=controller
+    return true
 end
 
 local function getCameras()
@@ -607,14 +665,17 @@ connections[#connections+1]=UserInputService.InputEnded:Connect(function(input)
 end)
 
 refreshUI()
-attachRotation()
+if game.PlaceId~=LEGACY_PLACE_ID then attachRotation() end
 activeController=getActiveController()
-if activeController then pcall(function() installTouchIsolation(activeController) end) end
+if activeController then
+    pcall(function() installTouchIsolation(activeController) end)
+    if game.PlaceId==LEGACY_PLACE_ID then pcall(function() attachLegacyRotation(activeController) end) end
+end
 
 RunService:BindToRenderStep(BIND_NAME,Enum.RenderPriority.Camera.Value-6,function()
     if not enabled then return end
 
-    if not cameraInput or cameraInput.getRotation~=rotationWrapper then
+    if game.PlaceId~=LEGACY_PLACE_ID and (not cameraInput or cameraInput.getRotation~=rotationWrapper) then
         pcall(attachRotation)
     end
 
@@ -622,6 +683,11 @@ RunService:BindToRenderStep(BIND_NAME,Enum.RenderPriority.Camera.Value-6,functio
     if controller~=activeController then
         activeController=controller
         pcall(function() installTouchIsolation(activeController) end)
+        if game.PlaceId==LEGACY_PLACE_ID then
+            pcall(function() attachLegacyRotation(activeController) end)
+        end
+    elseif game.PlaceId==LEGACY_PLACE_ID and not legacyRotationHook then
+        pcall(function() attachLegacyRotation(activeController) end)
     end
 end)
 
@@ -655,6 +721,7 @@ local api={
             hookErrors=hookErrors,
             controllerReinstalls=controllerReinstalls,
             cameraInputAttached=cameraInput~=nil and cameraInput.getRotation==rotationWrapper,
+            legacyInputAttached=legacyRotationHook~=nil,
             activeController=activeController~=nil,
             writesCameraCFrame=false,
             usesTemporalSmoothing=false,
@@ -669,6 +736,7 @@ ENV.__EvadePCOverhaulCameraV1Cleanup=function()
     enabled=false
     pcall(function() RunService:UnbindFromRenderStep(BIND_NAME) end)
     restoreHooks()
+    restoreLegacyRotation()
 
     if cameraInput and originalGetRotation and cameraInput.getRotation==rotationWrapper then
         pcall(function() cameraInput.getRotation=originalGetRotation end)

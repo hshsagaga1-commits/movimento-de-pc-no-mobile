@@ -48,6 +48,10 @@ rayParams.IgnoreWater=true
 
 local lastNormal=Vector3.zero
 local lastHitName="-"
+local lastRayHitName="-"
+local lastRayHitDistance=math.huge
+local lastRayHitRecognized=false
+local lastRayHitSize="-"
 local lastMode="none"
 local lastContactUntil=-math.huge
 local lastHeight=0
@@ -81,6 +85,10 @@ local function bindCharacter(char)
     rayParams.FilterDescendantsInstances=char and {char} or {}
     lastNormal=Vector3.zero
     lastHitName="-"
+    lastRayHitName="-"
+    lastRayHitDistance=math.huge
+    lastRayHitRecognized=false
+    lastRayHitSize="-"
     lastMode="none"
     lastContactUntil=-math.huge
 end
@@ -187,6 +195,22 @@ local function findWallContact()
             local angle=(math.pi*2)*(i/WALL_RAYS)
             local direction=Vector3.new(math.cos(angle),0,math.sin(angle))*WALL_RADIUS
             local hit=Workspace:Raycast(origin,direction,rayParams)
+
+            -- Diagnostics: record nearest ray hit even if the name filter rejects it.
+            if hit then
+                local hitDistance=(hit.Position-origin).Magnitude
+                if hitDistance<lastRayHitDistance then
+                    lastRayHitDistance=hitDistance
+                    lastRayHitName=hit.Instance and hit.Instance:GetFullName() or "?"
+                    lastRayHitRecognized=isFenceLike(hit.Instance)
+                    if hit.Instance and hit.Instance:IsA("BasePart") then
+                        local size=hit.Instance.Size
+                        lastRayHitSize=string.format("%.1f,%.1f,%.1f",size.X,size.Y,size.Z)
+                    else
+                        lastRayHitSize="-"
+                    end
+                end
+            end
 
             if hit and isFenceLike(hit.Instance) and math.abs(hit.Normal.Y)<=WALL_NORMAL_Y_MAX then
                 local normal=flatUnit(hit.Normal)
@@ -419,7 +443,7 @@ heartbeatConnection=RunService.Heartbeat:Connect(function()
 end)
 
 env.LegacyGridContactAssistV1={
-    Version="3.8-invisible-grid-hitbox",
+    Version="3.9-grid-hitbox-diagnostics",
     Enabled=enabled,
     GetState=function()
         return {
@@ -431,6 +455,10 @@ env.LegacyGridContactAssistV1={
             edgeFrames=edgeFrames,
             noContactFrames=noContactFrames,
             lastHitName=lastHitName,
+            lastRayHitName=lastRayHitName,
+            lastRayHitDistance=lastRayHitDistance,
+            lastRayHitRecognized=lastRayHitRecognized,
+            lastRayHitSize=lastRayHitSize,
             lastNormal=lastNormal,
             lastHeight=lastHeight,
             wallRadius=WALL_RADIUS,

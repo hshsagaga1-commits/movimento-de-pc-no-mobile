@@ -188,6 +188,10 @@ end
 local function findWallContact()
     if not root then return nil end
     local best=nil
+    lastRayHitDistance=math.huge
+    lastRayHitName="-"
+    lastRayHitRecognized=false
+    lastRayHitSize="-"
 
     for _,height in ipairs(WALL_HEIGHTS) do
         local origin=root.Position+Vector3.new(0,height,0)

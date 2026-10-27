@@ -27,6 +27,11 @@ local CONTACT_GRACE_SECONDS=0.24
 local MIN_PROJECTED_INPUT=0.10
 local SEED_SPEED_FACTOR=0.92
 
+-- Tiny vertical pulse on a grounded direction reversal while contact is held.
+-- 4.25 studs/s gives a very small hop, not a normal full jump.
+local MICRO_HOP_SPEED=4.25
+local MICRO_HOP_COOLDOWN=0.14
+
 local env=getgenv()
 local oldCleanup=env.__LegacyGridContactAssistV1Cleanup
 if type(oldCleanup)=="function" then pcall(oldCleanup) end
@@ -54,6 +59,7 @@ local noContactFrames=0
 local activeChord="-"
 local smoothedDirection=Vector3.zero
 local lastHeartbeatAt=os.clock()
+local lastMicroHopAt=-math.huge
 
 local function flat(v)
     return Vector3.new(v.X,0,v.Z)
@@ -362,6 +368,22 @@ heartbeatConnection=RunService.Heartbeat:Connect(function()
     end
 
     if contact.mode=="edge" then edgeFrames+=1 else wallFrames+=1 end
+
+    -- Reproduce the PC's barely-visible grid hop on a direction change.
+    -- Only trigger while touching a detected wall/edge and standing on ground;
+    -- no keyboard/joystick input is generated or modified by this block.
+    local changedDirection=previousChord~=chord
+        and ACTIVE_CHORDS[previousChord]==true
+        and ACTIVE_CHORDS[chord]==true
+    local grounded=humanoid.FloorMaterial~=Enum.Material.Air
+    if changedDirection and grounded and now-lastMicroHopAt>=MICRO_HOP_COOLDOWN then
+        local v=root.AssemblyLinearVelocity
+        pcall(function()
+            root.AssemblyLinearVelocity=Vector3.new(v.X,MICRO_HOP_SPEED,v.Z)
+        end)
+        lastMicroHopAt=now
+    end
+
     applyAssist(contact,desired)
 end)
 

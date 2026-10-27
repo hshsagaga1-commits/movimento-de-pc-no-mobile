@@ -139,6 +139,23 @@ local function desiredMove(chord)
     return Vector3.zero
 end
 
+-- Only activate on actual grid/fence geometry, not ordinary walls, floors, or ledges.
+-- Check ancestors too, because individual bars are often generically named Parts.
+local FENCE_NAME_TOKENS={"fence","grid","grate","railing","rail","gate","mesh","cage","cerca","grade"}
+
+local function isFenceLike(instance)
+    local current=instance
+    for _=1,6 do
+        if not current then break end
+        local name=string.lower(current.Name or "")
+        for _,token in ipairs(FENCE_NAME_TOKENS) do
+            if string.find(name,token,1,true) then return true end
+        end
+        current=current.Parent
+    end
+    return false
+end
+
 local function findWallContact()
     if not root then return nil end
     local best=nil
@@ -150,7 +167,7 @@ local function findWallContact()
             local direction=Vector3.new(math.cos(angle),0,math.sin(angle))*WALL_RADIUS
             local hit=Workspace:Raycast(origin,direction,rayParams)
 
-            if hit and math.abs(hit.Normal.Y)<=WALL_NORMAL_Y_MAX then
+            if hit and isFenceLike(hit.Instance) and math.abs(hit.Normal.Y)<=WALL_NORMAL_Y_MAX then
                 local normal=flatUnit(hit.Normal)
                 if normal.Magnitude>0 then
                     local distance=(hit.Position-origin).Magnitude
@@ -225,14 +242,10 @@ local function findEdgeContact()
 end
 
 local function chooseContact()
-    local wall=findWallContact()
-    local edge=findEdgeContact()
-
-    -- Prefer a real nearby wall/rail. Otherwise use the ledge detector from the
-    -- reference clip (curb/grid edge with a drop beside the player).
-    if wall and wall.distance<=2.60 then return wall end
-    if edge then return edge end
-    return wall
+    local fence=findWallContact()
+    -- No generic wall or ledge activation: only a named grid/fence within reach.
+    if fence and fence.distance<=2.60 then return fence end
+    return nil
 end
 
 -- Run the expensive wall/edge raycast sweep at 30 Hz instead of every
@@ -385,7 +398,7 @@ heartbeatConnection=RunService.Heartbeat:Connect(function()
 end)
 
 env.LegacyGridContactAssistV1={
-    Version="3.6-contact-scan-30hz-smooth-facing",
+    Version="3.7-fence-grid-only",
     Enabled=enabled,
     GetState=function()
         return {

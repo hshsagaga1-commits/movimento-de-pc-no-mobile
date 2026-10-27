@@ -26,6 +26,7 @@ local EDGE_INWARD_SPEED=6.25
 local CONTACT_GRACE_SECONDS=0.24
 local MIN_PROJECTED_INPUT=0.10
 local SEED_SPEED_FACTOR=0.92
+local SIDE_REVERSAL_SPEED_FACTOR=1.22
 
 -- Tiny vertical pulse on a grounded direction reversal while contact is held.
 -- 4.25 studs/s gives a very small hop, not a normal full jump.
@@ -272,7 +273,7 @@ local function getContact(now)
     return nil
 end
 
-local function applyAssist(contact,desired)
+local function applyAssist(contact,desired,reversingSides)
     local velocity=root.AssemblyLinearVelocity
     local horizontal=flat(velocity)
     local normal=contact.normal
@@ -287,23 +288,30 @@ local function applyAssist(contact,desired)
 
     local drive=Vector3.zero
     if desired.Magnitude>=MIN_PROJECTED_INPUT then
-        -- Pure A/D strafe keeps 100% of the current horizontal motor speed.
-        -- W and diagonal chords also keep the original speed unchanged.
-        local lateralFactor=1.0
+        -- Only a direct A<->D reversal gets the PC-like speed kick.
+        -- W, diagonals, and all other movement keep their previous speed.
+        local lateralFactor=reversingSides and SIDE_REVERSAL_SPEED_FACTOR or 1.0
         drive=desired.Unit*speed*lateralFactor
     elseif horizontal.Magnitude>0.05 then
         drive=horizontal
     end
 
     local inward=(contact.mode=="edge") and EDGE_INWARD_SPEED or WALL_INWARD_SPEED
+    local contactPush=-normal*inward
 
-    -- Keep the requested direction intact and add only contact pressure.
-    -- Therefore:
-    -- W   = forward motor + hold
-    -- A   = same motor rotated left + hold
-    -- D   = same motor rotated right + hold
-    -- WA/WD = same motor on the diagonal + hold
-    local corrected=drive-normal*inward
+    -- Contact pressure must never cancel the player's chosen movement.
+    -- Keep the pressure component sideways/forward, but remove any component
+    -- that points against the requested direction and bleeds off reversal speed.
+    if desired.Magnitude>=MIN_PROJECTED_INPUT then
+        local alongInput=contactPush:Dot(desired.Unit)
+        if alongInput<0 then
+            contactPush-=desired.Unit*alongInput
+        end
+    end
+
+    -- W, diagonals and ordinary A/D keep the same motor; A<->D gets a small
+    -- boost, while the contact correction can no longer subtract from it.
+    local corrected=drive+contactPush
 
     pcall(function()
         root.AssemblyLinearVelocity=Vector3.new(corrected.X,velocity.Y,corrected.Z)
@@ -361,6 +369,9 @@ heartbeatConnection=RunService.Heartbeat:Connect(function()
         end)
     end
 
+    local reversingSides=(previousChord=="A" and chord=="D")
+        or (previousChord=="D" and chord=="A")
+
     local contact=getContact(now)
     if not contact then
         noContactFrames+=1
@@ -384,7 +395,7 @@ heartbeatConnection=RunService.Heartbeat:Connect(function()
         lastMicroHopAt=now
     end
 
-    applyAssist(contact,desired)
+    applyAssist(contact,desired,reversingSides)
 end)
 
 env.LegacyGridContactAssistV1={

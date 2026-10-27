@@ -1,4 +1,4 @@
--- Evade PC - Overhaul Camera V1
+-- Evade PC - Universal Camera Sensitivity V1 (Overhaul + Legacy)
 -- PC-like camera input without replacing Camera.CFrame.
 -- 1) keeps absolute sensitivity separate from precision
 -- 2) precision only removes tiny cross-axis noise; it never slows the main axis
@@ -14,7 +14,7 @@ local player=Players.LocalPlayer
 local playerGui=player:WaitForChild("PlayerGui")
 local ENV=(type(getgenv)=="function" and getgenv()) or _G
 
-local VERSION="EvadePC-OverhaulCamera-V1.3-stronger-axis-precision-retouch-guard"
+local VERSION="EvadePC-UniversalCamera-V1.4-legacy-support-touch-retouch-guard"
 local EVADE_GAME_ID=3647333358
 local LEGACY_PLACE_ID=96537472072550
 local BIND_NAME="__EvadePCOverhaulCameraV1"
@@ -54,8 +54,8 @@ end
 local oldGate=ENV.__PCCameraTouchRightHalfGateV5Cleanup
 if type(oldGate)=="function" then pcall(oldGate) end
 
-if game.GameId~=EVADE_GAME_ID or game.PlaceId==LEGACY_PLACE_ID then
-    local api={Version=VERSION,Installed=false,Reason="not-overhaul",PlaceId=game.PlaceId}
+if game.GameId~=EVADE_GAME_ID then
+    local api={Version=VERSION,Installed=false,Reason="wrong-game",PlaceId=game.PlaceId}
     ENV.EvadePCOverhaulCameraV1=api
     return api
 end

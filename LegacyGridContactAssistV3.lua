@@ -47,7 +47,7 @@ rayParams.IgnoreWater=true
 
 local overlapParams=OverlapParams.new()
 overlapParams.FilterType=Enum.RaycastFilterType.Exclude
-overlapParams.MaxParts=72
+overlapParams.MaxParts=48
 
 local radialDirections={}
 for i=0,WALL_RAYS-1 do
@@ -59,6 +59,7 @@ local lastContact=nil
 local cachedContact=nil
 local lastContactUntil=-math.huge
 local lastScanAt=-math.huge
+local lastOverlapAt=-math.huge
 local lastHeartbeatAt=os.clock()
 local lastMicroHopAt=-math.huge
 local lastChord="-"
@@ -113,11 +114,16 @@ local function isFenceLike(part)
     -- Thin solid vertical columns, metal grates, mesh fences, translucent rails
     -- and slim collision panels with generic names such as "Part".
     local shape=thin<=0.78 and (wide>=0.10 or sz.Y>=2.0)
+    local plainSlat=thin<=0.42 and wide<=1.10 and sz.Y>=1.45
     local likelyFence=part:IsA("MeshPart")
         or part.Material==Enum.Material.Metal
         or part.Material==Enum.Material.DiamondPlate
         or (part.Transparency>=0.12 and part.Transparency<=0.96)
-    if shape and likelyFence then return true,"geometry" end
+    if shape and (likelyFence or plainSlat) then return true,"geometry" end
+    -- Thin horizontal rails may form a fence even without a useful part name.
+    local horizontalRail=sz.Y<=0.65 and thin<=0.52 and wide>=1.40
+        and wide<=72 and (likelyFence or part.Material==Enum.Material.Plastic)
+    if horizontalRail then return true,"horizontal-rail" end
 
     if thin<=1.55 and part.Transparency>=0.96 then
         return true,"invisible-panel"
@@ -139,6 +145,7 @@ local function bindCharacter(char)
     cachedContact=nil
     lastContactUntil=-math.huge
     lastScanAt=-math.huge
+    lastOverlapAt=-math.huge
     lastChord="-"
     lastFacing=Vector3.zero
 end
@@ -239,6 +246,9 @@ local function bestContact()
     if best then return best end
 
     -- Overlap fallback: narrow rails and slats between the radial rays.
+    -- Rate-limit the broader shape query on mobile to avoid FPS drops.
+    if os.clock()-lastOverlapAt<0.055 then return nil end
+    lastOverlapAt=os.clock()
     -- Confirm a direct unobstructed ray before using a nearby part.
     local ok,parts=pcall(function()
         return Workspace:GetPartBoundsInRadius(rootPos,WALL_RADIUS,overlapParams)
@@ -441,6 +451,7 @@ env.LegacyGridContactAssistV1={
             geometryContacts=geometryContacts,
             noContactFrames=noContactFrames,
             scanCount=scanCount,
+            overlapPartLimit=overlapParams.MaxParts,
             mode=lastContact and lastContact.mode or "none",
             lastHitName=lastContact and lastContact.name or "-",
             lastRayHitName=lastRayHitName,

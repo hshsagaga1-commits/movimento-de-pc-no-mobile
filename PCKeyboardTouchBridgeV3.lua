@@ -1,0 +1,653 @@
+-- PC Movement + Assist V3: original V6 keyboard sequence UNCHANGED.
+-- Only joystick knob animation and raw analog readout are added.
+local Players=game:GetService("Players")
+local RunService=game:GetService("RunService")
+local UserInputService=game:GetService("UserInputService")
+local VirtualInputManager=game:GetService("VirtualInputManager")
+
+local player=Players.LocalPlayer
+local playerGui=player:WaitForChild("PlayerGui")
+
+local BIND_NAME="__PCKeyboardTouchBridgeV52"
+local GUI_NAME="PCKeyboardTouchBridgeV52Overlay"
+local MOVEMENT_HALF=0.80
+local PRESS_THRESHOLD=0.30
+local RELEASE_THRESHOLD=0.18
+local DIRECTION_LATCH_SECONDS=0.09
+local JUMP_MIN_INTERVAL=0.11
+local JUMP_BUFFER_SECONDS=0.14
+local SPACE_PULSE_SECONDS=0.055
+
+for _,cleanupName in ipairs({
+    "__PCKeyboardTouchBridgeV52Cleanup",
+    "__PCKeyboardTouchBridgeV5Cleanup",
+    "__PCIndependentJoystickCleanup",
+    "__PCSelectiveWASDCleanup",
+    "__PCClassicNativeKeysV3Cleanup",
+    "__PCClassicNativeKeysCleanup",
+    "__PCClassicWASDCleanup",
+}) do
+    local cleanup=getgenv()[cleanupName]
+    if type(cleanup)=="function" then pcall(cleanup) end
+end
+pcall(function() RunService:UnbindFromRenderStep(BIND_NAME) end)
+
+local oldGui=playerGui:FindFirstChild(GUI_NAME)
+if oldGui then oldGui:Destroy() end
+
+local enabled=true
+local movementTouch=nil
+local movementCenter=nil
+local movementRadius=64
+local latestX=0
+local latestZ=0
+local pressed={W=false,A=false,S=false,D=false}
+local axisX={state=0,releaseAt=nil}
+local axisZ={state=0,releaseAt=nil}
+local latestChord="-" 
+local pendingChord=nil
+local pendingChordSince=0
+local stableChordKey="-" 
+local CHORD_STABILITY_SECONDS=0
+-- Fast staged sweep when crossing the forward arc from A to D (or back).
+-- 20 ms per intermediate chord keeps the sequence visible and quick.
+local SWEEP_STAGE_SECONDS=0.016
+local sweepPlan=nil
+local sweepIndex=0
+local sweepNextAt=0
+local connections={}
+local lastJumpPulse=-math.huge
+local pendingJumpDeadline=nil
+local pendingSpaceReleaseToken=0
+local jumpBurstToken=0
+local JUMP_BURST_SECONDS=0.200
+local movementCaptures=0
+local movementUpdates=0
+local keyEvents=0
+local jumpRequests=0
+local jumpPulses=0
+local bufferedJumpCount=0
+local knobTargetOffset=Vector2.zero
+local knobVisualOffset=Vector2.zero
+local knobAnimationInitialized=false
+
+local KEYS={
+    W=Enum.KeyCode.W,
+    A=Enum.KeyCode.A,
+    S=Enum.KeyCode.S,
+    D=Enum.KeyCode.D,
+}
+
+local function viewportSize()
+    local camera=workspace.CurrentCamera
+    return camera and camera.ViewportSize or Vector2.new(1108,512)
+end
+
+local function onMovementHalf(position)
+    if typeof(position)=="Vector3" then position=Vector2.new(position.X,position.Y) end
+    if typeof(position)~="Vector2" then return false end
+    return position.X<=viewportSize().X*MOVEMENT_HALF
+end
+
+local function sendKey(name,down)
+    local code=KEYS[name]
+    if not code then return false end
+    local ok=pcall(function()
+        VirtualInputManager:SendKeyEvent(down,code,false,game)
+    end)
+    if ok then keyEvents+=1 end
+    return ok
+end
+
+local function rebuildChord()
+    local out={}
+    for _,name in ipairs({"W","A","S","D"}) do
+        if pressed[name] then out[#out+1]=name end
+    end
+    latestChord=#out>0 and table.concat(out,"+") or "-"
+end
+
+local function applyKeys(desired)
+    desired=desired or {}
+    -- Press newly needed keys first, then release obsolete ones. Overlapping
+    -- chords therefore stay continuous (A -> W+A -> W+A+D -> W+D -> D).
+    for _,name in ipairs({"W","A","S","D"}) do
+        if desired[name] and not pressed[name] then
+            if sendKey(name,true) then pressed[name]=true end
+        end
+    end
+    for _,name in ipairs({"W","A","S","D"}) do
+        if pressed[name] and not desired[name] then
+            sendKey(name,false)
+            pressed[name]=false
+        end
+    end
+    rebuildChord()
+end
+
+local function applyChordName(key)
+    local desired={}
+    if key and key~="-" then
+        for name in string.gmatch(key,"[^+]+") do
+            desired[name]=true
+        end
+    end
+    stableChordKey=key or "-"
+    pendingChord=nil
+    pendingChordSince=0
+    applyKeys(desired)
+end
+
+local function releaseKeys()
+    applyKeys({})
+end
+
+local function resetAxis(axis)
+    axis.state=0
+    axis.releaseAt=nil
+end
+
+local function updateAxis(axis,value,now)
+    if value>=PRESS_THRESHOLD then
+        axis.state=1 axis.releaseAt=nil return 1
+    elseif value<=-PRESS_THRESHOLD then
+        axis.state=-1 axis.releaseAt=nil return -1
+    end
+    if axis.state==1 then
+        if value>=RELEASE_THRESHOLD then axis.releaseAt=nil return 1 end
+        if axis.releaseAt==nil then axis.releaseAt=now+DIRECTION_LATCH_SECONDS end
+        if now<axis.releaseAt then return 1 end
+        resetAxis(axis)
+    elseif axis.state==-1 then
+        if value<=-RELEASE_THRESHOLD then axis.releaseAt=nil return -1 end
+        if axis.releaseAt==nil then axis.releaseAt=now+DIRECTION_LATCH_SECONDS end
+        if now<axis.releaseAt then return -1 end
+        resetAxis(axis)
+    end
+    return 0
+end
+
+local lateralLatch=nil
+local lateralLatchCenterDeadline=nil
+
+local function refreshKeys(now)
+    if not enabled or movementTouch==nil then
+        resetAxis(axisX)
+        resetAxis(axisZ)
+        lateralLatch=nil
+        lateralLatchCenterDeadline=nil
+        sweepPlan=nil
+        sweepIndex=0
+        sweepNextAt=0
+        pendingChord=nil
+        pendingChordSince=0
+        stableChordKey="-"
+        releaseKeys()
+        return
+    end
+    local FORWARD_W_MAX_RATIO=0.34
+    local FORWARD_DIAGONAL_MAX_RATIO=2.20
+    local FORWARD_DIAGONAL_MIN_RADIUS=0.55
+    local BACK_DIAGONAL_MIN_RATIO=0.65
+    local BACK_DIAGONAL_MAX_RATIO=1.54
+    local SIDE_SWEEP_MAX_ABS_Z=0.24
+    local SIDE_SWAP_X=0.08
+    local SIDE_SWEEP_CENTER_GRACE=0.0
+
+    local function chooseDigitalChord(x,z)
+        local ax=math.abs(x)
+        local az=math.abs(z)
+        local radius=math.sqrt(x*x+z*z)
+        local horizontalKey=x<0 and "A" or "D"
+        local inSideSweepCorridor=az<=SIDE_SWEEP_MAX_ABS_Z
+
+        if lateralLatch then
+            if not inSideSweepCorridor then
+                lateralLatch=nil
+                lateralLatchCenterDeadline=nil
+            else
+                if lateralLatch=="A" and x>=SIDE_SWAP_X then
+                    lateralLatch="D"
+                    lateralLatchCenterDeadline=nil
+                    return {D=true}
+                elseif lateralLatch=="D" and x<=-SIDE_SWAP_X then
+                    lateralLatch="A"
+                    lateralLatchCenterDeadline=nil
+                    return {A=true}
+                end
+
+                if radius>=PRESS_THRESHOLD then
+                    lateralLatchCenterDeadline=nil
+                    return {[lateralLatch]=true}
+                end
+
+                if lateralLatchCenterDeadline==nil then
+                    lateralLatchCenterDeadline=now+SIDE_SWEEP_CENTER_GRACE
+                end
+                if now<=lateralLatchCenterDeadline then
+                    return {[lateralLatch]=true}
+                end
+
+                lateralLatch=nil
+                lateralLatchCenterDeadline=nil
+            end
+        end
+
+        if radius<PRESS_THRESHOLD then
+            return {}
+        end
+
+        if az<=0.0001 then
+            lateralLatch=horizontalKey
+            lateralLatchCenterDeadline=nil
+            return {[horizontalKey]=true}
+        end
+
+        if z<0 then
+            if ax<=0.0001 then return {W=true} end
+            local ratio=ax/az
+            if ratio<=FORWARD_W_MAX_RATIO then
+                -- Straight-forward input uses the combined W+A+D chord as requested.
+                return {W=true,A=true,D=true}
+            end
+            if radius>=FORWARD_DIAGONAL_MIN_RADIUS and ratio<=FORWARD_DIAGONAL_MAX_RATIO then
+                return {W=true,[horizontalKey]=true}
+            end
+            if ratio>FORWARD_DIAGONAL_MAX_RATIO then
+                if inSideSweepCorridor then
+                    lateralLatch=horizontalKey
+                    lateralLatchCenterDeadline=nil
+                end
+                return {[horizontalKey]=true}
+            end
+            if ratio<=1 then return {W=true} end
+            if inSideSweepCorridor then
+                lateralLatch=horizontalKey
+                lateralLatchCenterDeadline=nil
+            end
+            return {[horizontalKey]=true}
+        end
+
+        if ax<=0.0001 then return {S=true} end
+        local ratio=ax/az
+        if ratio<BACK_DIAGONAL_MIN_RATIO then
+            return {S=true}
+        elseif ratio>BACK_DIAGONAL_MAX_RATIO then
+            if inSideSweepCorridor then
+                lateralLatch=horizontalKey
+                lateralLatchCenterDeadline=nil
+            end
+            return {[horizontalKey]=true}
+        end
+        return {S=true,[horizontalKey]=true}
+    end
+
+    local desired=chooseDigitalChord(latestX,latestZ)
+    local names={}
+    for _,name in ipairs({"W","A","S","D"}) do
+        if desired[name] then names[#names+1]=name end
+    end
+    local desiredKey=#names>0 and table.concat(names,"+") or "-"
+
+    -- If the thumb sweeps through the forward half from one side to the
+    -- other, guarantee the intermediate overlapping chords even when a fast
+    -- swipe skips a narrow diagonal zone between RenderStep samples.
+    if sweepPlan then
+        local targetOnLeft=(desiredKey=="A" or desiredKey=="W+A")
+        local targetOnRight=(desiredKey=="D" or desiredKey=="W+D")
+        local plannedRight=(sweepPlan[#sweepPlan]=="D" or sweepPlan[#sweepPlan]=="W+D")
+        if (plannedRight and targetOnLeft) or (not plannedRight and targetOnRight) then
+            sweepPlan=nil
+            sweepIndex=0
+        end
+    end
+
+    if not sweepPlan and latestZ < -0.24 then
+        local fromLeft=(stableChordKey=="A" or stableChordKey=="W+A")
+        local fromRight=(stableChordKey=="D" or stableChordKey=="W+D")
+        local toLeft=(desiredKey=="A" or desiredKey=="W+A")
+        local toRight=(desiredKey=="D" or desiredKey=="W+D")
+        if fromLeft and toRight then
+            sweepPlan = stableChordKey=="A"
+                and (desiredKey=="D" and {"W+A","W+A+D","W+D","D"} or {"W+A","W+A+D","W+D"})
+                or (desiredKey=="D" and {"W+A+D","W+D","D"} or {"W+A+D","W+D"})
+            sweepIndex=1
+            applyChordName(sweepPlan[sweepIndex])
+            sweepNextAt=now+SWEEP_STAGE_SECONDS
+        elseif fromRight and toLeft then
+            sweepPlan = stableChordKey=="D"
+                and (desiredKey=="A" and {"W+D","W+A+D","W+A","A"} or {"W+D","W+A+D","W+A"})
+                or (desiredKey=="A" and {"W+A+D","W+A","A"} or {"W+A+D","W+A"})
+            sweepIndex=1
+            applyChordName(sweepPlan[sweepIndex])
+            sweepNextAt=now+SWEEP_STAGE_SECONDS
+        end
+    end
+
+    if sweepPlan then
+        if now>=sweepNextAt then
+            sweepIndex+=1
+            if sweepIndex>#sweepPlan then
+                sweepPlan=nil
+                sweepIndex=0
+            else
+                applyChordName(sweepPlan[sweepIndex])
+                sweepNextAt=now+SWEEP_STAGE_SECONDS
+            end
+        end
+    else
+        -- Tiny non-sweep transients remain filtered as before.
+        if desiredKey==stableChordKey then
+            pendingChord=nil
+            pendingChordSince=0
+            applyKeys(desired)
+        elseif CHORD_STABILITY_SECONDS<=0 then
+            -- With stability disabled, apply the new chord on this same input event.
+            -- Do not wait for another touch update or the next RenderStep.
+            stableChordKey=desiredKey
+            pendingChord=nil
+            pendingChordSince=0
+            applyKeys(desired)
+        elseif desiredKey~=pendingChord then
+            pendingChord=desiredKey
+            pendingChordSince=now
+        elseif now-pendingChordSince>=CHORD_STABILITY_SECONDS then
+            stableChordKey=desiredKey
+            pendingChord=nil
+            pendingChordSince=0
+            applyKeys(desired)
+        end
+    end
+end
+
+local gui=Instance.new("ScreenGui")
+gui.Name=GUI_NAME
+gui.ResetOnSpawn=false
+gui.IgnoreGuiInset=true
+gui.DisplayOrder=10020
+gui.Parent=playerGui
+
+local joystick=Instance.new("TextButton")
+joystick.Name="PCJoystick"
+joystick.Text=""
+joystick.AutoButtonColor=false
+joystick.Active=true
+joystick.BackgroundColor3=Color3.fromRGB(55,55,55)
+joystick.BackgroundTransparency=0.48
+joystick.BorderSizePixel=0
+joystick.AnchorPoint=Vector2.new(0,1)
+joystick.Position=UDim2.new(0,42,1,-42)
+joystick.Size=UDim2.fromOffset(132,132)
+joystick.ZIndex=20
+joystick.Parent=gui
+local joystickCorner=Instance.new("UICorner")
+joystickCorner.CornerRadius=UDim.new(1,0)
+joystickCorner.Parent=joystick
+local joystickStroke=Instance.new("UIStroke")
+joystickStroke.Thickness=3
+joystickStroke.Transparency=0.35
+joystickStroke.Parent=joystick
+
+local knob=Instance.new("Frame")
+knob.Name="Knob"
+knob.BackgroundColor3=Color3.fromRGB(205,205,205)
+knob.BackgroundTransparency=0.22
+knob.BorderSizePixel=0
+knob.AnchorPoint=Vector2.new(0.5,0.5)
+knob.Position=UDim2.fromScale(0.5,0.5)
+knob.Size=UDim2.fromOffset(54,54)
+knob.ZIndex=21
+knob.Parent=joystick
+local knobCorner=Instance.new("UICorner")
+knobCorner.CornerRadius=UDim.new(1,0)
+knobCorner.Parent=knob
+
+local jumpButton=Instance.new("TextButton")
+jumpButton.Name="PCJump"
+jumpButton.Text="↑"
+jumpButton.Font=Enum.Font.GothamBold
+jumpButton.TextSize=35
+jumpButton.TextColor3=Color3.fromRGB(225,225,225)
+jumpButton.AutoButtonColor=false
+jumpButton.Active=true
+jumpButton.BackgroundColor3=Color3.fromRGB(55,55,55)
+jumpButton.BackgroundTransparency=0.46
+jumpButton.BorderSizePixel=0
+jumpButton.AnchorPoint=Vector2.new(1,1)
+jumpButton.Position=UDim2.new(1,-52,1,-122)
+jumpButton.Size=UDim2.fromOffset(86,86)
+jumpButton.ZIndex=20
+jumpButton.Parent=gui
+local jumpCorner=Instance.new("UICorner")
+jumpCorner.CornerRadius=UDim.new(1,0)
+jumpCorner.Parent=jumpButton
+local jumpStroke=Instance.new("UIStroke")
+jumpStroke.Thickness=3
+jumpStroke.Transparency=0.35
+jumpStroke.Parent=jumpButton
+
+local function setKnobFromPosition(position)
+    if typeof(position)=="Vector3" then position=Vector2.new(position.X,position.Y) end
+    if typeof(position)~="Vector2" or not movementCenter then return end
+    local delta=position-movementCenter
+    local maxVisual=math.max(1,movementRadius*0.62)
+    local visual=delta
+    if visual.Magnitude>maxVisual then visual=visual.Unit*maxVisual end
+    knobTargetOffset=visual
+    if not knobAnimationInitialized then
+        knobVisualOffset=visual
+        knobAnimationInitialized=true
+        knob.Position=UDim2.fromOffset(joystick.AbsoluteSize.X/2+visual.X,joystick.AbsoluteSize.Y/2+visual.Y)
+    end
+end
+
+local function updateMovement(position)
+    if typeof(position)=="Vector3" then position=Vector2.new(position.X,position.Y) end
+    if typeof(position)~="Vector2" or not movementCenter then return end
+    local delta=position-movementCenter
+    local r=math.max(1,movementRadius)
+    latestX=delta.X/r
+    latestZ=delta.Y/r
+    movementUpdates+=1
+    setKnobFromPosition(position)
+end
+
+local function releaseMovement()
+    movementTouch=nil
+    movementCenter=nil
+    latestX=0
+    latestZ=0
+    lateralLatch=nil
+    lateralLatchCenterDeadline=nil
+    resetAxis(axisX)
+    resetAxis(axisZ)
+    -- A released finger must never leave a staged A/D sweep for the next touch.
+    sweepPlan=nil
+    sweepIndex=0
+    sweepNextAt=0
+    pendingChord=nil
+    pendingChordSince=0
+    stableChordKey="-"
+    releaseKeys()
+    knobTargetOffset=Vector2.zero
+    knobVisualOffset=Vector2.zero
+    knobAnimationInitialized=false
+    knob.Position=UDim2.fromScale(0.5,0.5)
+end
+
+local function pulseJump()
+    lastJumpPulse=os.clock()
+    pendingJumpDeadline=nil
+    jumpPulses+=1
+    pcall(function()
+        VirtualInputManager:SendKeyEvent(true,Enum.KeyCode.Space,false,game)
+    end)
+    pendingSpaceReleaseToken+=1
+    local token=pendingSpaceReleaseToken
+    task.delay(SPACE_PULSE_SECONDS,function()
+        if token~=pendingSpaceReleaseToken then return end
+        pcall(function()
+            VirtualInputManager:SendKeyEvent(false,Enum.KeyCode.Space,false,game)
+        end)
+    end)
+end
+
+local function requestJump()
+    if not enabled then return end
+    jumpRequests+=1
+    jumpBurstToken+=1
+    local token=jumpBurstToken
+    local deadline=os.clock()+JUMP_BURST_SECONDS
+
+    local function burstPulse()
+        if not enabled or token~=jumpBurstToken then return end
+        lastJumpPulse=os.clock()
+        pendingJumpDeadline=nil
+        jumpPulses+=1
+        pcall(function()
+            VirtualInputManager:SendKeyEvent(false,Enum.KeyCode.Space,false,game)
+            VirtualInputManager:SendKeyEvent(true,Enum.KeyCode.Space,false,game)
+        end)
+    end
+
+    burstPulse()
+
+    task.spawn(function()
+        while enabled and token==jumpBurstToken and os.clock()<deadline do
+            RunService.Heartbeat:Wait()
+            if not enabled or token~=jumpBurstToken or os.clock()>=deadline then break end
+            burstPulse()
+        end
+
+        if token==jumpBurstToken then
+            pcall(function()
+                VirtualInputManager:SendKeyEvent(false,Enum.KeyCode.Space,false,game)
+            end)
+        end
+    end)
+end
+
+local function containsPoint(guiObject,position)
+    if not guiObject or not guiObject.Parent then return false end
+    local p=guiObject.AbsolutePosition
+    local s=guiObject.AbsoluteSize
+    return position.X>=p.X and position.X<=p.X+s.X
+        and position.Y>=p.Y and position.Y<=p.Y+s.Y
+end
+
+-- Use the actual rendered button rectangles. GetGuiObjectsAtPosition can return
+-- a nested visual image (or no hit target) after the native-look overlay is applied.
+local function controlAtPosition(position)
+    if containsPoint(joystick,position) then return joystick end
+    if containsPoint(jumpButton,position) then return jumpButton end
+    return nil
+end
+
+-- Capture touches at the global input layer instead of relying on a GuiObject's
+-- InputBegan event, which can be bypassed by nested native-look ImageLabels.
+connections[#connections+1]=UserInputService.InputBegan:Connect(function(input,gameProcessed)
+    if not enabled or input.UserInputType~=Enum.UserInputType.Touch then return end
+    local p=Vector2.new(input.Position.X,input.Position.Y)
+    local control=controlAtPosition(p)
+
+    if control==joystick then
+        if movementTouch~=nil then return end
+        movementTouch=input
+        movementCenter=joystick.AbsolutePosition+joystick.AbsoluteSize/2
+        movementRadius=math.max(46,math.min(joystick.AbsoluteSize.X,joystick.AbsoluteSize.Y)*0.42)
+        movementCaptures+=1
+        updateMovement(input.Position)
+        refreshKeys(os.clock())
+    elseif control==jumpButton then
+        requestJump()
+    end
+end)
+
+connections[#connections+1]=UserInputService.InputChanged:Connect(function(input)
+    if enabled and input==movementTouch then
+        -- Once the joystick owns a finger, keep tracking it anywhere on screen.
+        -- Do not impose a left/right screen boundary; only the joystick and jump
+        -- button capture new touches, so all other screen touches remain available
+        -- to the game's camera and controls.
+        updateMovement(input.Position)
+        -- Process each joystick movement event immediately instead of waiting for the next render frame.
+        refreshKeys(os.clock())
+    end
+end)
+
+connections[#connections+1]=UserInputService.InputEnded:Connect(function(input)
+    if input==movementTouch then
+        -- Flush the last position before releasing, so a quick finger movement isn't lost between frames.
+        updateMovement(input.Position)
+        refreshKeys(os.clock())
+        releaseMovement()
+    end
+end)
+
+
+RunService:BindToRenderStep(BIND_NAME,Enum.RenderPriority.Input.Value+8,function(dt)
+    local now=os.clock()
+    -- Visual-only spring smoothing. Movement/WASD sees raw finger input instantly.
+    if movementTouch~=nil and knobAnimationInitialized then
+        local step=math.clamp(dt or 1/60,0,0.05)
+        local response=0.040
+        local alpha=1-math.exp(-step/response)
+        knobVisualOffset=knobVisualOffset:Lerp(knobTargetOffset,alpha)
+        if (knobVisualOffset-knobTargetOffset).Magnitude<0.06 then
+            knobVisualOffset=knobTargetOffset
+        end
+        knob.Position=UDim2.fromOffset(
+            joystick.AbsoluteSize.X/2+knobVisualOffset.X,
+            joystick.AbsoluteSize.Y/2+knobVisualOffset.Y
+        )
+    end
+    refreshKeys(now)
+    if pendingJumpDeadline then
+        if now>pendingJumpDeadline then
+            pendingJumpDeadline=nil
+        elseif now-lastJumpPulse>=JUMP_MIN_INTERVAL then
+            pulseJump()
+        end
+    end
+end)
+
+getgenv().PCKeyboardTouchBridgeV52={
+    Version="7.1-v3-original-keys-smooth-mobile-knob",
+    GetState=function()
+        return {
+            chord=latestChord,
+            -- Additive readouts only: do not affect the original chord decisions.
+            analogX=latestX,
+            analogZ=latestZ,
+            sweepActive=sweepPlan~=nil,
+            movementTouchActive=movementTouch~=nil,
+            -- Expose the exact captured InputObject so the camera gate can
+            -- ignore this finger until release without changing joystick logic.
+            movementTouch=movementTouch,
+            movementCaptures=movementCaptures,
+            movementUpdates=movementUpdates,
+            keyEvents=keyEvents,
+            jumpRequests=jumpRequests,
+            jumpPulses=jumpPulses,
+            bufferedJumpCount=bufferedJumpCount,
+            directPlayerMove=false,
+            visibleJoystick=true,
+            movementHalf=MOVEMENT_HALF,
+        }
+    end,
+}
+
+getgenv().__PCKeyboardTouchBridgeV52Cleanup=function()
+    enabled=false
+    releaseMovement()
+    pendingJumpDeadline=nil
+    jumpBurstToken+=1
+    pendingSpaceReleaseToken+=1
+    pcall(function() RunService:UnbindFromRenderStep(BIND_NAME) end)
+    pcall(function() VirtualInputManager:SendKeyEvent(false,Enum.KeyCode.Space,false,game) end)
+    for _,c in ipairs(connections) do pcall(function() c:Disconnect() end) end
+    table.clear(connections)
+    pcall(function() gui:Destroy() end)
+    getgenv().PCKeyboardTouchBridgeV52=nil
+    getgenv().__PCKeyboardTouchBridgeV52Cleanup=nil
+end

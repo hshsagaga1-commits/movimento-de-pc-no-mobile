@@ -26,14 +26,14 @@ local CONTACT_GRACE_SECONDS=0.105
 local WALL_NORMAL_Y_MAX=0.54
 
 -- Contact behavior: inward adhesion along walls, NEVER against outward input.
-local MAGNET_INWARD_SPEED=1.10
+local MAGNET_INWARD_SPEED=1.45
 local WALK_SEED_FACTOR=0.92
 local MICRO_HOP_ENABLED=true -- preserve original small contact-hop mechanic
 local MICRO_HOP_SPEED=4.25
 local MICRO_HOP_COOLDOWN=0.14
 
 local FENCE_TOKENS={
-    "fence","grid","grate","railing","rail","gate","mesh","cage",
+    "fence","grid","grate","railing","rail","gate","cage",
     "cerca","grade","chainlink","chain_link","barricade","netting",
     "wirefence","fencing"
 }
@@ -177,7 +177,7 @@ end
 
 local function visualFacingIntent(desired,chord,analogX,analogZ,sweepActive)
     if sweepActive then return desired end -- original A/D sweep stays exact
-    if chord~="W+A" and chord~="W+D" and chord~="S+A" and chord~="S+D" then
+    if chord~="W+A" and chord~="W+D" and chord~="A+S" and chord~="S+D" then
         return desired -- pure A/D/W/S stay pure
     end
     local cam=Workspace.CurrentCamera
@@ -311,26 +311,16 @@ local function getContact(now)
 end
 
 local function smoothFacing(desired,dt)
-    if desired.Magnitude<0.5 then
-        lastFacing=Vector3.zero
-        return
-    end
-    if not root or root.Anchored then return end
+    if desired.Magnitude<0.5 or not root or root.Anchored then return end
     local target=desired.Unit
-    local response=0.082
-    if lastFacing.Magnitude<0.5 then
-        lastFacing=target
-    else
-        local alpha=1-math.exp(-dt/response)
-        local a=CFrame.lookAt(Vector3.zero,lastFacing)
-        local b=CFrame.lookAt(Vector3.zero,target)
-        lastFacing=flatUnit(a:Lerp(b,alpha).LookVector)
-    end
-    if lastFacing.Magnitude<0.5 then return end
-    local frame=CFrame.lookAt(root.Position,root.Position+lastFacing)
+    -- Smooth only facing. Do not filter the physics input or the old A/D keys.
+    -- In a complete about-face, the avatar turns faster instead of feeling heavy.
+    local forward=flatUnit(root.CFrame.LookVector)
+    local dot=forward.Magnitude>0 and forward:Dot(target) or 1
+    local response=dot<-0.55 and 0.050 or 0.067
     local alpha=1-math.exp(-dt/response)
+    local frame=CFrame.lookAt(root.Position,root.Position+target)
     pcall(function()
-        -- Position is unchanged; this affects facing, not velocity or keys.
         root.CFrame=root.CFrame:Lerp(frame,alpha)
     end)
 end
@@ -371,7 +361,8 @@ local function applyAssist(contact,desired,changed,dt,now)
     -- A small inward hold to keep contact with the rail while sliding.
     -- This is NEVER applied when the player deliberately moves outward.
     local heldScale=contact.held and 0.30 or 1
-    local targetNormalSpeed=-MAGNET_INWARD_SPEED*heldScale
+    local dynamicHold=math.min(2.8,MAGNET_INWARD_SPEED+horizontal.Magnitude*0.025)
+    local targetNormalSpeed=-dynamicHold*heldScale
     local normalAlpha=1-math.exp(-dt/0.055)
     local correctedNormal=currentNormalSpeed
     if correctedNormal>targetNormalSpeed then

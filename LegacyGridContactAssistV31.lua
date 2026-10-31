@@ -407,7 +407,7 @@ local function applyAssist(contact,desired,changed,dt,now)
     local targetNormalSpeed=-dynamicHold*heldScale
     local normalAlpha=1-math.exp(-dt/MAGNET_RESPONSE)
     local correctedNormal=currentNormalSpeed
-    if correctedNormal>targetNormalSpeed then
+    if now>=nextMagnetAt and correctedNormal>targetNormalSpeed then
         correctedNormal+=(targetNormalSpeed-correctedNormal)*normalAlpha
     end
     local corrected=correctedTangent+normal*correctedNormal
@@ -485,16 +485,16 @@ local function considerContactHop(contact,desired,now)
 
     -- Detach just slightly, stay in air briefly, then let the magnet reconnect.
     -- The outward nudge is small enough to avoid flinging the player.
-    local outwardDelta=math.max(0,HOP_OUTWARD_SPEED-inwardVelocity)
-    outwardDelta=math.min(outwardDelta,4.3)
-    local nextHorizontal=horizontal+normal*outwardDelta
-    pcall(function()
+    local nextHorizontal=horizontal-normal*inwardVelocity
+        +normal*HOP_OUTWARD_SPEED
+    local impulseApplied=pcall(function()
         root.AssemblyLinearVelocity=Vector3.new(
             nextHorizontal.X,
             math.max(velocity.Y,targetY),
             nextHorizontal.Z
         )
     end)
+    if not impulseApplied then return end
     lastContactHopAt=now
     lastMicroHopAt=now
     nextMagnetAt=now+HOP_RELEASE_SECONDS

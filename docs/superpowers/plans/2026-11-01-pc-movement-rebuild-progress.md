@@ -15,3 +15,7 @@
 - Remaining: final reviewed-fix commit publication and remote head/file verification. No merge into an older branch is requested.
 - Final fix verification at ab8dc7f: the same reviewer confirmed all six findings and native key replay resolved, with no concrete blocker. Independently reran Lua/Luau suite and compilation. Live device limits retained.
 - Publication ruling: ordinary Git push has no write credential in this checkout. Use the authorized connected GitHub Git-data API to publish the reviewed source tree in the new branch; never update the reference branch.
+- Task 3: complete — published feature/pc-movement-rebuild-20261101 through GitHub; source commit 579cdaec8719651534ce243451869b084c481563. Remote source tree c608050be7fe83c73edebc056e85db0e3eb3e7b5 equals local git write-tree.
+- Remote delivery verified: standalone blob cbf680fd78a19ef55ae877711d9a2c250fe111cb (62072 bytes); loader blob 23519fdf7800e92433fc1867b43ecbf8a1f5157d. Loader content fetched from new branch and matches local.
+- Reference branch remains ce4eb8b6deb47e0690301bd38f1b78eb0e19dcaa. No merge or overwrite of earlier versions.
+- Completion boundary: implementation, offline Lua/Luau tests, review and publication complete. Live Evade/Delta physics, game state signals, exact micro-hop and iPhone performance remain pending on-device testing.

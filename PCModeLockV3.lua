@@ -4,7 +4,7 @@ local HttpService=game:GetService("HttpService")
 local Players=game:GetService("Players")
 local playerGui=Players.LocalPlayer:WaitForChild("PlayerGui")
 local STABLE="https://raw.githubusercontent.com/hshsagaga1-commits/movimento-de-pc-no-mobile/classic-wasd-experiment/"
-local FEATURE="https://raw.githubusercontent.com/hshsagaga1-commits/movimento-de-pc-no-mobile/feature/pc-movement-assist-v3-20261031/"
+local FEATURE="https://raw.githubusercontent.com/hshsagaga1-commits/movimento-de-pc-no-mobile/feature/pc-movement-v31-ui-fixes-20261102/"
 
 local oldCleanup=getgenv().__PCModeLockCleanup
 if type(oldCleanup)=="function" then pcall(oldCleanup) end

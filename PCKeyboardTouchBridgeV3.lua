@@ -430,7 +430,7 @@ local function setKnobFromPosition(position)
     if typeof(position)=="Vector3" then position=Vector2.new(position.X,position.Y) end
     if typeof(position)~="Vector2" or not movementCenter then return end
     local delta=position-movementCenter
-    local maxVisual=math.max(1,movementRadius*0.62)
+    local maxVisual=math.max(1,math.min(joystick.AbsoluteSize.X,joystick.AbsoluteSize.Y)/2)
     local visual=delta
     if visual.Magnitude>maxVisual then visual=visual.Unit*maxVisual end
     knobTargetOffset=visual

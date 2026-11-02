@@ -1,9 +1,9 @@
--- V3.1 original PC bootstrap/UI/keys; only the separate grid Assist is tuned.
+-- V3.1 preserved PC input; isolated cursor/knob visuals and the same light grid Assist.
 -- Roll back Assist alone: getgenv().PCMovementAssistV31Preserved.SetAssistMode("original")
 local HttpService=game:GetService("HttpService")
 local Players=game:GetService("Players")
 local ORIGINAL="https://raw.githubusercontent.com/hshsagaga1-commits/movimento-de-pc-no-mobile/ce4eb8b6deb47e0690301bd38f1b78eb0e19dcaa/"
-local TUNED="https://raw.githubusercontent.com/hshsagaga1-commits/movimento-de-pc-no-mobile/feature/pc-movement-v31-preserved-20261101/"
+local TUNED="https://raw.githubusercontent.com/hshsagaga1-commits/movimento-de-pc-no-mobile/feature/pc-movement-v31-ui-fixes-20261102/"
 local env=getgenv()
 local EVADE_GAME_ID=3647333358
 local OVERLAY_NAME="PCKeyboardTouchBridgeV52Overlay"
@@ -26,7 +26,7 @@ env.__PCMovementV31PreservedToken=token
 local active=true
 local mode="starting"
 local busy=false
-local ownedPC,ownedGrid,ownedGridApi
+local ownedPC,ownedGrid,ownedGridApi,ownedCursor
 local api={Version="3.1-preserved-pc-light-contact"}
 
 local function ownsGeneration()
@@ -48,7 +48,8 @@ local function runModule(root,file)
     if not ownsGeneration() then error("V3.1 preserved load cancelled") end
     local lease={owner=token}
     env.__PCMovementV31PreservedInstall=lease
-    local slot=file=="PCModeLockV3.lua" and "__PCModeLockCleanup" or "__LegacyGridContactAssistV1Cleanup"
+    local slot=file=="PCModeLockV3.lua" and "__PCModeLockCleanup"
+        or (file=="PCCursorVisualV31.lua" and "__PCCursorVisualV31Cleanup" or "__LegacyGridContactAssistV1Cleanup")
     local before=env[slot]
     local beforeApi=env.LegacyGridContactAssistV1
     local ok,value=pcall(chunk)
@@ -97,7 +98,14 @@ function api.GetState()
     end
     return {version="3.1",build=api.Version,assistMode=mode,originalPCBootstrap=true,
         bridge=read("PCKeyboardTouchBridgeV52"),assist=read("LegacyGridContactAssistV1"),
-        pcLock=read("PCModeLock"),keyboardWake=read("PCKeyboardControllerWakeV5")}
+        pcLock=read("PCModeLock"),keyboardWake=read("PCKeyboardControllerWakeV5"),
+        cursor=read("PCCursorVisualV31")}
+end
+function api.SetCursorHidden(value)
+    if not ownsGeneration() then return false,"stopped" end
+    local cursor=env.PCCursorVisualV31
+    if type(cursor)=="table" and type(cursor.SetEnabled)=="function" then return cursor.SetEnabled(value) end
+    return false,"cursor visual layer unavailable"
 end
 function api.SetDiagnostics(value)
     local assist=env.LegacyGridContactAssistV1
@@ -113,6 +121,7 @@ function api.Stop()
     if not active then return end
     active=false
     if env.__PCMovementV31PreservedToken==token then env.__PCMovementV31PreservedToken=nil end
+    if type(ownedCursor)=="function" and env.__PCCursorVisualV31Cleanup==ownedCursor then pcall(ownedCursor) end
     if type(ownedGrid)=="function" and env.__LegacyGridContactAssistV1Cleanup==ownedGrid then pcall(ownedGrid) end
     if env.LegacyGridContactAssistV1==ownedGridApi then env.LegacyGridContactAssistV1=nil end
     if type(ownedPC)=="function" and env.__PCModeLockCleanup==ownedPC then pcall(ownedPC) end
@@ -121,8 +130,11 @@ function api.Stop()
 end
 
 local ok,message=pcall(function()
-    runModule(ORIGINAL,"PCModeLockV3.lua") -- unchanged nested PC/visual/jump/camera chain
+    runModule(TUNED,"PCModeLockV3.lua") -- same PC chain; branch routes only the visual bridge formula
     ownedPC=env.__PCModeLockCleanup
+    local cursorOk,cursorMessage=pcall(runModule,TUNED,"PCCursorVisualV31.lua")
+    if cursorOk then ownedCursor=env.__PCCursorVisualV31Cleanup
+    else warn("[V3.1 preserved] Cursor appearance unavailable; PC controls kept: "..tostring(cursorMessage)) end
     local loaded=api.SetAssistMode("light")
     if not loaded and mode~="original" then error("neither Assist variant could load") end
 end)
@@ -152,7 +164,7 @@ task.spawn(function()
                     repairing=true
                     lastRepairAt=os.clock()
                     local repaired,reason=pcall(function()
-                        runModule(ORIGINAL,"PCModeLockV3.lua")
+                        runModule(TUNED,"PCModeLockV3.lua")
                         ownedPC=env.__PCModeLockCleanup
                     end)
                     if not repaired then warn("[V3.1 preserved] Original overlay repair: "..tostring(reason)) end

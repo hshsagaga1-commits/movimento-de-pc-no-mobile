@@ -12,7 +12,7 @@ print('PASS: every existing V3.1 file byte-identical',flush=True)
 header='local factories={}\n'
 for path in ['tests/v31-preserved/RobloxFixture.lua','tests/v31-preserved/Environment.lua',
              'PCKeyboardTouchBridgeV3.lua','PCMovementV31MacroConflictProbe.lua',
-             'PCMovementV31MacroProbe_AUTOEXECUTE.lua']:
+             'PCMovementV31MacroProbe_AUTOEXECUTE.lua','PCMovementV31MacroProbeMobileUI.lua']:
  if Path(path).exists(): header+=f'factories[{json.dumps(path)}]=function()\n{Path(path).read_text()}\nend\n'
 header+='local function dofile(path) assert(factories[path], "missing script: "..path);return factories[path]() end\n'
 luau=os.environ.get('LUAU_BIN') or shutil.which('luau')
@@ -24,6 +24,6 @@ with tempfile.TemporaryDirectory(prefix='v31-macro-probe-tests-') as folder:
   subprocess.run([luau,str(p)],check=True)
 compiler=os.environ.get('LUAU_COMPILE') or shutil.which('luau-compile')
 if compiler:
- sources=['PCMovementV31MacroConflictProbe.lua','PCMovementV31MacroProbe_AUTOEXECUTE.lua']
+ sources=['PCMovementV31MacroConflictProbe.lua','PCMovementV31MacroProbe_AUTOEXECUTE.lua','PCMovementV31MacroProbeMobileUI.lua']
  subprocess.run([compiler,'--null',*[path for path in sources if Path(path).exists()]],check=True)
 print('PASS: optional trace offline, without replacing the input stack',flush=True)

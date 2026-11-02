@@ -132,6 +132,10 @@ local cleanup
 cleanup=function()
     if not active then return end
     active=false
+    if env.__PCMovementV31MacroProbeMobileUIOwner==api
+        and type(env.__PCMovementV31MacroProbeMobileUICleanup)=="function" then
+        pcall(env.__PCMovementV31MacroProbeMobileUICleanup)
+    end
     for _,connection in ipairs(connections) do pcall(function() connection:Disconnect() end) end
     table.clear(connections)
     if env.PCMovementV31MacroProbe==api then env.PCMovementV31MacroProbe=nil end

@@ -21,7 +21,7 @@ label.TextSize=12
 label.Text="DIAGNÓSTICO: CARREGANDO..."
 label.Active=false
 label.Parent=loading
-local root="https://raw.githubusercontent.com/hshsagaga1-commits/movimento-de-pc-no-mobile/feature/pc-movement-v31-macro-probe-mobile-20261102/"
+local root="https://raw.githubusercontent.com/hshsagaga1-commits/movimento-de-pc-no-mobile/feature/pc-movement-v31-macro-probe-export-ios-20261102/"
 local function fetch(name)
     local source=game:HttpGet(root..name.."?_cb="..HttpService:GenerateGUID(false),true)
     if env.__PCMovementV31MacroMobileLoadToken~=token then error("load superseded") end

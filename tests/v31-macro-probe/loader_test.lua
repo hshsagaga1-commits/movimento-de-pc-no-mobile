@@ -11,12 +11,14 @@ Instance.new=function(kind)
  return obj
 end
 Enum.UserInputType.MouseButton1={Name='MouseButton1'}
+Enum.TextXAlignment={Left={Name='Left'}}
+Enum.TextYAlignment={Top={Name='Top'}}
 local fetched={}
 e.game.HttpGet=function(_,url)
  fetched[#fetched+1]=url
  assert(e.pg:FindFirstChild('PCMovementV31ProbeLoading'),'loading indicator missing during download')
- assert(url:find('feature/pc-movement-v31-macro-probe-mobile-20261102/PCMovementV31MacroConflictProbe.lua?_cb=',1,true)
-  or url:find('feature/pc-movement-v31-macro-probe-mobile-20261102/PCMovementV31MacroProbeMobileUI.lua?_cb=',1,true),
+ assert(url:find('feature/pc-movement-v31-macro-probe-export-ios-20261102/PCMovementV31MacroConflictProbe.lua?_cb=',1,true)
+  or url:find('feature/pc-movement-v31-macro-probe-export-ios-20261102/PCMovementV31MacroProbeMobileUI.lua?_cb=',1,true),
      'loader fetched a movement module or an unexpected branch')
  return url:find('ProbeMobileUI.lua',1,true) and 'ui-source' or 'probe-source'
 end

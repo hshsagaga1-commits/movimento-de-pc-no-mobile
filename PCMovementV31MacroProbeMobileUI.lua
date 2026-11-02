@@ -17,7 +17,7 @@ gui.DisplayOrder=10021
 gui.Parent=pg
 local panel=Instance.new("Frame")
 panel.Name="Panel"
-panel.Size=UDim2.fromOffset(164,158)
+panel.Size=UDim2.fromOffset(164,280)
 panel.Position=UDim2.new(1,-310,0,68)
 panel.BackgroundColor3=Color3.fromRGB(21,30,43)
 panel.BorderSizePixel=0
@@ -53,9 +53,99 @@ status.Text="INICIANDO..."
 status.Parent=panel
 local mark=button("MarkBug","MARCAR BUG",54,Color3.fromRGB(178,112,30))
 local copy=button("CopyLog","COPIAR LOG",86,Color3.fromRGB(35,117,138))
-local stop=button("EndProbe","ENCERRAR",118,Color3.fromRGB(148,55,69))
-local save=button("SaveLog","SALVAR ARQUIVO",150,Color3.fromRGB(71,95,138))
-save.Visible=false
+local save=button("SaveLog","SALVAR LOG",118,Color3.fromRGB(71,95,138))
+local show=button("ShowLog","VER LOG",150,Color3.fromRGB(63,104,123))
+local stop=button("EndProbe","ENCERRAR",182,Color3.fromRGB(148,55,69))
+local pathLabel=Instance.new("TextLabel")
+pathLabel.Name="SavedPath"
+pathLabel.Position=UDim2.fromOffset(8,214)
+pathLabel.Size=UDim2.fromOffset(148,59)
+pathLabel.BackgroundTransparency=1
+pathLabel.TextColor3=Color3.fromRGB(190,208,224)
+pathLabel.Font=Enum.Font.GothamBold
+pathLabel.TextSize=10
+pathLabel.TextWrapped=true
+pathLabel.Text="Destino: ainda não salvo"
+pathLabel.Parent=panel
+
+local viewer=Instance.new("Frame")
+viewer.Name="ReportViewer"
+viewer.BackgroundColor3=Color3.fromRGB(21,30,43)
+viewer.BorderSizePixel=0
+viewer.Visible=false
+viewer.ZIndex=30
+viewer.Parent=gui
+Instance.new("UICorner",viewer).CornerRadius=UDim.new(0,9)
+local reportText=Instance.new("TextBox")
+reportText.Name="ReportText"
+reportText.Position=UDim2.fromOffset(8,8)
+reportText.Size=UDim2.new(1,-16,1,-54)
+reportText.BackgroundColor3=Color3.fromRGB(35,46,61)
+reportText.TextColor3=Color3.new(1,1,1)
+reportText.Font=Enum.Font.GothamBold
+reportText.TextSize=11
+reportText.TextXAlignment=Enum.TextXAlignment.Left
+reportText.TextYAlignment=Enum.TextYAlignment.Top
+reportText.TextEditable=true
+reportText.ClearTextOnFocus=false
+reportText.MultiLine=true
+reportText.TextWrapped=false
+reportText.Text=""
+reportText.ZIndex=31
+reportText.Parent=viewer
+local function viewerButton(name,title,x,width)
+    local b=Instance.new("TextButton")
+    b.Name=name;b.Text=title
+    b.Size=UDim2.fromOffset(width,30)
+    b.Position=UDim2.new(0,x,1,-38)
+    b.BackgroundColor3=Color3.fromRGB(51,70,92)
+    b.TextColor3=Color3.new(1,1,1)
+    b.Font=Enum.Font.GothamBold
+    b.TextSize=11
+    b.ZIndex=31
+    b.Parent=viewer
+    return b
+end
+local previousPage=viewerButton("PrevPage","<",8,30)
+local nextPage=viewerButton("NextPage",">",44,30)
+local closeViewer=viewerButton("CloseViewer","FECHAR",80,62)
+local pageLabel=Instance.new("TextLabel")
+pageLabel.Name="PageLabel"
+pageLabel.Size=UDim2.fromOffset(55,30)
+pageLabel.Position=UDim2.new(1,-63,1,-38)
+pageLabel.BackgroundTransparency=1
+pageLabel.TextColor3=Color3.new(1,1,1)
+pageLabel.TextSize=12
+pageLabel.ZIndex=31
+pageLabel.Parent=viewer
+local pages,pageIndex={},1
+local function showPage()
+    reportText.Text=pages[pageIndex] or ""
+    pageLabel.Text=tostring(pageIndex).."/"..tostring(#pages)
+end
+local function splitReport(report)
+    local parts={}
+    local pos=1
+    while pos<=#report do
+        local last=math.min(#report,pos+11999)
+        if last<#report then
+            local lineEnd=report:sub(pos,last):match(".*()\n")
+            if lineEnd and lineEnd>1 then last=pos+lineEnd-1 end
+        end
+        parts[#parts+1]=report:sub(pos,last)
+        pos=last+1
+    end
+    if #parts==0 then parts[1]="" end
+    return parts
+end
+local function positionViewer()
+    local cam=workspace.CurrentCamera
+    local viewport=cam and cam.ViewportSize or Vector2.new(896,414)
+    local width=math.min(420,math.max(200,viewport.X*.5))
+    local height=math.min(255,math.max(150,viewport.Y-90))
+    viewer.Size=UDim2.fromOffset(width,height)
+    viewer.Position=UDim2.new(.5,-width/2,0,18)
+end
 local active=true
 local dragging,dragStart,panelStart=nil,nil,nil
 local function keepVisible(height)
@@ -106,9 +196,11 @@ local ok,message=pcall(function()
         if cam then
             cameraConnection=connect(cam:GetPropertyChangedSignal("ViewportSize"),function()
                 keepVisible(panel.AbsoluteSize.Y)
+                positionViewer()
             end)
         end
         keepVisible(panel.AbsoluteSize.Y)
+        positionViewer()
     end
     connect(workspace:GetPropertyChangedSignal("CurrentCamera"),watchCamera)
     watchCamera()
@@ -133,24 +225,42 @@ local ok,message=pcall(function()
         if probe.Mark("emote involuntario") then status.Text="BUG MARCADO • registrando" end
     end)
     connect(copy.Activated,function()
-        local copied=probe.CopyReport()
-        if copied then
-            status.Text="COPIADO!"
-            save.Visible=false
-            panel.Size=UDim2.fromOffset(164,158)
-            keepVisible(panel.AbsoluteSize.Y)
-        else
-            local canSave=type(writefile)=="function"
-            status.Text=canSave and "ERRO AO COPIAR • SALVE" or "ERRO AO COPIAR"
-            save.Visible=canSave
-            panel.Size=UDim2.fromOffset(164,canSave and 184 or 158)
-            keepVisible(panel.AbsoluteSize.Y)
-        end
+        local requested=probe.CopyReport()
+        status.Text=requested and "CÓPIA SOLICITADA" or "ERRO AO COPIAR"
     end)
     connect(save.Activated,function()
-        if type(writefile)~="function" then status.Text="ARQUIVO INDISPONÍVEL";return end
-        local saved=pcall(writefile,"PCMovementV31MacroProbeLog.txt",probe.GetReport())
-        status.Text=saved and "SALVO: LOG.TXT" or "ERRO AO SALVAR"
+        local filename="PCMovementV31MacroProbeLog.txt"
+        if type(writefile)~="function" then
+            status.Text="WRITEFILE INDISPONÍVEL"
+            pathLabel.Text="Sem arquivo. Use VER LOG."
+            return
+        end
+        local report=probe.GetReport()
+        local saved=pcall(writefile,filename,report)
+        if not saved then status.Text="ERRO AO SALVAR";return end
+        pathLabel.Text="Nome: "..filename.."\nCaminho relativo: "..filename
+        if type(readfile)=="function" then
+            local ok,content=pcall(readfile,filename)
+            status.Text=ok and content==report and "ARQUIVO VERIFICADO" or "ERRO: NÃO CONFIRMADO"
+        else
+            status.Text="SALVAMENTO SOLICITADO"
+        end
+    end)
+    connect(show.Activated,function()
+        pages=splitReport(probe.GetReport())
+        pageIndex=1
+        showPage()
+        positionViewer()
+        viewer.Visible=true
+    end)
+    connect(previousPage.Activated,function()
+        if pageIndex>1 then pageIndex-=1;showPage() end
+    end)
+    connect(nextPage.Activated,function()
+        if pageIndex<#pages then pageIndex+=1;showPage() end
+    end)
+    connect(closeViewer.Activated,function()
+        viewer.Visible=false
     end)
     connect(stop.Activated,function()
         probe.Stop()

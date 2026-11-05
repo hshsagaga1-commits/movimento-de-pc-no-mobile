@@ -35,8 +35,11 @@ local function chord(expected)
 end
 move(-45,0,true)
 chord("W+A")
+local swapStart=#e.events
 move(45,0)
 chord("W+D")
+assert(#e.events==swapStart+2 and e.events[swapStart+1].key=="D" and e.events[swapStart+1].down
+    and e.events[swapStart+2].key=="A" and not e.events[swapStart+2].down,"standing side swap lost press-before-release")
 move(1,-45)
 chord("W")
 move(0,45)
@@ -91,6 +94,14 @@ e.uis.InputChanged:fire(camera)
 e.uis.InputEnded:fire(camera)
 assert(bridge.OwnsTouch(touch) and not bridge.OwnsTouch(camera))
 chord("W+A")
+local nativeEvents=0
+local listener=e.uis.InputBegan:Connect(function(input)
+    if input.UserInputType==Enum.UserInputType.Keyboard then nativeEvents+=1 end
+end)
+local beforeKeyboard=#e.events
+e.uis.InputBegan:fire({UserInputType=Enum.UserInputType.Keyboard,KeyCode={Name="E"}},false)
+assert(nativeEvents==1 and #e.events==beforeKeyboard and bridge.GetState().chord=="W+A")
+listener:Disconnect()
 
 local jumpTouch={UserInputType=Enum.UserInputType.Touch,Position=jump.AbsolutePosition+jump.AbsoluteSize/2}
 local function tap()

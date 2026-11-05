@@ -32,6 +32,7 @@ return function(F,E)
     mt.__newindex=function(node,key,value)
         local old=node.Parent
         if key=="Parent" and old~=value then
+            if e.deferredRemoval then baseParent(node,key,value) end
             if old then
                 old.ChildRemoved:fire(node)
                 local ancestor=old
@@ -40,7 +41,7 @@ return function(F,E)
                     ancestor=ancestor.Parent
                 end
             end
-            baseParent(node,key,value)
+            if not e.deferredRemoval then baseParent(node,key,value) end
             if value then
                 value.ChildAdded:fire(node)
                 local ancestor=value

@@ -31,6 +31,7 @@ return function(onChange)
     local session,charSignals,humSignals,animSignals,hudSignals={},{},{},{},{}
     local charFlags,humFlags,tracks={},{},{}
     local character,humanoid,animator,stand
+    local keybind,legacyHeld,keybindConnection
     local crouchTracks,emoteTracks=0,0
     local lastSource
     local active=true
@@ -62,6 +63,7 @@ return function(onChange)
             elseif emoting then source="emote:flag"
             elseif crouched==nil and stand and stand.Visible then source="crouch:hud"
             elseif crouched==nil and crouchTracks>0 then source="crouch:animation"
+            elseif crouched==nil and legacyHeld==true then source="crouch:keybind"
             elseif emoting==nil and emoteTracks>0 then source="emote:animation"
             elseif crouched==false or emoting==false then source="standing:flag"
             elseif stand then source="standing:hud"
@@ -163,6 +165,7 @@ return function(onChange)
         disconnect(charSignals)
         detachFlags(charFlags)
         character=value
+        legacyHeld=nil
         bindHumanoid(value and value:FindFirstChildOfClass("Humanoid"))
         bindFlags(value,charSignals,charFlags,function(child,removing)
             if child:IsA("Humanoid") then
@@ -195,7 +198,38 @@ return function(onChange)
         publish()
     end
 
+    local function refreshKeybind(excluded)
+        local scripts=player:FindFirstChild("PlayerScripts")
+        local events=scripts and scripts:FindFirstChild("Events")
+        local value=events and events:FindFirstChild("KeybindUsed")
+        if value and (excluded==scripts or excluded==events or excluded==value or not value:IsA("BindableEvent")) then
+            value=nil
+        end
+        if keybind==value then return end
+        if keybindConnection then keybindConnection:Disconnect() keybindConnection=nil end
+        keybind,legacyHeld=value,nil
+        if keybind then
+            keybindConnection=keybind.Event:Connect(function(action,held)
+                if active and character and action=="Crouch" and type(held)=="boolean" then
+                    legacyHeld=held
+                    publish()
+                end
+            end)
+        end
+        publish()
+    end
+
     if game.GameId==EVADE_GAME_ID then
+        local function isKeybindNode(node)
+            return node.Name=="PlayerScripts" or node.Name=="Events" or node.Name=="KeybindUsed"
+        end
+        session[#session+1]=player.DescendantAdded:Connect(function(node)
+            if isKeybindNode(node) then refreshKeybind() end
+        end)
+        session[#session+1]=player.DescendantRemoving:Connect(function(node)
+            if isKeybindNode(node) then refreshKeybind(node) end
+        end)
+        refreshKeybind()
         local function isHudNode(node)
             return node.Name=="ControlsGui" or node.Name=="PCFrame" or node.Name=="Stand"
         end
@@ -218,7 +252,8 @@ return function(onChange)
         active=false
         disconnect(session)
         disconnect(hudSignals)
-        stand=nil
+        if keybindConnection then keybindConnection:Disconnect() keybindConnection=nil end
+        keybind,stand=nil,nil
         bindCharacter(nil)
     end
 end

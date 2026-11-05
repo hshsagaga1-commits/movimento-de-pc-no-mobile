@@ -31,6 +31,10 @@ def take(source, first, last):
 def lock_source():
     source = snapshot(CLASSIC, "PCModeLockV5.lua")
     source = replace(source, 'local Players =', 'local shouldContinue = ...\nlocal Players =')
+    source = replace(source, "local switchOwnerPrevious", "local switchOwnerPrevious, switchOwnerReplacement")
+    source = replace(source, '    rawset(switchOwner, target.name, replacement)', '    rawset(switchOwner, target.name, replacement)\n    switchOwnerReplacement = replacement')
+    source = replace(source, '            and type(switchOwnerPrevious) == "function" then',
+                     '            and type(switchOwnerPrevious) == "function" and rawget(switchOwner, "SwitchToController") == switchOwnerReplacement then')
     source = replace(source, "local touchController", "local initialModule")
     source = replace(source, '    touchController = rawget(controls, "activeController")', """    initialModule = touchModule
     if type(controls.SelectTouchModule) == "function" then
@@ -41,7 +45,20 @@ def lock_source():
     source = replace(source, '    if keyboardModule then\n        return true, "upvalue-map"', """    if keyboardModule then
         if touchModule == keyboardModule then touchModule = nil end
         return true, "upvalue-map" """.rstrip())
-    source = replace(source, "    for _ = 1, 10 do\n        task.wait(0.025)", "    for _ = 1, 10 do\n        if not shouldContinue() then return false end\n        task.wait(0.025)")
+    source = replace(source, "local function seedKeyboardInput()", """local function seedCancelled()
+    if shouldContinue() then return false end
+    local selected = rawget(controls, "activeControlModule")
+    if type(selected) == "table" and selected ~= initialModule and selected ~= touchModule then
+        keyboardModule = selected -- cleanup can restore the controller selected before the seed
+    end
+    return true
+end
+
+local function seedKeyboardInput()""")
+    source = replace(source, "    for _ = 1, 10 do\n        task.wait(0.025)", """    if seedCancelled() then return false end
+    for _ = 1, 10 do
+        task.wait(0.025)
+        if seedCancelled() then return false end""")
     source = replace(source, '    if seedKeyboardInput() then\n        return true, "synthetic-keyboard-selection"\n    end', '    if seedKeyboardInput() then\n        return true, "synthetic-keyboard-selection"\n    end\n    if not shouldContinue() then return false, "cancelled" end')
     source = replace(source, "    local keyboardOk, keyboardStatus = discoverKeyboardModule()", "    local keyboardOk, keyboardStatus = discoverKeyboardModule()\n    if not shouldContinue() then return end")
     source = replace(source, '    if statusGui then\n', """    if type(controls) == "table" and keyboardModule and initialModule ~= keyboardModule
@@ -58,13 +75,27 @@ def lock_source():
     source = replace(source, take(source, '    if type(baseCleanup) == "function" then', "    getgenv().PCModeLock = nil"), "")
     source = replace(source, "local facadeInstalled = false", "local facadeInstalled = false\nlocal facadeActive = true")
     source = replace(source, "if lockEnabled and self == UserInputService", "if lockEnabled and facadeActive and self == UserInputService", 2)
-    source = replace(source, 'local oldStatus =', 'facadeActive = false\nlocal oldStatus =')
+    old_restore = take(source, "    if facadeInstalled and type(hookmetamethod)", "    if type(controls)")
+    source = replace(source, old_restore, "    restoreInputFacade()\n\n")
+    source = replace(source, "local function getUpvalues(fn)", """local facadeRestored = false
+local function restoreInputFacade()
+    if not facadeInstalled or facadeRestored then return end
+    -- Restore at the bootstrap boundary. Stop must not overwrite a later hook.
+    facadeRestored = true
+    if previousNamecall then pcall(hookmetamethod, game, "__namecall", previousNamecall) end
+    if previousIndex then pcall(hookmetamethod, game, "__index", previousIndex) end
+end
+
+local function getUpvalues(fn)""")
+    source = replace(source, 'local oldStatus =', 'facadeActive = false\nrestoreInputFacade()\nlocal oldStatus =')
     source = replace(source, 'facadeInstalled and "ON" or "OFF"', 'facadeInstalled and "PASS" or "OFF"')
     source = replace(source, 'local statusGui = Instance.new', 'statusGui = Instance.new')
     source = replace(source, "local controlsOk,", "local statusGui\nlocal controlsOk,")
     cleanup = source[source.index("getgenv().__PCModeLockCleanup = function()"):]
     source = replace(source, cleanup, "")
     source = replace(source, "local statusGui\nlocal controlsOk,", "local statusGui\n"+cleanup+"\nlocal controlsOk,")
+    source = replace(source, "local controlsOk, controlsStatus = locateControls()",
+                     "local controlsOk, controlsStatus = locateControls()\nif not shouldContinue() then return end")
     source = replace(source, "    local controllerState", "    if not statusGui.Enabled then return end\n    local controllerState")
     source = replace(source, "    statusLabel.Text = string.format(", """    if controllerState == displayedController and blockedTouchSwitches == displayedSwitches then return end
     displayedController, displayedSwitches = controllerState, blockedTouchSwitches
@@ -102,6 +133,14 @@ local function ensureEnabled()""")
 
 def camera_source():
     source = snapshot(CLASSIC, "CameraTouchRightHalfGateV5.lua")
+    source = replace(source, "local installedHooks={}", "local installedHooks={}\nlocal hookEpoch=0")
+    source = replace(source, "local function restoreHooks()\n", "local function restoreHooks()\n    hookEpoch+=1\n")
+    source = replace(source, "            pcall(function() rawset(h.owner,h.name,h.original) end)",
+                     "            if rawget(h.owner,h.name)==h.replacement then pcall(rawset,h.owner,h.name,h.original) end")
+    source = replace(source, 'name=target.name,original=previous}', 'name=target.name,original=previous,replacement=replacement}')
+    source = replace(source, "    local began=findMethod", "    local epoch=hookEpoch\n    local began=findMethod")
+    source = replace(source, "if self==getActiveController() and isTouch(input) then",
+                     "if epoch==hookEpoch and self==getActiveController() and isTouch(input) then", 3)
     source = replace(source, take(source, "local activeTouches", "local inputConnections"), "")
     source = replace(source, take(source, '    if type(bridge)=="table"', "local function isBlockedTouch"),
                      '    return type(bridge)=="table" and type(bridge.OwnsTouch)=="function" and bridge.OwnsTouch(input)\nend\n\n')

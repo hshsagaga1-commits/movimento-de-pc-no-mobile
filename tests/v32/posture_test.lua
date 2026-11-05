@@ -37,6 +37,19 @@ assert(not low)
 flag.Parent=nil
 assert(source=="unknown")
 
+local scripts=Instance.new("Folder");scripts.Name="PlayerScripts";scripts.Parent=e.player
+local events=Instance.new("Folder");events.Name="Events";events.Parent=scripts
+local keybind=Instance.new("BindableEvent");keybind.Name="KeybindUsed";keybind.Event=F.signal();keybind.Parent=events
+keybind.Event:fire("Jump",true)
+assert(not low)
+keybind.Event:fire("Crouch",true)
+assert(low and source=="crouch:keybind")
+keybind.Event:fire("Crouch",false)
+assert(not low)
+keybind.Event:fire("Crouch",true)
+keybind.Parent=nil
+assert(not low and source=="unknown","removed Legacy event left stale crouch state")
+
 local animator=Instance.new("Animator")
 animator.AnimationPlayed=F.signal()
 animator.GetPlayingAnimationTracks=function() return {} end

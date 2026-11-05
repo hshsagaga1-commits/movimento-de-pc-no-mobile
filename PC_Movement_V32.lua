@@ -43,7 +43,7 @@ local previousNamecall
 local switchHookTarget
 local switchOriginal
 local switchOwner
-local switchOwnerPrevious
+local switchOwnerPrevious, switchOwnerReplacement
 local switchHookMode = "none"
 
 local controls
@@ -217,6 +217,15 @@ local function installInputFacade()
     return true, "installed"
 end
 
+local facadeRestored = false
+local function restoreInputFacade()
+    if not facadeInstalled or facadeRestored then return end
+    -- Restore at the bootstrap boundary. Stop must not overwrite a later hook.
+    facadeRestored = true
+    if previousNamecall then pcall(hookmetamethod, game, "__namecall", previousNamecall) end
+    if previousIndex then pcall(hookmetamethod, game, "__index", previousIndex) end
+end
+
 local function getUpvalues(fn)
     local getter = (debug and debug.getupvalues) or getupvalues
     if type(getter) ~= "function" then
@@ -250,6 +259,15 @@ local function discoverKeyboardFromUpvalues()
     return nil
 end
 
+local function seedCancelled()
+    if shouldContinue() then return false end
+    local selected = rawget(controls, "activeControlModule")
+    if type(selected) == "table" and selected ~= initialModule and selected ~= touchModule then
+        keyboardModule = selected -- cleanup can restore the controller selected before the seed
+    end
+    return true
+end
+
 local function seedKeyboardInput()
     keyboardSeedAttempts += 1
     local ok = pcall(function()
@@ -262,9 +280,10 @@ local function seedKeyboardInput()
         return false
     end
 
+    if seedCancelled() then return false end
     for _ = 1, 10 do
-        if not shouldContinue() then return false end
         task.wait(0.025)
+        if seedCancelled() then return false end
         local activeModule = rawget(controls, "activeControlModule")
         if type(activeModule) == "table" and activeModule ~= touchModule then
             keyboardModule = activeModule
@@ -365,6 +384,7 @@ local function installSwitchLock()
         return switchOriginal(self, module, ...)
     end
     rawset(switchOwner, target.name, replacement)
+    switchOwnerReplacement = replacement
     switchHookMode = "rawset"
     switchLockInstalled = true
     return true, "rawset"
@@ -419,21 +439,14 @@ getgenv().__PCModeLockCleanup = function()
                 hookfunction(switchHookTarget, switchOriginal)
             end)
         elseif switchHookMode == "rawset" and type(switchOwner) == "table"
-            and type(switchOwnerPrevious) == "function" then
+            and type(switchOwnerPrevious) == "function" and rawget(switchOwner, "SwitchToController") == switchOwnerReplacement then
             pcall(function()
                 rawset(switchOwner, "SwitchToController", switchOwnerPrevious)
             end)
         end
     end
 
-    if facadeInstalled and type(hookmetamethod) == "function" then
-        if type(previousNamecall) == "function" then
-            pcall(function() hookmetamethod(game, "__namecall", previousNamecall) end)
-        end
-        if type(previousIndex) == "function" then
-            pcall(function() hookmetamethod(game, "__index", previousIndex) end)
-        end
-    end
+    restoreInputFacade()
 
     if type(controls) == "table" and keyboardModule and initialModule ~= keyboardModule
         and rawget(controls, "activeControlModule") == keyboardModule then
@@ -450,6 +463,7 @@ getgenv().__PCModeLockCleanup = function()
 end
 
 local controlsOk, controlsStatus = locateControls()
+if not shouldContinue() then return end
 if not controlsOk then
     lastError = controlsStatus
 else
@@ -476,6 +490,7 @@ else
 end
 
 facadeActive = false
+restoreInputFacade()
 local oldStatus = playerGui:FindFirstChild(STATUS_GUI)
 if oldStatus then oldStatus:Destroy() end
 statusGui = Instance.new("ScreenGui")
@@ -590,6 +605,7 @@ local playerModule=nil
 local cameras=nil
 local activeController=nil
 local installedHooks={}
+local hookEpoch=0
 local blockedTouches=setmetatable({}, {__mode="k"})
 local blockedTouchIds={}
 local inputConnections={}
@@ -743,12 +759,13 @@ local function getActiveController()
 end
 
 local function restoreHooks()
+    hookEpoch+=1
     for i=#installedHooks,1,-1 do
         local h=installedHooks[i]
         if h.mode=="hookfunction" and type(hookfunction)=="function" then
             pcall(function() hookfunction(h.target,h.original) end)
         elseif h.mode=="rawset" and type(h.owner)=="table" and type(h.original)=="function" then
-            pcall(function() rawset(h.owner,h.name,h.original) end)
+            if rawget(h.owner,h.name)==h.replacement then pcall(rawset,h.owner,h.name,h.original) end
         end
     end
     table.clear(installedHooks)
@@ -776,7 +793,7 @@ local function installOne(target,replacementFactory)
         local replacement=replacementFactory(previous)
         local ok=pcall(function() rawset(target.owner,target.name,replacement) end)
         if ok then
-            installedHooks[#installedHooks+1]={mode="rawset",owner=target.owner,name=target.name,original=previous}
+            installedHooks[#installedHooks+1]={mode="rawset",owner=target.owner,name=target.name,original=previous,replacement=replacement}
             return true
         end
     end
@@ -790,13 +807,14 @@ local function installForController(controller)
     blockedTouches=setmetatable({}, {__mode="k"})
     if type(controller)~="table" then return false end
 
+    local epoch=hookEpoch
     local began=findMethod(controller,"OnInputBegan")
     local changed=findMethod(controller,"OnInputChanged")
     local ended=findMethod(controller,"OnInputEnded")
 
     local beganOk=installOne(began,function(callOriginal)
         return function(self,input,...)
-            if self==getActiveController() and isTouch(input) then
+            if epoch==hookEpoch and self==getActiveController() and isTouch(input) then
                 if isBlockedTouch(input) or inJoystickDeadzone(input) then
                     blockedTouches[input]=true
                     local id=getTouchId(input)
@@ -814,7 +832,7 @@ local function installForController(controller)
 
     local changedOk=installOne(changed,function(callOriginal)
         return function(self,input,...)
-            if self==getActiveController() and isTouch(input) then
+            if epoch==hookEpoch and self==getActiveController() and isTouch(input) then
                 if isBlockedTouch(input) then
                     blockedTouches[input]=true
                     local id=getTouchId(input)
@@ -833,7 +851,7 @@ local function installForController(controller)
 
     local endedOk=installOne(ended,function(callOriginal)
         return function(self,input,...)
-            if self==getActiveController() and isTouch(input) then
+            if epoch==hookEpoch and self==getActiveController() and isTouch(input) then
                 if isBlockedTouch(input) then
                     blockedTouches[input]=nil
                     local id=getTouchId(input)
@@ -1353,6 +1371,7 @@ return function(onChange)
     local session,charSignals,humSignals,animSignals,hudSignals={},{},{},{},{}
     local charFlags,humFlags,tracks={},{},{}
     local character,humanoid,animator,stand
+    local keybind,legacyHeld,keybindConnection
     local crouchTracks,emoteTracks=0,0
     local lastSource
     local active=true
@@ -1384,6 +1403,7 @@ return function(onChange)
             elseif emoting then source="emote:flag"
             elseif crouched==nil and stand and stand.Visible then source="crouch:hud"
             elseif crouched==nil and crouchTracks>0 then source="crouch:animation"
+            elseif crouched==nil and legacyHeld==true then source="crouch:keybind"
             elseif emoting==nil and emoteTracks>0 then source="emote:animation"
             elseif crouched==false or emoting==false then source="standing:flag"
             elseif stand then source="standing:hud"
@@ -1485,6 +1505,7 @@ return function(onChange)
         disconnect(charSignals)
         detachFlags(charFlags)
         character=value
+        legacyHeld=nil
         bindHumanoid(value and value:FindFirstChildOfClass("Humanoid"))
         bindFlags(value,charSignals,charFlags,function(child,removing)
             if child:IsA("Humanoid") then
@@ -1517,7 +1538,38 @@ return function(onChange)
         publish()
     end
 
+    local function refreshKeybind(excluded)
+        local scripts=player:FindFirstChild("PlayerScripts")
+        local events=scripts and scripts:FindFirstChild("Events")
+        local value=events and events:FindFirstChild("KeybindUsed")
+        if value and (excluded==scripts or excluded==events or excluded==value or not value:IsA("BindableEvent")) then
+            value=nil
+        end
+        if keybind==value then return end
+        if keybindConnection then keybindConnection:Disconnect() keybindConnection=nil end
+        keybind,legacyHeld=value,nil
+        if keybind then
+            keybindConnection=keybind.Event:Connect(function(action,held)
+                if active and character and action=="Crouch" and type(held)=="boolean" then
+                    legacyHeld=held
+                    publish()
+                end
+            end)
+        end
+        publish()
+    end
+
     if game.GameId==EVADE_GAME_ID then
+        local function isKeybindNode(node)
+            return node.Name=="PlayerScripts" or node.Name=="Events" or node.Name=="KeybindUsed"
+        end
+        session[#session+1]=player.DescendantAdded:Connect(function(node)
+            if isKeybindNode(node) then refreshKeybind() end
+        end)
+        session[#session+1]=player.DescendantRemoving:Connect(function(node)
+            if isKeybindNode(node) then refreshKeybind(node) end
+        end)
+        refreshKeybind()
         local function isHudNode(node)
             return node.Name=="ControlsGui" or node.Name=="PCFrame" or node.Name=="Stand"
         end
@@ -1540,7 +1592,8 @@ return function(onChange)
         active=false
         disconnect(session)
         disconnect(hudSignals)
-        stand=nil
+        if keybindConnection then keybindConnection:Disconnect() keybindConnection=nil end
+        keybind,stand=nil,nil
         bindCharacter(nil)
     end
 end
@@ -1648,6 +1701,7 @@ return function(watchPosture)
     jumpStroke.Parent=jumpButton
 
     local enabled=true
+    local acceptingInput=true
     local connections={}
     local unwatch
     local touch,center
@@ -1866,7 +1920,7 @@ return function(watchPosture)
     env.__PCKeyboardTouchBridgeV52Cleanup=cleanup
 
     connections[#connections+1]=inputService.InputBegan:Connect(function(input)
-        if not enabled or input.UserInputType~=Enum.UserInputType.Touch then return end
+        if not enabled or not acceptingInput or gui.Parent~=playerGui or input.UserInputType~=Enum.UserInputType.Touch then return end
         local position=input.Position
         if containsPoint(joystick,position) then
             if touch then return end
@@ -1936,6 +1990,11 @@ return function(watchPosture)
         end
     end)
 
+    api.SuspendInput=function()
+        if not enabled or not acceptingInput then return end
+        acceptingInput=false
+        resetInput()
+    end
     api.Version="3.2-adaptive"
     api.OwnsTouch=function(input) return touch~=nil and touch==input end
     api.ReadMovement=function()
@@ -3161,14 +3220,14 @@ return function(modules)
         return nil,"A instalação anterior de PC Movement ainda está em andamento."
     end
 
-    local player=game:GetService("Players").LocalPlayer
+    local players=game:GetService("Players")
     local api={Version="3.2-adaptive"}
     local state="starting"
     local phaseBusy=true
     local stopRequested=false
     local lease={}
     local stopSlots={}
-    local playerGui,overlay,repairJob,repairConnection
+    local playerGui,overlay,joystick,knob,jump,repairJob,repairConnection
     local repairs,repairFailures=0,0
     local assistMode="starting"
     local cursorError
@@ -3205,7 +3264,7 @@ return function(modules)
         if repairConnection then repairConnection:Disconnect() repairConnection=nil end
         if repairJob then task.cancel(repairJob) repairJob=nil end
         for _,slot in ipairs({CURSOR,ASSIST,VISUAL,BRIDGE,CAMERA,WAKE,LOCK}) do disconnectSlot(slot) end
-        overlay=nil
+        overlay,joystick,knob,jump=nil,nil,nil,nil
         freeLease()
         if env.PCMovementV32==api then env.PCMovementV32=nil end
         if env.PCMovementAssistV31Preserved==api then env.PCMovementAssistV31Preserved=nil end
@@ -3238,7 +3297,10 @@ return function(modules)
         disconnectSlot(BRIDGE)
         install(BRIDGE,modules.bridge,modules.posture)
         install(VISUAL,modules.visual)
-        overlay=playerGui:FindFirstChild(OVERLAY)
+        overlay=assert(playerGui:FindFirstChild(OVERLAY))
+        joystick=assert(overlay:FindFirstChild("PCJoystick"))
+        knob=assert(joystick:FindFirstChild("Knob"))
+        jump=assert(overlay:FindFirstChild("PCJump"))
     end
 
     local function installAssist(target)
@@ -3294,17 +3356,11 @@ return function(modules)
         return ok,message
     end
 
-    local function overlayReady()
-        if not overlay or overlay.Parent~=playerGui then return false end
-        local stick=overlay:FindFirstChild("PCJoystick")
-        return stick and stick:FindFirstChild("Knob") and overlay:FindFirstChild("PCJump")
-    end
-
     local function scheduleRepair(delay)
         if repairJob or state~="running" then return end
         repairJob=task.delay(delay,function()
             repairJob=nil
-            if state~="running" or overlayReady() then return end
+            if state~="running" then return end
             if phaseBusy then scheduleRepair(0.25) return end
             phaseBusy=true
             env.__PCMovementV31PreservedInstall=lease
@@ -3341,7 +3397,18 @@ return function(modules)
         env.PCMovementAssistV31Preserved=api
         env.PCMovementAssistV31=api
 
-        playerGui=assert(player:FindFirstChild("PlayerGui") or player:WaitForChild("PlayerGui",15),"PlayerGui unavailable")
+        local deadline=os.clock()+15
+        local player,playerModule
+        repeat
+            checkActive()
+            player=players.LocalPlayer
+            playerGui=player and player:FindFirstChild("PlayerGui")
+            local scripts=player and player:FindFirstChild("PlayerScripts")
+            playerModule=scripts and scripts:FindFirstChild("PlayerModule")
+            if playerGui and playerModule then break end
+            if os.clock()>=deadline then error("PlayerGui/PlayerModule unavailable after 15 seconds") end
+            task.wait(0.05)
+        until false
         for _,object in ipairs(playerGui:GetDescendants()) do
             if object:IsA("UIScale") and object.Name=="PCCrouchPressVisualV59" then object:Destroy() end
         end
@@ -3363,8 +3430,8 @@ return function(modules)
         end
         repairConnection=playerGui.DescendantRemoving:Connect(function(node)
             if not overlay then return end
-            if node==overlay or (node.Parent==overlay and (node.Name=="PCJoystick" or node.Name=="PCJump"))
-                or (node.Name=="Knob" and node.Parent and node.Parent.Parent==overlay) then
+            if node==overlay or node==joystick or node==knob or node==jump then
+                callComponent(BRIDGE,"PCKeyboardTouchBridgeV52","SuspendInput")
                 scheduleRepair(1.25)
             end
         end)

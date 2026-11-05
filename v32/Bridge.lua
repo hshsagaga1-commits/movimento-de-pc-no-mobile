@@ -100,6 +100,7 @@ return function(watchPosture)
     jumpStroke.Parent=jumpButton
 
     local enabled=true
+    local acceptingInput=true
     local connections={}
     local unwatch
     local touch,center
@@ -318,7 +319,7 @@ return function(watchPosture)
     env.__PCKeyboardTouchBridgeV52Cleanup=cleanup
 
     connections[#connections+1]=inputService.InputBegan:Connect(function(input)
-        if not enabled or input.UserInputType~=Enum.UserInputType.Touch then return end
+        if not enabled or not acceptingInput or gui.Parent~=playerGui or input.UserInputType~=Enum.UserInputType.Touch then return end
         local position=input.Position
         if containsPoint(joystick,position) then
             if touch then return end
@@ -388,6 +389,11 @@ return function(watchPosture)
         end
     end)
 
+    api.SuspendInput=function()
+        if not enabled or not acceptingInput then return end
+        acceptingInput=false
+        resetInput()
+    end
     api.Version="3.2-adaptive"
     api.OwnsTouch=function(input) return touch~=nil and touch==input end
     api.ReadMovement=function()

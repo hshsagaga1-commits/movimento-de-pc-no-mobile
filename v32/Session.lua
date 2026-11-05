@@ -6,14 +6,14 @@ return function(modules)
         return nil,"A instalação anterior de PC Movement ainda está em andamento."
     end
 
-    local player=game:GetService("Players").LocalPlayer
+    local players=game:GetService("Players")
     local api={Version="3.2-adaptive"}
     local state="starting"
     local phaseBusy=true
     local stopRequested=false
     local lease={}
     local stopSlots={}
-    local playerGui,overlay,repairJob,repairConnection
+    local playerGui,overlay,joystick,knob,jump,repairJob,repairConnection
     local repairs,repairFailures=0,0
     local assistMode="starting"
     local cursorError
@@ -50,7 +50,7 @@ return function(modules)
         if repairConnection then repairConnection:Disconnect() repairConnection=nil end
         if repairJob then task.cancel(repairJob) repairJob=nil end
         for _,slot in ipairs({CURSOR,ASSIST,VISUAL,BRIDGE,CAMERA,WAKE,LOCK}) do disconnectSlot(slot) end
-        overlay=nil
+        overlay,joystick,knob,jump=nil,nil,nil,nil
         freeLease()
         if env.PCMovementV32==api then env.PCMovementV32=nil end
         if env.PCMovementAssistV31Preserved==api then env.PCMovementAssistV31Preserved=nil end
@@ -83,7 +83,10 @@ return function(modules)
         disconnectSlot(BRIDGE)
         install(BRIDGE,modules.bridge,modules.posture)
         install(VISUAL,modules.visual)
-        overlay=playerGui:FindFirstChild(OVERLAY)
+        overlay=assert(playerGui:FindFirstChild(OVERLAY))
+        joystick=assert(overlay:FindFirstChild("PCJoystick"))
+        knob=assert(joystick:FindFirstChild("Knob"))
+        jump=assert(overlay:FindFirstChild("PCJump"))
     end
 
     local function installAssist(target)
@@ -139,17 +142,11 @@ return function(modules)
         return ok,message
     end
 
-    local function overlayReady()
-        if not overlay or overlay.Parent~=playerGui then return false end
-        local stick=overlay:FindFirstChild("PCJoystick")
-        return stick and stick:FindFirstChild("Knob") and overlay:FindFirstChild("PCJump")
-    end
-
     local function scheduleRepair(delay)
         if repairJob or state~="running" then return end
         repairJob=task.delay(delay,function()
             repairJob=nil
-            if state~="running" or overlayReady() then return end
+            if state~="running" then return end
             if phaseBusy then scheduleRepair(0.25) return end
             phaseBusy=true
             env.__PCMovementV31PreservedInstall=lease
@@ -186,7 +183,18 @@ return function(modules)
         env.PCMovementAssistV31Preserved=api
         env.PCMovementAssistV31=api
 
-        playerGui=assert(player:FindFirstChild("PlayerGui") or player:WaitForChild("PlayerGui",15),"PlayerGui unavailable")
+        local deadline=os.clock()+15
+        local player,playerModule
+        repeat
+            checkActive()
+            player=players.LocalPlayer
+            playerGui=player and player:FindFirstChild("PlayerGui")
+            local scripts=player and player:FindFirstChild("PlayerScripts")
+            playerModule=scripts and scripts:FindFirstChild("PlayerModule")
+            if playerGui and playerModule then break end
+            if os.clock()>=deadline then error("PlayerGui/PlayerModule unavailable after 15 seconds") end
+            task.wait(0.05)
+        until false
         for _,object in ipairs(playerGui:GetDescendants()) do
             if object:IsA("UIScale") and object.Name=="PCCrouchPressVisualV59" then object:Destroy() end
         end
@@ -208,8 +216,8 @@ return function(modules)
         end
         repairConnection=playerGui.DescendantRemoving:Connect(function(node)
             if not overlay then return end
-            if node==overlay or (node.Parent==overlay and (node.Name=="PCJoystick" or node.Name=="PCJump"))
-                or (node.Name=="Knob" and node.Parent and node.Parent.Parent==overlay) then
+            if node==overlay or node==joystick or node==knob or node==jump then
+                callComponent(BRIDGE,"PCKeyboardTouchBridgeV52","SuspendInput")
                 scheduleRepair(1.25)
             end
         end)

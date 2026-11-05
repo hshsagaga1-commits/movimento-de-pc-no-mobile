@@ -32,13 +32,33 @@ local playerModule={GetControls=function() return controls end,
 local scripts=Instance.new("Folder");scripts.Name="PlayerScripts";scripts.Parent=e.player
 local module=Instance.new("ModuleScript");module.Name="PlayerModule";module.Parent=scripts
 require=function(asset) assert(asset==module);return playerModule end
-getupvalues=function() return {{[Enum.UserInputType.Keyboard]=keyboard}} end
+e.uis.TouchEnabled=true
+local originalIndex=function(object,key) return object[key] end
+local originalNamecall=function() return Enum.UserInputType.Touch end
+local hooks={__index=originalIndex,__namecall=originalNamecall}
+hookmetamethod=function(object,method,replacement)
+    assert(object==game)
+    local previous=hooks[method]
+    hooks[method]=replacement
+    return previous
+end
+checkcaller=function() return false end
+getnamecallmethod=function() return "GetLastInputType" end
+getupvalues=function()
+    assert(hooks.__index(e.uis,"TouchEnabled")==false,"facade was unavailable during keyboard discovery")
+    assert(hooks.__namecall(e.uis)==Enum.UserInputType.Keyboard)
+    return {{[Enum.UserInputType.Keyboard]=keyboard}}
+end
 local function install() return dofile("PC_Movement_V32.lua") end
 local overlayName="PCKeyboardTouchBridgeV52Overlay"
 local function overlay() return e.pg:FindFirstChild(overlayName) end
 local api=install()
 assert(controls.activeControlModule==keyboard and api.GetState().status=="running")
 assert(api.GetState().pcLock.switchLockInstalled)
+assert(hooks.__index(e.uis,"TouchEnabled")==true,"mobile HUD identity was not restored after bootstrap")
+assert(hooks.__namecall(e.uis)==Enum.UserInputType.Touch)
+assert(hooks.__index==originalIndex and hooks.__namecall==originalNamecall,
+    "temporary input hooks remained chained after bootstrap")
 controls:SwitchToController(touchModule)
 assert(controls.activeControlModule==keyboard,"keyboard controller route lost")
 assert(e.uis.MouseIconEnabled==false)
@@ -85,6 +105,7 @@ assert(count(e.bound)==bindings and connections(e.uis.InputBegan)==began and e:l
 api.Stop()
 assert(overlay()==nil and count(e.bound)==0 and connections(e.run.Heartbeat)==0)
 assert(e.uis.MouseIconEnabled==true and camera.OnInputChanged==originalChanged)
+assert(hooks.__index==originalIndex and hooks.__namecall==originalNamecall)
 assert(connections(e.uis.InputBegan)==0 and count(e.queued)==0)
 local events=#e.events
 e:step(.5)
@@ -98,12 +119,26 @@ for _=1,20 do
 end
 api=install()
 local removed=overlay()
+local captured=finger(removed:FindFirstChild("PCJoystick"))
+captured.Position=captured.Position+Vector2.new(-25,0)
+e.uis.InputBegan:fire(captured)
+e.uis.InputBegan:fire(finger(removed:FindFirstChild("PCJump")))
+assert(api.GetState().bridge.chord=="W+A" and api.GetState().bridge.jumpActive)
 removed:Destroy()
+assert(api.GetState().bridge.chord=="-" and not api.GetState().bridge.jumpActive,
+    "detached overlay held its previous synthetic input")
 assert(count(e.queued)==1,"no overlay repair queued")
 e:step(1.26)
 assert(overlay() and overlay()~=removed and api.GetState().repairs==1)
 assert(count(e.bound)==bindings and connections(e.uis.InputBegan)==began and e:liveConnections()==total)
+e.deferredRemoval=true
+local lostKnob=overlay():FindFirstChild("PCJoystick"):FindFirstChild("Knob")
+lostKnob.Parent=nil
+assert(count(e.queued)==1,"deferred knob removal was ignored")
+e:step(1.26)
+assert(api.GetState().repairs==2)
 overlay():Destroy()
+e.deferredRemoval=false
 assert(count(e.queued)==1)
 api.Stop()
 assert(count(e.queued)==0)
@@ -138,6 +173,12 @@ assert(count(e.bound)==0 and connections(e.run.Heartbeat)==0 and not overlay())
 -- Exercise the original LeftControl keyboard discovery fallback while it yields.
 local previousLookup=getupvalues
 getupvalues=nil
+local vim=e.services.VirtualInputManager
+local send=vim.SendKeyEvent
+vim.SendKeyEvent=function(self,down,key,...)
+    send(self,down,key,...)
+    if key.Name=="LeftControl" and down then controls:SwitchToController(keyboard) end
+end
 local cancelled=e:spawn(install)
 assert(coroutine.status(cancelled)=="suspended" and e.events[#e.events].down)
 local waiting=e.env.PCMovementV32
@@ -147,11 +188,32 @@ assert(install()==waiting and waiting.GetState().status=="stopping")
 e:step(.035)
 assert(coroutine.status(cancelled)=="dead" and e.env.PCMovementV32==nil)
 assert(e.events[#e.events].key=="LeftControl" and not e.events[#e.events].down)
+assert(controls.activeControlModule==touchModule,"cancelled keyboard seed left the PC controller selected")
+vim.SendKeyEvent=send
 assert(not overlay() and count(e.bound)==0 and #e.waiters==0 and e:liveConnections()==0)
 getupvalues=previousLookup
 e.game.GameId=1
 api=install()
 assert(api.GetState().assistMode=="not-applicable" and connections(e.run.Heartbeat)==0)
 assert(waiting.SetCursorHidden(true)==nil,"old API mutated a later session")
+local baseMacroIndex=hooks.__index
+local macroIndex=function(...) return baseMacroIndex(...) end
+hookmetamethod(game,"__index",macroIndex)
+local previousCamera=camera.OnInputChanged
+local macroChanged=function(...) return previousCamera(...) end
+camera.OnInputChanged=macroChanged
 api.Stop()
+assert(hooks.__index==macroIndex,"stop removed a later global hook")
+assert(camera.OnInputChanged==macroChanged,"stop removed a later camera wrapper")
+
+module.Parent=nil
+local result
+local early=e:spawn(function() result=install() end)
+assert(coroutine.status(early)=="suspended" and e.env.PCMovementV32.GetState().status=="starting")
+assert(not overlay())
+module.Parent=scripts
+e:step(.05)
+assert(coroutine.status(early)=="dead" and result.GetState().pcLock.switchLockInstalled)
+result.Stop()
+assert(e:liveConnections()==0 and count(e.bound)==0)
 print("PASS bundle: controller/camera, native UI, cursor, 40 reentries, 20 stop/start cycles, repair and cancellation")

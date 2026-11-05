@@ -13,10 +13,17 @@ return function(watchPosture)
     local SWEEP_STAGE_SECONDS=0.016
     local JUMP_BURST_SECONDS=0.200
     local KEY_CODES={Enum.KeyCode.W,Enum.KeyCode.A,Enum.KeyCode.S,Enum.KeyCode.D}
+    local KEY_BITS={1,2,4,8}
     local CHORD_BITS={["-"]=0,W=1,A=2,S=4,D=8,["W+A"]=3,["W+D"]=9,
         ["W+A+D"]=11,["A+D"]=10,["A+S"]=6,["S+D"]=12}
     local BIT_CHORD={}
-    for name,bits in pairs(CHORD_BITS) do BIT_CHORD[bits]=name end
+    for bits=0,15 do
+        local names={}
+        for index,name in ipairs({"W","A","S","D"}) do
+            if bit32.btest(bits,KEY_BITS[index]) then names[#names+1]=name end
+        end
+        BIT_CHORD[bits]=#names==0 and "-" or table.concat(names,"+")
+    end
     local STANDING={A="W+A",D="W+D",["W+A+D"]="W"}
     local LOW={["W+A"]="A",["W+D"]="D"}
     local SIDE={A=-1,["W+A"]=-1,D=1,["W+D"]=1}
@@ -121,13 +128,13 @@ return function(watchPosture)
         if pressed==wanted then retryAt=nil return end
         -- V3.1 presses additions before removing old keys, including on pure A/D swaps.
         for i,code in ipairs(KEY_CODES) do
-            local bit=2^(i-1)
+            local bit=KEY_BITS[i]
             if bit32.btest(wanted,bit) and not bit32.btest(pressed,bit) and sendKey(code,true) then
                 pressed=bit32.bor(pressed,bit)
             end
         end
         for i,code in ipairs(KEY_CODES) do
-            local bit=2^(i-1)
+            local bit=KEY_BITS[i]
             if bit32.btest(pressed,bit) and not bit32.btest(wanted,bit) and sendKey(code,false) then
                 pressed=bit32.band(pressed,bit32.bnot(bit))
             end
@@ -199,6 +206,16 @@ return function(watchPosture)
         end
     end
 
+    local config=env.PCMovementV32Config
+    if type(config)=="table" and config.Profile==true and debug.profilebegin and debug.profileend then
+        local evaluate=refreshKeys
+        refreshKeys=function(now,modeChanged)
+            debug.profilebegin("PC Movement V3.2 / Joystick")
+            evaluate(now,modeChanged)
+            debug.profileend()
+        end
+    end
+
     local function writeKnob()
         local size=joystick.AbsoluteSize
         knob.Position=UDim2.fromOffset(size.X/2+knobOffset.X,size.Y/2+knobOffset.Y)
@@ -264,6 +281,7 @@ return function(watchPosture)
         pulseJump()
         if not jumpConnection then
             jumpConnection=RunService.Heartbeat:Connect(function()
+                if not jumpDeadline then return end
                 if os.clock()>=jumpDeadline then stopJump() else pulseJump() end
             end)
         end
@@ -373,10 +391,10 @@ return function(watchPosture)
     api.Version="3.2-adaptive"
     api.OwnsTouch=function(input) return touch~=nil and touch==input end
     api.ReadMovement=function()
-        return BIT_CHORD[pressed] or "?",x,z,sweepTarget~=nil,jumpPulses
+        return BIT_CHORD[pressed],x,z,sweepTarget~=nil,jumpPulses
     end
     api.GetState=function()
-        return {chord=BIT_CHORD[pressed] or "?",analogX=x,analogZ=z,sweepActive=sweepTarget~=nil,
+        return {chord=BIT_CHORD[pressed],analogX=x,analogZ=z,sweepActive=sweepTarget~=nil,
             movementTouchActive=touch~=nil,movementTouch=touch,movementCaptures=movementCaptures,
             movementUpdates=movementUpdates,keyEvents=keyEvents,keyErrors=keyErrors,jumpRequests=jumpRequests,
             jumpPulses=jumpPulses,bufferedJumpCount=0,jumpActive=jumpConnection~=nil,

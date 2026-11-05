@@ -111,7 +111,10 @@ for burst=1,4 do
     assert(last and not last.down and last.time-start>=.199 and last.time-start<=.217)
 end
 tap()
+e:step(.16)
 tap()
+e:step(.08)
+assert(bridge.GetState().jumpActive,"new tap lost its own 200 ms interval")
 assert(#e.waiters==0,"jump spawned a waiting task")
 e.uis.WindowFocusReleased:fire()
 chord("-")
@@ -127,6 +130,24 @@ assert(not e.env.PCKeyboardTouchBridgeV52)
 for _,signal in pairs({e.uis.InputBegan,e.uis.InputChanged,e.uis.InputEnded,e.uis.WindowFocusReleased,e.run.Heartbeat}) do
     for _,entry in ipairs(signal.listeners) do assert(not entry[1].Connected) end
 end
+local vim=e.services.VirtualInputManager
+local realSend=vim.SendKeyEvent
+local failures=0
+vim.SendKeyEvent=function(self,down,key,...)
+    if key.Name=="A" and not down and failures==0 then failures+=1 error("injection temporarily unavailable") end
+    realSend(self,down,key,...)
+end
+local module=factory("v32/Bridge.lua")
+bridge=module(function() return function() end end)
+gui=e.pg:FindFirstChild("PCKeyboardTouchBridgeV52Overlay")
+stick=gui:FindFirstChild("PCJoystick")
+center=stick.AbsolutePosition+stick.AbsoluteSize/2
+move(-45,0,true)
+move(45,0)
+chord("W+A+D")
+e:step(.035)
+chord("W+D")
+e.env.__PCKeyboardTouchBridgeV52Cleanup()
 for _,event in ipairs(e.events) do
     assert(table.find({"W","A","S","D","Space"},event.key),"unexpected synthetic key")
 end

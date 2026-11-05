@@ -1,4 +1,30 @@
 return function(F,E)
+    local allSignals=setmetatable({},{__mode="k"})
+    local function signal()
+        local object={listeners={},nextId=0}
+        function object:Connect(fn)
+            self.nextId+=1
+            local index=self.nextId
+            local owner=self
+            local conn={Connected=true}
+            function conn:Disconnect()
+                if not self.Connected then return end
+                self.Connected=false
+                owner.listeners[index]=nil
+            end
+            self.listeners[index]={conn,fn}
+            return conn
+        end
+        function object:fire(...)
+            local last=self.nextId
+            for index,entry in pairs(self.listeners) do
+                if index<=last and entry[1].Connected then entry[2](...) end
+            end
+        end
+        allSignals[object]=true
+        return object
+    end
+    F.signal=signal
     local e=E.new(F)
     local baseNew=Instance.new
     local mt=getmetatable(e.pg)
@@ -61,9 +87,7 @@ return function(F,E)
     game=e.game
     workspace=e.world
     getgenv=function() return e.env end
-    local wallClock=os.clock
     os={clock=function() return e.time end}
-    e.wallClock=wallClock
     local queued={}
     e.queued=queued
     task={
@@ -89,6 +113,13 @@ return function(F,E)
                 self:spawn(job.callback)
             end
         end
+    end
+    function e:liveConnections()
+        local total=0
+        for signal in pairs(allSignals) do
+            for _ in pairs(signal.listeners) do total+=1 end
+        end
+        return total
     end
     return e
 end

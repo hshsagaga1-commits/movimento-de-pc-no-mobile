@@ -11,7 +11,7 @@ local EMOTE_NAMES={
 
 local function animationKind(name)
     name=string.lower((string.gsub(name,"(%l)(%u)","%1 %2")))
-    if name=="crouch" or name=="crouching" or string.match(name,"^crouch[%s_:%-]") then
+    if name=="crouch" or name=="crouching" or name=="crouch idle" or name=="crouch walk" or name=="crouch move" then
         return "crouch"
     end
     if name=="emote" or name=="dance" or name=="taunt" or EMOTE_NAMES[name]

@@ -173,6 +173,8 @@ local api = {
             errors = errors, input = tostring(UserInputService.PreferredInput),
         }
     end,
+    -- No temporary state table on Assist Heartbeat.
+    ReadInput = function() return shapedMove.X, shapedMove.Z end,
     ShapeForTest = shapeMove,
 }
 local cleanup

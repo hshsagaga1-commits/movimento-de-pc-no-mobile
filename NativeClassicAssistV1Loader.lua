@@ -36,6 +36,12 @@ function api.SetEnabled(value)
     if not own() or not native then return false,"not active" end
     return native.SetEnabled(value)
 end
+function api.SetAssistEnabled(value)
+    if not own() then return false,"not active" end
+    local a=env.NativeClassicGridAssistV1
+    if a and type(a.SetEnabled)=="function" then return a.SetEnabled(value) end
+    return false,"Assist not loaded"
+end
 function api.GetState()
     local n=native and native.GetState and native.GetState() or nil
     local a=env.NativeClassicGridAssistV1

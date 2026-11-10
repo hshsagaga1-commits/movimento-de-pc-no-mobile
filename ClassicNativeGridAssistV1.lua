@@ -221,12 +221,9 @@ characterConnection=player.CharacterAdded:Connect(bindCharacter)
 
 local function readBridge()
     local boost = env.ClassicNativeBoostV1
-    if type(boost) == "table" and type(boost.GetState) == "function" then
-        local ok, state = pcall(boost.GetState)
-        if ok and type(state) == "table" then
-            return "CLASSIC", tonumber(state.processedX) or 0,
-                tonumber(state.processedZ) or 0, false, 0
-        end
+    if type(boost) == "table" and type(boost.ReadInput) == "function" then
+        local x, z = boost.ReadInput()
+        return "CLASSIC", x, z, false, 0
     end
     return "NATIVE", 0, 0, false, 0
 end
@@ -497,9 +494,7 @@ api.ExportDiagnostics=function(filename)
     state.lastNormal={x=state.lastNormal.X,y=state.lastNormal.Y,z=state.lastNormal.Z}
     if state.lastRayHitDistance==math.huge then state.lastRayHitDistance=nil end
     local json=HttpService:JSONEncode({state=state,events=logs(),
-        bridge=scalarState("PCKeyboardTouchBridgeV52"),pcLock=scalarState("PCModeLock"),
-        keyboardWake=scalarState("PCKeyboardControllerWakeV5"),
-        cameraGate=scalarState("PCCameraTouchRightHalfGateV5")})
+        boost=scalarState("ClassicNativeBoostV1")})
     filename=filename or "ClassicNative_Assist_Log.json"
     if type(writefile)=="function" then
         local ok,message=pcall(writefile,filename,json)

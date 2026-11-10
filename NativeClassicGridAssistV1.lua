@@ -466,6 +466,18 @@ end)
 local api={
     Version="1.0-native-classic-light-contact",
     Enabled=enabled,
+    SetEnabled=function(value)
+        enabled=value~=false and game.GameId==EVADE_GAME_ID
+        if not enabled then
+            currentContact=nil
+            lastFacing=Vector3.zero
+            lastChord="-"
+        else
+            lastScanAt=-math.huge
+            lastOverlapAt=-math.huge
+        end
+        return enabled
+    end,
     SetDiagnostics=function(value) diagnostics=value==true return diagnostics end,
     GetLogs=logs,
     GetState=function()

@@ -42,6 +42,8 @@ No mesmo mapa e FPS, compare sem script e com script: segurar 100% esquerda, arr
 ```lua
 getgenv().NativeClassicAssistCombo.SetEnabled(false) -- desliga o modificador
 getgenv().NativeClassicAssistCombo.SetEnabled(true)  -- reativa
+getgenv().NativeClassicAssistCombo.SetAssistEnabled(false) -- testa a melhoria lateral sem Assist
+getgenv().NativeClassicAssistCombo.SetAssistEnabled(true)  -- reativa somente o Assist
 getgenv().NativeClassicAssistCombo.SetDiagnostics(true)
 local ok,path,json=getgenv().NativeClassicAssistCombo.ExportDiagnostics()
 print(ok,path,json)

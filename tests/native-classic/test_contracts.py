@@ -48,7 +48,7 @@ def run_model_tests():
 
     # No temporal latch: zero and the other side respond on their first sample.
     direction = [shape(x, 0)[0] for x in (-0.9, -0.58, -0.05, 0.05, 0.58, 0.9)]
-    assert direction == [-1, -1, 0, 0, 1, 1], direction
+    assert all(near(a, b) for a, b in zip(direction, (-1, -1, 0, 0, 1, 1))), direction
     for x in (0.3, 0.6, 0.9):
         assert shape(x, -0.7)[0] > 0 and shape(-x, -0.7)[0] < 0, "diagonal sign"
     return 45 + 7

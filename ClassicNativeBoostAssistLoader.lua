@@ -29,14 +29,34 @@ local boostCleanup,assistCleanup
 local function isCurrent()
     return active and env.__ClassicNativeBoostAssistToken==token
 end
-local function loadModule(name)
+-- Serialized lease prevents a re-execution from adopting an old half-built module.
+local function loadModule(name, cleanupSlot)
     local source=game:HttpGet(root..name.."?cache="..HttpService:GenerateGUID(false),true)
     if not isCurrent() then error("Classic Native install cancelled") end
     local chunk,why=loadstring(source)
     if not chunk then error(name..": "..tostring(why)) end
-    local object=chunk()
+
+    local start=os.clock()
+    while env.__ClassicNativeBoostAssistInstallLease do
+        if not isCurrent() then error("Classic Native install superseded") end
+        if os.clock()-start>15 then error("Previous Classic Native installation did not finish") end
+        task.wait(0.05)
+    end
+    if not isCurrent() then error("Classic Native install cancelled") end
+    local lease={owner=token}
+    env.__ClassicNativeBoostAssistInstallLease=lease
+    local before=env[cleanupSlot]
+    local ok,object=pcall(chunk)
+    local after=env[cleanupSlot]
+    if not ok or not isCurrent() then
+        if type(after)=="function" and after~=before then pcall(after) end
+    end
+    if env.__ClassicNativeBoostAssistInstallLease==lease then
+        env.__ClassicNativeBoostAssistInstallLease=nil
+    end
     if not isCurrent() then error("Classic Native install superseded") end
-    return object
+    if not ok then error(name..": "..tostring(object)) end
+    return object,after
 end
 
 local api={Version="1.0-native-classic-assist"}
@@ -84,10 +104,8 @@ end
 env.__ClassicNativeBoostAssistLoaderCleanup=api.Stop
 
 local ok,message=pcall(function()
-    boost=loadModule("ClassicNativeBoostV1.lua")
-    boostCleanup=env.__ClassicNativeBoostV1Cleanup
-    assist=loadModule("ClassicNativeGridAssistV1.lua")
-    assistCleanup=env.__ClassicNativeGridAssistV1Cleanup
+    boost,boostCleanup=loadModule("ClassicNativeBoostV1.lua","__ClassicNativeBoostV1Cleanup")
+    assist,assistCleanup=loadModule("ClassicNativeGridAssistV1.lua","__ClassicNativeGridAssistV1Cleanup")
 end)
 if not ok then
     api.Stop()

@@ -65,10 +65,11 @@ end
 local function locateControls()
     local playerScripts=player:FindFirstChildOfClass("PlayerScripts") or player:FindFirstChild("PlayerScripts")
     local starter=game:GetService("StarterPlayer")
-    local roots={
-        playerScripts and playerScripts:FindFirstChild("PlayerModule"),
-        starter and starter:FindFirstChild("PlayerModule")
-    }
+    local roots={}
+    local playerModule=playerScripts and playerScripts:FindFirstChild("PlayerModule")
+    local starterModule=starter and starter:FindFirstChild("PlayerModule")
+    if playerModule then roots[#roots+1]=playerModule end
+    if starterModule and starterModule~=playerModule then roots[#roots+1]=starterModule end
     for _,module in ipairs(roots) do
         if module and module:IsA("ModuleScript") then
             local ok,instance=pcall(require,module)

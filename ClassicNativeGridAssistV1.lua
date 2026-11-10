@@ -471,6 +471,12 @@ local api={
         }
     end,
 }
+api.SetEnabled=function(value)
+    enabled=(value==true and game.GameId==EVADE_GAME_ID)
+    api.Enabled=enabled
+    if not enabled then currentContact=nil end
+    return enabled
+end
 api.ExportDiagnostics=function(filename)
     local function scalarState(name)
         local object=env[name]
@@ -494,7 +500,7 @@ api.ExportDiagnostics=function(filename)
         bridge=scalarState("PCKeyboardTouchBridgeV52"),pcLock=scalarState("PCModeLock"),
         keyboardWake=scalarState("PCKeyboardControllerWakeV5"),
         cameraGate=scalarState("PCCameraTouchRightHalfGateV5")})
-    filename=filename or "PCMovement_V31_Preserved_Log.json"
+    filename=filename or "ClassicNative_Assist_Log.json"
     if type(writefile)=="function" then
         local ok,message=pcall(writefile,filename,json)
         if ok then return true,filename end

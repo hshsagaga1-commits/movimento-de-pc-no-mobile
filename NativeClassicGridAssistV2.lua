@@ -470,7 +470,8 @@ heartbeatConnection=RunService.Heartbeat:Connect(function(dtFromHeartbeat)
     -- introducing avoidable CFrame writes and fighting Roblox AutoRotate.
     -- V2 only assists face direction at a real, close, solid grid contact;
     -- airborne and camera-facing controls are otherwise fully native.
-    if visualAssistEnabled and contact.touching and not contact.held
+    if visualAssistEnabled and not contact.held
+        and (contact.touching or contact.distance<=0.95)
         and contact.distance<=1.65
         and humanoid.FloorMaterial~=Enum.Material.Air
         and humanoid.AutoRotate
@@ -478,7 +479,7 @@ heartbeatConnection=RunService.Heartbeat:Connect(function(dtFromHeartbeat)
         local visual=visualFacingIntent(desired,chord,rawX,rawZ,sweepActive)
         if visual.Magnitude>0.05 then
             lastFacingAt=now
-            smoothFacing(visual,math.min(0.05,now-lastHeartbeatAt+0.05))
+            smoothFacing(visual,dt)
         end
     end
 end)

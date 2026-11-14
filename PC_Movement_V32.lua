@@ -1612,7 +1612,6 @@ return function(watchPosture)
     local GUI_NAME="PCKeyboardTouchBridgeV52Overlay"
     local PRESS_THRESHOLD=0.30
     local SWEEP_STAGE_SECONDS=0.016
-    local JUMP_BURST_SECONDS=0.200
     local KEY_CODES={Enum.KeyCode.W,Enum.KeyCode.A,Enum.KeyCode.S,Enum.KeyCode.D}
     local KEY_BITS={1,2,4,8}
     local CHORD_BITS={["-"]=0,W=1,A=2,S=4,D=8,["W+A"]=3,["W+D"]=9,
@@ -1712,7 +1711,7 @@ return function(watchPosture)
     local target,applied,pressed="-","-",0
     local retryAt
     local sweepTarget,sweepAt
-    local jumpConnection,jumpDeadline
+    local jumpTouch
     local spaceDown=false
     local knobTarget,knobOffset=Vector2.zero,Vector2.zero
     local movementCaptures,movementUpdates,keyEvents,jumpRequests,jumpPulses=0,0,0,0,0
@@ -1861,31 +1860,22 @@ return function(watchPosture)
         end
     end
 
+    -- Space is held for the actual finger contact, never spammed for 200ms.
+    -- This avoids a Heartbeat connection and repeated virtual key injections.
     local function stopJump()
-        jumpDeadline=nil
-        if jumpConnection then
-            jumpConnection:Disconnect()
-            jumpConnection=nil
-        end
+        jumpTouch=nil
         if spaceDown and sendKey(Enum.KeyCode.Space,false) then spaceDown=false end
     end
 
-    local function pulseJump()
-        -- Keep the original up/down sequence, including the initial pulse.
-        if sendKey(Enum.KeyCode.Space,false) then spaceDown=false end
-        if sendKey(Enum.KeyCode.Space,true) then spaceDown=true end
-        jumpPulses+=1
-    end
-
-    local function requestJump()
+    local function requestJump(input)
+        if jumpTouch then return end
+        jumpTouch=input
         jumpRequests+=1
-        jumpDeadline=os.clock()+JUMP_BURST_SECONDS
-        pulseJump()
-        if not jumpConnection then
-            jumpConnection=RunService.Heartbeat:Connect(function()
-                if not jumpDeadline then return end
-                if os.clock()>=jumpDeadline then stopJump() else pulseJump() end
-            end)
+        -- A fresh tap always begins with a clean Space transition.
+        if spaceDown and sendKey(Enum.KeyCode.Space,false) then spaceDown=false end
+        if not spaceDown and sendKey(Enum.KeyCode.Space,true) then
+            spaceDown=true
+            jumpPulses+=1
         end
     end
 
@@ -1931,24 +1921,30 @@ return function(watchPosture)
             movementCaptures+=1
             updateMovement(position,true)
         elseif containsPoint(jumpButton,position) then
-            requestJump()
+            requestJump(input)
         end
     end)
 
     connections[#connections+1]=inputService.InputChanged:Connect(function(input)
-        if enabled and input==touch then
+        if not enabled then return end
+        if input==touch then
             if input.UserInputState==Enum.UserInputState.Cancel then
                 releaseMovement(os.clock())
             else
                 updateMovement(input.Position,false)
             end
+        elseif input==jumpTouch and input.UserInputState==Enum.UserInputState.Cancel then
+            stopJump()
         end
     end)
 
     connections[#connections+1]=inputService.InputEnded:Connect(function(input)
-        if enabled and input==touch then
+        if not enabled then return end
+        if input==touch then
             if input.UserInputState~=Enum.UserInputState.Cancel then updateMovement(input.Position,false) end
             releaseMovement(os.clock())
+        elseif input==jumpTouch then
+            stopJump()
         end
     end)
     connections[#connections+1]=inputService.WindowFocusReleased:Connect(resetInput)
@@ -1971,7 +1967,7 @@ return function(watchPosture)
 
     RunService:BindToRenderStep(BIND_NAME,Enum.RenderPriority.Input.Value+8,function(dt)
         if not enabled then return end
-        if sweepAt or centerExpires or retryAt or (spaceDown and not jumpConnection) then
+        if sweepAt or centerExpires or retryAt then
             local now=os.clock()
             if centerExpires and now>centerExpires then refreshKeys(now,false) end
             if sweepAt and now>=sweepAt then
@@ -1980,7 +1976,6 @@ return function(watchPosture)
                 applyChord(nextChord,now)
             end
             if retryAt and now>=retryAt then applyChord(applied,now) end
-            if spaceDown and not jumpConnection then stopJump() end
         end
         if touch and knobOffset~=knobTarget then
             local step=math.clamp(dt or 1/60,0,0.05)
@@ -1995,8 +1990,8 @@ return function(watchPosture)
         acceptingInput=false
         resetInput()
     end
-    api.Version="3.2-adaptive"
-    api.OwnsTouch=function(input) return touch~=nil and touch==input end
+    api.Version="3.2.1-jump-fps"
+    api.OwnsTouch=function(input) return (touch~=nil and touch==input) or (jumpTouch~=nil and jumpTouch==input) end
     api.ReadMovement=function()
         return BIT_CHORD[pressed],x,z,sweepTarget~=nil,jumpPulses
     end
@@ -2004,7 +1999,7 @@ return function(watchPosture)
         return {chord=BIT_CHORD[pressed],analogX=x,analogZ=z,sweepActive=sweepTarget~=nil,
             movementTouchActive=touch~=nil,movementTouch=touch,movementCaptures=movementCaptures,
             movementUpdates=movementUpdates,keyEvents=keyEvents,keyErrors=keyErrors,jumpRequests=jumpRequests,
-            jumpPulses=jumpPulses,bufferedJumpCount=0,jumpActive=jumpConnection~=nil,
+            jumpPulses=jumpPulses,bufferedJumpCount=0,jumpActive=spaceDown,
             directPlayerMove=false,visibleJoystick=true,movementHalf=0.80,
             mode=low and "crouch-or-emote" or "standing",postureSource=postureSource,
             sectorEvaluations=evaluations,knobWrites=knobWrites}
@@ -2040,9 +2035,11 @@ local WALL_RAYS=8
 local WALL_HEIGHTS={-0.65,-0.08,0.52,1.15}
 local CONTACT_MAX_DISTANCE=2.85
 local CONTACT_SCAN_INTERVAL=1/20
+local CONTACT_SCAN_INTERVAL_SLOW=1/10 -- halve expensive grid probes during sustained frame drops
 local CONTACT_GRACE_SECONDS=0.105 -- display/history only, never force or jump
 local WALL_NORMAL_Y_MAX=0.54
 local OVERLAP_SCAN_INTERVAL=0.075
+local OVERLAP_SCAN_INTERVAL_SLOW=0.14
 local OVERLAP_RAY_LIMIT=8
 
 local FENCE_TOKENS={
@@ -2073,6 +2070,7 @@ end
 local lastContact,cachedContact,currentContact=nil,nil,nil
 local lastContactUntil,lastScanAt,lastOverlapAt=-math.huge,-math.huge,-math.huge
 local lastHeartbeatAt=os.clock()
+local slowFrameScore,slowScan=0,false
 local lastChord="-"
 local lastFacing=Vector3.zero
 local noContactFrames,geometryContacts,scanCount,contactFrames=0,0,0,0
@@ -2345,7 +2343,7 @@ local function bestContact()
             end
         end
     end
-    if now-lastOverlapAt<OVERLAP_SCAN_INTERVAL then return best end
+    if now-lastOverlapAt<(slowScan and OVERLAP_SCAN_INTERVAL_SLOW or OVERLAP_SCAN_INTERVAL) then return best end
     lastOverlapAt=now
     overlapCount+=1
     local ok,parts=pcall(function()
@@ -2387,7 +2385,7 @@ local function bestContact()
 end
 
 local function getContact(now)
-    if now-lastScanAt>=CONTACT_SCAN_INTERVAL then
+    if now-lastScanAt>=(slowScan and CONTACT_SCAN_INTERVAL_SLOW or CONTACT_SCAN_INTERVAL) then
         lastScanAt=now
         scanCount+=1
         if profile then debug.profilebegin("PC Movement V3.2 / Assist scan") end
@@ -2426,6 +2424,7 @@ local function smoothFacing(desired,dt)
     -- In a complete about-face, the avatar turns faster instead of feeling heavy.
     local forward=flatUnit(root.CFrame.LookVector)
     local dot=forward.Magnitude>0 and forward:Dot(target) or 1
+    if dot>0.999 then return end -- avoid redundant root CFrame writes when already aligned
     local response=dot<-0.55 and 0.050 or 0.067
     local alpha=1-math.exp(-dt/response)
     local frame=CFrame.lookAt(root.Position,root.Position+target)
@@ -2435,7 +2434,7 @@ local function smoothFacing(desired,dt)
 end
 
 -- Observe the real contact/jump sequence. The original bridge remains the only
--- Space sender; this module cannot fabricate an air hop or race its 200ms burst.
+-- Space sender; this module cannot fabricate an air hop or race jump input.
 local function observeContact(contact,now,jumpPulses)
     local velocity=root.AssemblyLinearVelocity
     local confirmed=contact and not contact.held and contact.touching==true
@@ -2470,6 +2469,13 @@ heartbeatConnection=RunService.Heartbeat:Connect(function(dtFromHeartbeat)
     local now=os.clock()
     local dt=math.clamp(dtFromHeartbeat or now-lastHeartbeatAt,1/240,0.05)
     lastHeartbeatAt=now
+    -- Use hysteresis so occasional frame spikes do not constantly change scan cadence.
+    if dtFromHeartbeat and dtFromHeartbeat>1/34 then
+        slowFrameScore=math.min(4,slowFrameScore+1)
+    elseif dtFromHeartbeat and dtFromHeartbeat<1/42 then
+        slowFrameScore=math.max(0,slowFrameScore-1)
+    end
+    slowScan=slowFrameScore>=2
     local chord,rawX,rawZ,sweepActive,jumpPulses=readBridge()
     local desired=intentFromChord(chord)
     lastChord=chord
@@ -2497,7 +2503,7 @@ heartbeatConnection=RunService.Heartbeat:Connect(function(dtFromHeartbeat)
 end)
 
 local api={
-    Version="3.2-preserved-light-contact",
+    Version="3.2.1-adaptive-light-contact",
     Enabled=enabled,
     SetDiagnostics=function(value) diagnostics=value==true return diagnostics end,
     GetLogs=logs,
@@ -3221,7 +3227,7 @@ return function(modules)
     end
 
     local players=game:GetService("Players")
-    local api={Version="3.2-adaptive"}
+    local api={Version="3.2.1-jump-fps"}
     local state="starting"
     local phaseBusy=true
     local stopRequested=false

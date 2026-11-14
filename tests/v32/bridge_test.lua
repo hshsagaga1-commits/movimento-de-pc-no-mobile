@@ -109,23 +109,27 @@ local function tap()
     e.uis.InputEnded:fire(jumpTouch)
 end
 for burst=1,4 do
-    local start=e.time
-    tap()
-    for i=1,14 do
-        move(i%2==0 and -45 or 45,-34)
-        e:step(1/60)
+    local first=#e.events
+    e.uis.InputBegan:fire(jumpTouch,false)
+    assert(bridge.GetState().jumpActive,"Space must go down immediately")
+    assert(bridge.OwnsTouch(jumpTouch),"jump finger must be owned by the bridge")
+    e:step(1/60)
+    e.uis.InputEnded:fire(jumpTouch)
+    assert(not bridge.GetState().jumpActive,"Space must release on finger up")
+    local downs,ups=0,0
+    for i=first+1,#e.events do
+        local event=e.events[i]
+        if event.key=="Space" then
+            if event.down then downs+=1 else ups+=1 end
+        end
     end
-    local last
-    for _,event in ipairs(e.events) do
-        if event.key=="Space" and event.time>=start then last=event end
-    end
-    assert(last and not last.down and last.time-start>=.199 and last.time-start<=.217)
+    assert(downs==1 and ups==1,"one tap must emit exactly one Space down/up")
 end
-tap()
+e.uis.InputBegan:fire(jumpTouch,false)
 e:step(.16)
-tap()
-e:step(.08)
-assert(bridge.GetState().jumpActive,"new tap lost its own 200 ms interval")
+assert(bridge.GetState().jumpActive,"Space hold should follow finger, not 200 ms timer")
+e.uis.WindowFocusReleased:fire()
+assert(not bridge.GetState().jumpActive,"focus loss must release held Space")
 assert(#e.waiters==0,"jump spawned a waiting task")
 e.uis.WindowFocusReleased:fire()
 chord("-")
@@ -162,4 +166,4 @@ e.env.__PCKeyboardTouchBridgeV52Cleanup()
 for _,event in ipairs(e.events) do
     assert(table.find({"W","A","S","D","Space"},event.key),"unexpected synthetic key")
 end
-print("PASS bridge: standing/low sectors, sweeps, stationary remap, touch ownership, repeated 200 ms Space, cancel")
+print("PASS bridge: standing/low sectors, sweeps, touch ownership, finger-held Space, immediate release, cancel")

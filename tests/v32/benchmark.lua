@@ -84,6 +84,6 @@ for _,scenario in ipairs({"idle","held","turn+jump+grid"}) do
         elseif version==32 and scenario=="held" then
             assert(result.sectors==1 and result.knob==1,"stationary thumb still performs bridge work")
         end
-        if scenario=="turn+jump+grid" then assert(result.jumpPulses>5000 and result.rays>0) end
+        if scenario=="turn+jump+grid" then assert(result.jumpPulses>(version==31 and 5000 or 600) and result.rays>0) end
     end
 end

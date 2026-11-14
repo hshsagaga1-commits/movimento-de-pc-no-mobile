@@ -240,7 +240,23 @@ local diagnostics=config.Diagnostics==true""")
         cachedContact=bestContact()
         table.clear(classification)
         if profile then debug.profileend() end""")
-    source = replace(source, 'Version="5.1-v31-preserved-pc-light-contact"', 'Version="3.2-preserved-light-contact"')
+    source = replace(source, "local CONTACT_SCAN_INTERVAL=1/20\n", "local CONTACT_SCAN_INTERVAL=1/20\nlocal CONTACT_SCAN_INTERVAL_SLOW=1/10 -- halve expensive grid probes during sustained frame drops\n")
+    source = replace(source, "local OVERLAP_SCAN_INTERVAL=0.075\n", "local OVERLAP_SCAN_INTERVAL=0.075\nlocal OVERLAP_SCAN_INTERVAL_SLOW=0.14\n")
+    source = replace(source, "local lastHeartbeatAt=os.clock()\n", "local lastHeartbeatAt=os.clock()\nlocal slowFrameScore,slowScan=0,false\n")
+    source = replace(source, "if now-lastOverlapAt<OVERLAP_SCAN_INTERVAL then return best end", "if now-lastOverlapAt<(slowScan and OVERLAP_SCAN_INTERVAL_SLOW or OVERLAP_SCAN_INTERVAL) then return best end")
+    source = replace(source, "if now-lastScanAt>=CONTACT_SCAN_INTERVAL then", "if now-lastScanAt>=(slowScan and CONTACT_SCAN_INTERVAL_SLOW or CONTACT_SCAN_INTERVAL) then")
+    source = replace(source, "    local dot=forward.Magnitude>0 and forward:Dot(target) or 1\n", "    local dot=forward.Magnitude>0 and forward:Dot(target) or 1\n    if dot>0.999 then return end -- avoid redundant root CFrame writes when already aligned\n")
+    source = replace(source, "    local dt=math.clamp(dtFromHeartbeat or now-lastHeartbeatAt,1/240,0.05)\n    lastHeartbeatAt=now\n",
+                            "    local dt=math.clamp(dtFromHeartbeat or now-lastHeartbeatAt,1/240,0.05)\n    lastHeartbeatAt=now\n"
+                            "    -- Use hysteresis so occasional frame spikes do not constantly change scan cadence.\n"
+                            "    if dtFromHeartbeat and dtFromHeartbeat>1/34 then\n"
+                            "        slowFrameScore=math.min(4,slowFrameScore+1)\n"
+                            "    elseif dtFromHeartbeat and dtFromHeartbeat<1/42 then\n"
+                            "        slowFrameScore=math.max(0,slowFrameScore-1)\n"
+                            "    end\n"
+                            "    slowScan=slowFrameScore>=2\n")
+    source = replace(source, "-- Space sender; this module cannot fabricate an air hop or race its 200ms burst.", "-- Space sender; this module cannot fabricate an air hop or race jump input.")
+    source = replace(source, 'Version="3.2-preserved-light-contact"', 'Version="3.2.1-adaptive-light-contact"')
     return source
 
 

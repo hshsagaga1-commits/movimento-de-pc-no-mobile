@@ -32,12 +32,14 @@ A postura vem de flags explícitas no personagem ou Humanoid, do `ControlsGui/PC
 ## Desempenho e ciclo de vida
 
 - O cálculo dos setores roda em mudanças de toque ou postura e no vencimento da tolerância central. Um acorde já aplicado dispensa reprocessamento de teclas. A bolinha só recebe novas posições durante movimento ou enquanto a suavização converge.
-- O pulso Space de 200 ms continua com o mesmo par soltar/pressionar imediato e por Heartbeat durante a janela. Uma conexão atende todos os toques sucessivos dentro da janela. Não há coroutine por pulo.
+- **V3.2.1:** removido o pulso repetitivo de Space por 200 ms. Agora Space é pressionado uma vez ao tocar no botão e liberado quando o mesmo dedo sai, quando o gesto é cancelado, na perda de foco ou no Stop. Sem conexão Heartbeat extra, sem spam por quadro. O BHOP segurando depende de como o jogo interpreta Space mantido.
 - A interface é montada uma vez por sessão. Se um controle for removido, a V3.2 solta suas teclas imediatamente e agenda a recuperação do overlay, sem reinstalar câmera ou controlador. Conexões, hooks próprios, captura e tarefas de recuperação são encerrados no Stop.
 - O bootstrap espera PlayerGui e PlayerModule de forma limitada e pode ser cancelado. Mantém o bloqueio do controlador de teclado e devolve a identidade móvel ao HUD depois da descoberta. Os hooks temporários de capacidade são retirados nesse ponto. O status oculto não é reescrito a cada quadro.
-- O Assist leve mantém a orientação e o orçamento da V3.1, com intervalo mínimo de 50 ms por amostra e até 40 raios. Lê o bridge sem criar uma tabela por quadro e reaproveita a classificação de uma mesma peça dentro de cada amostra. A variante leve não escreve velocidade. O modo histórico de Assist ainda está disponível com `getgenv().PCMovementV32.SetAssistMode("original")`, e `"light"` restaura o padrão.
+- **V3.2.1:** o Assist leve conserva até 40 raios por amostra, mas reduz automaticamente a frequência de amostragem (20 para 10 Hz e sobreposição até ~7 Hz) durante quedas sustentadas no tempo de quadro. Quando o FPS recupera, a cadência padrão retorna. Escrever CFrame sem mudança visual relevante também é evitado. Lê o bridge sem criar uma tabela por quadro e reaproveita a classificação de uma mesma peça dentro de cada amostra. A variante leve não escreve velocidade. O modo histórico de Assist ainda está disponível com `getgenv().PCMovementV32.SetAssistMode("original")`, e `"light"` restaura o padrão.
 
 ## Resultados verificáveis
+
+**Atenção:** os números abaixo são do benchmark histórico da V3.2. A V3.2.1 ainda precisa ser recompilada/testada no Luau e validada fisicamente no iPhone; não representam ganho de FPS comprovado da V3.2.1.
 
 ```sh
 LUAU_BIN=/caminho/luau LUAU_COMPILE=/caminho/luau-compile python3 tools/check_v32.py --bench
@@ -65,3 +67,7 @@ Para a captura de diagnóstico, defina `getgenv().PCMovementV32Config={Profile=t
 O macro externo fornecido está ofuscado. A cópia analisada foi lida estaticamente e não é incluída no pacote. O bridge de toque emite W/A/S/D e Space. LeftControl só é usado no fallback de seleção de teclado que já existia na V3.1. As comparações disponíveis verificam que nenhum clique, atalho de emote ou chamada ao macro foi introduzido. O funcionamento do macro real, a cobertura de animações sem rótulo, a velocidade lateral, a física, os shaders e a queda de 20 FPS ainda precisam de execução no aparelho.
 
 [Desempenho no Roblox](https://create.roblox.com/docs/performance-optimization/improve) · [RunService](https://create.roblox.com/docs/reference/engine/classes/RunService) · [UserInputService](https://create.roblox.com/docs/reference/engine/classes/UserInputService) · [Scheduler](https://create.roblox.com/docs/performance-optimization/microprofiler/task-scheduler) · [Teste no aparelho](https://create.roblox.com/docs/performance-optimization/test-on-hardware)
+
+## V3.2.1 — validação pendente
+
+Nova branch de teste: `feature/pc-movement-v321-jump-fps-20261114`. V3.1 preservada e V3.2 de origem intactas. Compare salto por toque e por pressão longa, BHOP, controle simultâneo de câmera, queda de FPS após 4+ minutos e Assist em grades. O diagnóstico de FPS real continua pendente; shaders, temperatura e a versão do Roblox podem ser fatores independentes do joystick.

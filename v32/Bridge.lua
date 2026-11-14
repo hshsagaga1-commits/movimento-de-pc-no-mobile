@@ -11,7 +11,6 @@ return function(watchPosture)
     local GUI_NAME="PCKeyboardTouchBridgeV52Overlay"
     local PRESS_THRESHOLD=0.30
     local SWEEP_STAGE_SECONDS=0.016
-    local JUMP_BURST_SECONDS=0.200
     local KEY_CODES={Enum.KeyCode.W,Enum.KeyCode.A,Enum.KeyCode.S,Enum.KeyCode.D}
     local KEY_BITS={1,2,4,8}
     local CHORD_BITS={["-"]=0,W=1,A=2,S=4,D=8,["W+A"]=3,["W+D"]=9,
@@ -111,7 +110,7 @@ return function(watchPosture)
     local target,applied,pressed="-","-",0
     local retryAt
     local sweepTarget,sweepAt
-    local jumpConnection,jumpDeadline
+    local jumpTouch
     local spaceDown=false
     local knobTarget,knobOffset=Vector2.zero,Vector2.zero
     local movementCaptures,movementUpdates,keyEvents,jumpRequests,jumpPulses=0,0,0,0,0
@@ -260,31 +259,22 @@ return function(watchPosture)
         end
     end
 
+    -- Space is held for the actual finger contact, never spammed for 200ms.
+    -- This avoids a Heartbeat connection and repeated virtual key injections.
     local function stopJump()
-        jumpDeadline=nil
-        if jumpConnection then
-            jumpConnection:Disconnect()
-            jumpConnection=nil
-        end
+        jumpTouch=nil
         if spaceDown and sendKey(Enum.KeyCode.Space,false) then spaceDown=false end
     end
 
-    local function pulseJump()
-        -- Keep the original up/down sequence, including the initial pulse.
-        if sendKey(Enum.KeyCode.Space,false) then spaceDown=false end
-        if sendKey(Enum.KeyCode.Space,true) then spaceDown=true end
-        jumpPulses+=1
-    end
-
-    local function requestJump()
+    local function requestJump(input)
+        if jumpTouch then return end
+        jumpTouch=input
         jumpRequests+=1
-        jumpDeadline=os.clock()+JUMP_BURST_SECONDS
-        pulseJump()
-        if not jumpConnection then
-            jumpConnection=RunService.Heartbeat:Connect(function()
-                if not jumpDeadline then return end
-                if os.clock()>=jumpDeadline then stopJump() else pulseJump() end
-            end)
+        -- A fresh tap always begins with a clean Space transition.
+        if spaceDown and sendKey(Enum.KeyCode.Space,false) then spaceDown=false end
+        if not spaceDown and sendKey(Enum.KeyCode.Space,true) then
+            spaceDown=true
+            jumpPulses+=1
         end
     end
 
@@ -330,24 +320,30 @@ return function(watchPosture)
             movementCaptures+=1
             updateMovement(position,true)
         elseif containsPoint(jumpButton,position) then
-            requestJump()
+            requestJump(input)
         end
     end)
 
     connections[#connections+1]=inputService.InputChanged:Connect(function(input)
-        if enabled and input==touch then
+        if not enabled then return end
+        if input==touch then
             if input.UserInputState==Enum.UserInputState.Cancel then
                 releaseMovement(os.clock())
             else
                 updateMovement(input.Position,false)
             end
+        elseif input==jumpTouch and input.UserInputState==Enum.UserInputState.Cancel then
+            stopJump()
         end
     end)
 
     connections[#connections+1]=inputService.InputEnded:Connect(function(input)
-        if enabled and input==touch then
+        if not enabled then return end
+        if input==touch then
             if input.UserInputState~=Enum.UserInputState.Cancel then updateMovement(input.Position,false) end
             releaseMovement(os.clock())
+        elseif input==jumpTouch then
+            stopJump()
         end
     end)
     connections[#connections+1]=inputService.WindowFocusReleased:Connect(resetInput)
@@ -370,7 +366,7 @@ return function(watchPosture)
 
     RunService:BindToRenderStep(BIND_NAME,Enum.RenderPriority.Input.Value+8,function(dt)
         if not enabled then return end
-        if sweepAt or centerExpires or retryAt or (spaceDown and not jumpConnection) then
+        if sweepAt or centerExpires or retryAt then
             local now=os.clock()
             if centerExpires and now>centerExpires then refreshKeys(now,false) end
             if sweepAt and now>=sweepAt then
@@ -379,7 +375,6 @@ return function(watchPosture)
                 applyChord(nextChord,now)
             end
             if retryAt and now>=retryAt then applyChord(applied,now) end
-            if spaceDown and not jumpConnection then stopJump() end
         end
         if touch and knobOffset~=knobTarget then
             local step=math.clamp(dt or 1/60,0,0.05)
@@ -394,8 +389,8 @@ return function(watchPosture)
         acceptingInput=false
         resetInput()
     end
-    api.Version="3.2-adaptive"
-    api.OwnsTouch=function(input) return touch~=nil and touch==input end
+    api.Version="3.2.1-jump-fps"
+    api.OwnsTouch=function(input) return (touch~=nil and touch==input) or (jumpTouch~=nil and jumpTouch==input) end
     api.ReadMovement=function()
         return BIT_CHORD[pressed],x,z,sweepTarget~=nil,jumpPulses
     end
@@ -403,7 +398,7 @@ return function(watchPosture)
         return {chord=BIT_CHORD[pressed],analogX=x,analogZ=z,sweepActive=sweepTarget~=nil,
             movementTouchActive=touch~=nil,movementTouch=touch,movementCaptures=movementCaptures,
             movementUpdates=movementUpdates,keyEvents=keyEvents,keyErrors=keyErrors,jumpRequests=jumpRequests,
-            jumpPulses=jumpPulses,bufferedJumpCount=0,jumpActive=jumpConnection~=nil,
+            jumpPulses=jumpPulses,bufferedJumpCount=0,jumpActive=spaceDown,
             directPlayerMove=false,visibleJoystick=true,movementHalf=0.80,
             mode=low and "crouch-or-emote" or "standing",postureSource=postureSource,
             sectorEvaluations=evaluations,knobWrites=knobWrites}

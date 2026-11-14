@@ -7,7 +7,7 @@ return function(modules)
     end
 
     local players=game:GetService("Players")
-    local api={Version="3.2-adaptive"}
+    local api={Version="3.2.1-jump-fps"}
     local state="starting"
     local phaseBusy=true
     local stopRequested=false

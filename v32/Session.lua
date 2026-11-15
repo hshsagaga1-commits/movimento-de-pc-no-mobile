@@ -4,7 +4,7 @@ return function(modules)
     -- Do not silently reuse a running Assist build: that invalidates this A/B test.
     if env.PCMovementV32 then
         local existing=env.PCMovementV32
-        if type(existing)=="table" and existing.Version=="3.2.2-grid-scroll-no-assist" then
+        if type(existing)=="table" and existing.Version=="3.2.2-no-assist-facing-fixed" then
             return existing
         end
         error("PC Movement is already running. Rejoin before the no-Assist test.",0)
@@ -37,6 +37,7 @@ return function(modules)
     local BRIDGE="__PCKeyboardTouchBridgeV52Cleanup"
     local VISUAL="__PCRobloxNativeVisualV5Cleanup"
     local CURSOR="__PCCursorVisualV31Cleanup"
+    local FACING="__PCMovementIndependentFacingV322Cleanup"
     local ASSIST="__LegacyGridContactAssistV1Cleanup"
     local OVERLAY="PCKeyboardTouchBridgeV52Overlay"
 
@@ -56,7 +57,7 @@ return function(modules)
     local function teardown()
         if repairConnection then repairConnection:Disconnect() repairConnection=nil end
         if repairJob then task.cancel(repairJob) repairJob=nil end
-        for _,slot in ipairs({CURSOR,ASSIST,VISUAL,BRIDGE,CAMERA,WAKE,LOCK}) do disconnectSlot(slot) end
+        for _,slot in ipairs({CURSOR,FACING,ASSIST,VISUAL,BRIDGE,CAMERA,WAKE,LOCK}) do disconnectSlot(slot) end
         overlay,joystick,knob,jump=nil,nil,nil,nil
         freeLease()
         if env.PCMovementV32==api then env.PCMovementV32=nil end
@@ -109,11 +110,15 @@ return function(modules)
             assistMode=assistMode,cursorError=cursorError,bridge=callComponent(BRIDGE,"PCKeyboardTouchBridgeV52","GetState"),
             assist=callComponent(ASSIST,"LegacyGridContactAssistV1","GetState"),pcLock=callComponent(LOCK,"PCModeLock","GetState"),
             keyboardWake=callComponent(WAKE,"PCKeyboardControllerWakeV5","GetState"),
-            cameraGate=callComponent(CAMERA,"PCCameraTouchRightHalfGateV5","GetState")}
+            cameraGate=callComponent(CAMERA,"PCCameraTouchRightHalfGateV5","GetState"),
+            facing=callComponent(FACING,"PCMovementIndependentFacingV322","GetState")}
     end
 
     function api.SetCursorHidden(value)
         return callComponent(CURSOR,"PCCursorVisualV31","SetEnabled",value)
+    end
+    function api.SetIndependentFacing(value)
+        return callComponent(FACING,"PCMovementIndependentFacingV322","SetEnabled",value)
     end
     function api.SetDiagnostics(value)
         return false,"Grid Assist is not installed in this test build"
@@ -186,6 +191,7 @@ return function(modules)
         install(CAMERA,modules.camera)
         install(WAKE,modules.wake)
         installOverlay()
+        install(FACING,modules.facing)
         -- A/B control: intentionally do not install light or original Grid Assist.
         -- No rail raycasts, overlap scans, artificial velocity writes or facing edits.
         assistMode="disabled"

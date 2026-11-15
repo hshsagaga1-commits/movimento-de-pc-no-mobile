@@ -10,7 +10,7 @@ return function(watchPosture)
     local BIND_NAME="__PCKeyboardTouchBridgeV52"
     local GUI_NAME="PCKeyboardTouchBridgeV52Overlay"
     local PRESS_THRESHOLD=0.30
-    -- No 16 ms W+A+D sweep: opposing A/D keys cancel lateral input on rapid reversals.
+    local SWEEP_STAGE_SECONDS=0.016
     local KEY_CODES={Enum.KeyCode.W,Enum.KeyCode.A,Enum.KeyCode.S,Enum.KeyCode.D}
     local KEY_BITS={1,2,4,8}
     local CHORD_BITS={["-"]=0,W=1,A=2,S=4,D=8,["W+A"]=3,["W+D"]=9,
@@ -135,21 +135,7 @@ return function(watchPosture)
         applied=chord
         local wanted=CHORD_BITS[chord]
         if pressed==wanted then retryAt=nil return end
-        -- On a lateral reversal release the opposite key FIRST.
-        -- Avoid even a brief A+D overlap that cancels rail strafe momentum.
-        local oppositeIndex=nil
-        if bit32.btest(pressed,2) and bit32.btest(wanted,8) then
-            oppositeIndex=2 -- release A before engaging D
-        elseif bit32.btest(pressed,8) and bit32.btest(wanted,2) then
-            oppositeIndex=4 -- release D before engaging A
-        end
-        if oppositeIndex then
-            local oldBit=KEY_BITS[oppositeIndex]
-            if sendKey(KEY_CODES[oppositeIndex],false) then
-                pressed=bit32.band(pressed,bit32.bnot(oldBit))
-            end
-        end
-        -- Preserve existing W/S holds while adding the other keys.
+        -- V3.1 presses additions before removing old keys, including on pure A/D swaps.
         for i,code in ipairs(KEY_CODES) do
             local bit=KEY_BITS[i]
             if bit32.btest(wanted,bit) and not bit32.btest(pressed,bit) and sendKey(code,true) then
@@ -241,10 +227,18 @@ return function(watchPosture)
         local mapped=(low and LOW or STANDING)[sector] or sector
         if mapped==target and not modeChanged then return end
 
-        -- Instant, continuous A/D changes. No neutral or opposite-key sweep.
+        local previousSide=SIDE[target]
+        local nextSide=SIDE[mapped]
+        local turning=not modeChanged and not sweepTarget and z < -0.24
+            and previousSide and nextSide and previousSide~=nextSide
         target=mapped
         sweepTarget,sweepAt=nil,nil
-        applyChord(mapped,now)
+        if turning then
+            sweepTarget,sweepAt=mapped,now+SWEEP_STAGE_SECONDS
+            applyChord(low and "A+D" or "W+A+D",now)
+        else
+            applyChord(mapped,now)
+        end
     end
 
     local config=env.PCMovementV32Config
@@ -479,7 +473,7 @@ return function(watchPosture)
         acceptingInput=false
         resetInput()
     end
-    api.Version="3.2.3-input-only-ad-reverse-hop"
+    api.Version="3.2.3-original-16ms-sweep-reverse-hop"
     api.SetJumpMacro=function(value)
         jumpMacroEnabled=value==true
         if jumpTouch then jumpNextAt=os.clock()+JUMP_FAST_INTERVAL end
@@ -492,7 +486,7 @@ return function(watchPosture)
     api.GetState=function()
         return {chord=BIT_CHORD[pressed],analogX=x,analogZ=z,sweepActive=false,
             railInput="input-only-side-retention-no-physics",reverseBhopActive=jumpTouch~=nil and z>0.22,
-            reverseStrafeSide=reverseStrafeSide,instantSideSwitch=true,
+            reverseStrafeSide=reverseStrafeSide,originalSideSweep16ms=true,
             movementTouchActive=touch~=nil,movementTouch=touch,movementCaptures=movementCaptures,
             movementUpdates=movementUpdates,keyEvents=keyEvents,keyErrors=keyErrors,jumpRequests=jumpRequests,
             jumpPulses=jumpPulses,bufferedJumpCount=0,jumpActive=spaceDown,

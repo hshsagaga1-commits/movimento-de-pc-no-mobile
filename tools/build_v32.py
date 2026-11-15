@@ -274,6 +274,7 @@ def render():
         "assist": assist_source(),
         "originalAssist": original_assist_source(),
         "cursor": cursor_source(),
+        "facing": local_source("Facing"),
     }
     assert snapshot(BRIDGE, "PCKeyboardTouchBridgeV3.lua") == snapshot(BASE, "PCKeyboardTouchBridgeV3.lua")
     output = [

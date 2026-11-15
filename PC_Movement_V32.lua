@@ -1611,7 +1611,7 @@ return function(watchPosture)
     local BIND_NAME="__PCKeyboardTouchBridgeV52"
     local GUI_NAME="PCKeyboardTouchBridgeV52Overlay"
     local PRESS_THRESHOLD=0.30
-    local SWEEP_STAGE_SECONDS=0.016
+    -- No 16 ms W+A+D sweep: opposing A/D keys cancel lateral input on rapid reversals.
     local KEY_CODES={Enum.KeyCode.W,Enum.KeyCode.A,Enum.KeyCode.S,Enum.KeyCode.D}
     local KEY_BITS={1,2,4,8}
     local CHORD_BITS={["-"]=0,W=1,A=2,S=4,D=8,["W+A"]=3,["W+D"]=9,
@@ -1708,6 +1708,7 @@ return function(watchPosture)
     local x,z=0,0
     local low,postureSource=false,"unknown"
     local lateralLatch,centerExpires
+    local reverseStrafeSide
     local target,applied,pressed="-","-",0
     local retryAt
     local sweepTarget,sweepAt
@@ -1735,7 +1736,21 @@ return function(watchPosture)
         applied=chord
         local wanted=CHORD_BITS[chord]
         if pressed==wanted then retryAt=nil return end
-        -- V3.1 presses additions before removing old keys, including on pure A/D swaps.
+        -- On a lateral reversal release the opposite key FIRST.
+        -- Avoid even a brief A+D overlap that cancels rail strafe momentum.
+        local oppositeIndex=nil
+        if bit32.btest(pressed,2) and bit32.btest(wanted,8) then
+            oppositeIndex=2 -- release A before engaging D
+        elseif bit32.btest(pressed,8) and bit32.btest(wanted,2) then
+            oppositeIndex=4 -- release D before engaging A
+        end
+        if oppositeIndex then
+            local oldBit=KEY_BITS[oppositeIndex]
+            if sendKey(KEY_CODES[oppositeIndex],false) then
+                pressed=bit32.band(pressed,bit32.bnot(oldBit))
+            end
+        end
+        -- Preserve existing W/S holds while adding the other keys.
         for i,code in ipairs(KEY_CODES) do
             local bit=KEY_BITS[i]
             if bit32.btest(wanted,bit) and not bit32.btest(pressed,bit) and sendKey(code,true) then
@@ -1755,7 +1770,11 @@ return function(watchPosture)
         local ax,az=math.abs(x),math.abs(z)
         local magnitudeSquared=x*x+z*z
         local horizontal=x<0 and "A" or "D"
-        local inSideCorridor=az<=0.24
+        local inSideCorridor=az<=0.33
+        -- A backward bunnyhop needs S+A/S+D, not a latched pure-side key.
+        if jumpTouch and z>0.22 then
+            lateralLatch,centerExpires=nil,nil
+        end
 
         if lateralLatch then
             if not inSideCorridor then
@@ -1773,7 +1792,10 @@ return function(watchPosture)
             end
         end
 
-        if magnitudeSquared<PRESS_THRESHOLD^2 then return "-" end
+        if magnitudeSquared<PRESS_THRESHOLD^2 then
+            reverseStrafeSide=nil
+            return "-"
+        end
         if az<=0.0001 then
             lateralLatch=horizontal
             return horizontal
@@ -1781,6 +1803,7 @@ return function(watchPosture)
 
         local ratio=ax/az
         if z<0 then
+            reverseStrafeSide=nil
             if ax<=0.0001 then return "W" end
             if ratio<=0.34 then return "W+A+D" end
             if magnitudeSquared>=0.55^2 and ratio<=2.20 then
@@ -1788,6 +1811,24 @@ return function(watchPosture)
             end
             if ratio<=1 then return "W" end
         else
+            -- Reverse-bhop strafe input: keep S + the chosen lateral key
+            -- through minor analog jitter while jump is held.
+            if jumpTouch and z>0.22 then
+                if reverseStrafeSide and
+                    ((reverseStrafeSide=="A" and x>0.12)
+                    or (reverseStrafeSide=="D" and x< -0.12)
+                    or ratio<0.27) then
+                    reverseStrafeSide=nil
+                end
+                if not reverseStrafeSide and ax>=0.12 and ratio>=0.42 then
+                    reverseStrafeSide=horizontal
+                end
+                if reverseStrafeSide and ratio<=3.20 then
+                    return reverseStrafeSide=="A" and "A+S" or "S+D"
+                end
+            else
+                reverseStrafeSide=nil
+            end
             if ratio<0.65 then return "S" end
             if ratio<=1.54 then return horizontal=="A" and "A+S" or "S+D" end
         end
@@ -1801,18 +1842,10 @@ return function(watchPosture)
         local mapped=(low and LOW or STANDING)[sector] or sector
         if mapped==target and not modeChanged then return end
 
-        local previousSide=SIDE[target]
-        local nextSide=SIDE[mapped]
-        local turning=not modeChanged and not sweepTarget and z < -0.24
-            and previousSide and nextSide and previousSide~=nextSide
+        -- Instant, continuous A/D changes. No neutral or opposite-key sweep.
         target=mapped
         sweepTarget,sweepAt=nil,nil
-        if turning then
-            sweepTarget,sweepAt=mapped,now+SWEEP_STAGE_SECONDS
-            applyChord(low and "A+D" or "W+A+D",now)
-        else
-            applyChord(mapped,now)
-        end
+        applyChord(mapped,now)
     end
 
     local config=env.PCMovementV32Config
@@ -1858,6 +1891,7 @@ return function(watchPosture)
         touch,center=nil,nil
         x,z=0,0
         lateralLatch,centerExpires=nil,nil
+        reverseStrafeSide=nil
         sweepTarget,sweepAt=nil,nil
         target="-"
         applyChord("-",now)
@@ -1891,6 +1925,8 @@ return function(watchPosture)
         jumpTouch=nil
         jumpNextAt=0
         jumpSlowScore=0
+        reverseStrafeSide=nil
+        if touch then refreshKeys(os.clock(),false) end
         if spaceDown and sendKey(Enum.KeyCode.Space,false) then spaceDown=false end
     end
 
@@ -1898,6 +1934,7 @@ return function(watchPosture)
         if jumpTouch then return end
         jumpTouch=input
         jumpRequests+=1
+        if touch then refreshKeys(os.clock(),false) end
         pulseJump() -- immediate first press; then repeat only while finger is held
         jumpNextAt=os.clock()+JUMP_FAST_INTERVAL
     end
@@ -2002,8 +2039,20 @@ return function(watchPosture)
             local now=os.clock()
             if now>=jumpNextAt then
                 if step<=1/26 then
-                    jumpRepeatAttempts+=1
-                    pulseJump()
+                    if touch and z>0.22 then
+                        -- Reverse hop uses separate frames for Space-up and Space-down.
+                        -- The game gets a real release interval instead of two events
+                        -- compressed into one frame. At 60fps this means up to 30 Hz.
+                        if spaceDown then
+                            if sendKey(Enum.KeyCode.Space,false) then spaceDown=false end
+                        else
+                            jumpRepeatAttempts+=1
+                            pulseJump()
+                        end
+                    else
+                        jumpRepeatAttempts+=1
+                        pulseJump()
+                    end
                 end
                 jumpNextAt=now+interval
             end
@@ -2031,7 +2080,7 @@ return function(watchPosture)
         acceptingInput=false
         resetInput()
     end
-    api.Version="3.2.2-grid-scroll-experimental"
+    api.Version="3.2.3-input-only-ad-reverse-hop"
     api.SetJumpMacro=function(value)
         jumpMacroEnabled=value==true
         if jumpTouch then jumpNextAt=os.clock()+JUMP_FAST_INTERVAL end
@@ -2042,7 +2091,9 @@ return function(watchPosture)
         return BIT_CHORD[pressed],x,z,sweepTarget~=nil,jumpPulses
     end
     api.GetState=function()
-        return {chord=BIT_CHORD[pressed],analogX=x,analogZ=z,sweepActive=sweepTarget~=nil,
+        return {chord=BIT_CHORD[pressed],analogX=x,analogZ=z,sweepActive=false,
+            railInput="input-only-side-retention-no-physics",reverseBhopActive=jumpTouch~=nil and z>0.22,
+            reverseStrafeSide=reverseStrafeSide,instantSideSwitch=true,
             movementTouchActive=touch~=nil,movementTouch=touch,movementCaptures=movementCaptures,
             movementUpdates=movementUpdates,keyEvents=keyEvents,keyErrors=keyErrors,jumpRequests=jumpRequests,
             jumpPulses=jumpPulses,bufferedJumpCount=0,jumpActive=spaceDown,
@@ -3272,7 +3323,7 @@ return function(modules)
     -- Do not silently reuse a running Assist build: that invalidates this A/B test.
     if env.PCMovementV32 then
         local existing=env.PCMovementV32
-        if type(existing)=="table" and existing.Version=="3.2.2-grid-scroll-no-assist" then
+        if type(existing)=="table" and existing.Version=="3.2.3-no-assist-normal-camera-ad-reverse-bhop" then
             return existing
         end
         error("PC Movement is already running. Rejoin before the no-Assist test.",0)

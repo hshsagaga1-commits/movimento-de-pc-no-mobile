@@ -438,7 +438,7 @@ return function(watchPosture)
     end
     api.OwnsTouch=function(input) return (touch~=nil and touch==input) or (jumpTouch~=nil and jumpTouch==input) end
     api.ReadMovement=function()
-        return BIT_CHORD[pressed],x,z,sweepTarget~=nil,jumpPulses
+        return BIT_CHORD[pressed],x,z,sweepTarget~=nil,jumpPulses,touch~=nil
     end
     api.GetState=function()
         return {chord=BIT_CHORD[pressed],analogX=x,analogZ=z,sweepActive=sweepTarget~=nil,

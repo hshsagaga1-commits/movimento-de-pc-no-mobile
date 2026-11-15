@@ -1,6 +1,5 @@
 -- Independent facing ONLY. Zero grid queries, velocity writes or camera changes.
 -- Snapshots camera heading ONCE at joystick touch start and keeps it fixed.
-return function()
     local Players=game:GetService("Players")
     local RunService=game:GetService("RunService")
     local Workspace=game:GetService("Workspace")
@@ -141,4 +140,3 @@ return function()
         end
     end
     env[CLEANUP]=cleanup
-end

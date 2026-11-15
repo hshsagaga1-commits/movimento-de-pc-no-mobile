@@ -4,7 +4,7 @@ return function(modules)
     -- Do not silently reuse a running Assist build: that invalidates this A/B test.
     if env.PCMovementV32 then
         local existing=env.PCMovementV32
-        if type(existing)=="table" and existing.Version=="3.2.2-grid-scroll-no-assist" then
+        if type(existing)=="table" and existing.Version=="3.2.3-no-assist-normal-camera-ad-reverse-bhop" then
             return existing
         end
         error("PC Movement is already running. Rejoin before the no-Assist test.",0)

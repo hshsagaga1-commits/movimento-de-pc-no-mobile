@@ -1624,7 +1624,7 @@ return function(watchPosture)
         end
         BIT_CHORD[bits]=#names==0 and "-" or table.concat(names,"+")
     end
-    local STANDING={A="W+A",D="W+D",["W+A+D"]="W"}
+    local STANDING={A="W+A",D="W+D",W="W+A+D",["W+A+D"]="W+A+D"}
     local LOW={["W+A"]="A",["W+D"]="D"}
     local SIDE={A=-1,["W+A"]=-1,D=1,["W+D"]=1}
 
@@ -1713,6 +1713,14 @@ return function(watchPosture)
     local sweepTarget,sweepAt
     local jumpTouch
     local spaceDown=false
+    -- One Space Up/Down pair per frame maximum; never flood the input queue.
+    local jumpMacroEnabled=true
+    local jumpNextAt=0
+    local jumpSlowScore=0
+    local jumpRepeatAttempts=0
+    local jumpRepeatFailures=0
+    local JUMP_FAST_INTERVAL=1/60
+    local JUMP_SLOW_INTERVAL=1/30
     local knobTarget,knobOffset=Vector2.zero,Vector2.zero
     local movementCaptures,movementUpdates,keyEvents,jumpRequests,jumpPulses=0,0,0,0,0
     local evaluations,knobWrites,keyErrors=0,0,0
@@ -1860,10 +1868,29 @@ return function(watchPosture)
         end
     end
 
-    -- Space is held for the actual finger contact, never spammed for 200ms.
-    -- This avoids a Heartbeat connection and repeated virtual key injections.
+    -- Scroll-like repeated jump, without extra Heartbeat or task loops.
+    -- Event delivery/actual jumps depend on the game and executor.
+    local function pulseJump()
+        if spaceDown then
+            if not sendKey(Enum.KeyCode.Space,false) then
+                jumpRepeatFailures+=1
+                return false
+            end
+            spaceDown=false
+        end
+        if sendKey(Enum.KeyCode.Space,true) then
+            spaceDown=true
+            jumpPulses+=1
+            return true
+        end
+        jumpRepeatFailures+=1
+        return false
+    end
+
     local function stopJump()
         jumpTouch=nil
+        jumpNextAt=0
+        jumpSlowScore=0
         if spaceDown and sendKey(Enum.KeyCode.Space,false) then spaceDown=false end
     end
 
@@ -1871,12 +1898,8 @@ return function(watchPosture)
         if jumpTouch then return end
         jumpTouch=input
         jumpRequests+=1
-        -- A fresh tap always begins with a clean Space transition.
-        if spaceDown and sendKey(Enum.KeyCode.Space,false) then spaceDown=false end
-        if not spaceDown and sendKey(Enum.KeyCode.Space,true) then
-            spaceDown=true
-            jumpPulses+=1
-        end
+        pulseJump() -- immediate first press; then repeat only while finger is held
+        jumpNextAt=os.clock()+JUMP_FAST_INTERVAL
     end
 
     local function resetInput()
@@ -1967,6 +1990,24 @@ return function(watchPosture)
 
     RunService:BindToRenderStep(BIND_NAME,Enum.RenderPriority.Input.Value+8,function(dt)
         if not enabled then return end
+        -- Adaptive 60/30 Hz cap; no catch-up burst after a slow frame.
+        if jumpTouch and jumpMacroEnabled then
+            local step=dt or 1/60
+            if step>1/40 then
+                jumpSlowScore=math.min(4,jumpSlowScore+1)
+            elseif step<1/52 then
+                jumpSlowScore=math.max(0,jumpSlowScore-1)
+            end
+            local interval=jumpSlowScore>=2 and JUMP_SLOW_INTERVAL or JUMP_FAST_INTERVAL
+            local now=os.clock()
+            if now>=jumpNextAt then
+                if step<=1/26 then
+                    jumpRepeatAttempts+=1
+                    pulseJump()
+                end
+                jumpNextAt=now+interval
+            end
+        end
         if sweepAt or centerExpires or retryAt then
             local now=os.clock()
             if centerExpires and now>centerExpires then refreshKeys(now,false) end
@@ -1990,7 +2031,12 @@ return function(watchPosture)
         acceptingInput=false
         resetInput()
     end
-    api.Version="3.2.1-jump-fps"
+    api.Version="3.2.2-grid-scroll-experimental"
+    api.SetJumpMacro=function(value)
+        jumpMacroEnabled=value==true
+        if jumpTouch then jumpNextAt=os.clock()+JUMP_FAST_INTERVAL end
+        return jumpMacroEnabled
+    end
     api.OwnsTouch=function(input) return (touch~=nil and touch==input) or (jumpTouch~=nil and jumpTouch==input) end
     api.ReadMovement=function()
         return BIT_CHORD[pressed],x,z,sweepTarget~=nil,jumpPulses
@@ -2000,6 +2046,8 @@ return function(watchPosture)
             movementTouchActive=touch~=nil,movementTouch=touch,movementCaptures=movementCaptures,
             movementUpdates=movementUpdates,keyEvents=keyEvents,keyErrors=keyErrors,jumpRequests=jumpRequests,
             jumpPulses=jumpPulses,bufferedJumpCount=0,jumpActive=spaceDown,
+            jumpMacroEnabled=jumpMacroEnabled,jumpRepeatAttempts=jumpRepeatAttempts,
+            jumpRepeatFailures=jumpRepeatFailures,jumpMacroRateCap=jumpSlowScore>=2 and 30 or 60,
             directPlayerMove=false,visibleJoystick=true,movementHalf=0.80,
             mode=low and "crouch-or-emote" or "standing",postureSource=postureSource,
             sectorEvaluations=evaluations,knobWrites=knobWrites}
@@ -3227,7 +3275,7 @@ return function(modules)
     end
 
     local players=game:GetService("Players")
-    local api={Version="3.2.1-jump-fps"}
+    local api={Version="3.2.2-grid-scroll-experimental"}
     local state="starting"
     local phaseBusy=true
     local stopRequested=false

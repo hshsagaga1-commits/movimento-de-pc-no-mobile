@@ -1,13 +1,20 @@
 -- The packer passes the preserved components as local functions. No module fetches.
 return function(modules)
     local env=getgenv()
-    if env.PCMovementV32 then return env.PCMovementV32 end
+    -- Do not silently reuse a running Assist build: that invalidates this A/B test.
+    if env.PCMovementV32 then
+        local existing=env.PCMovementV32
+        if type(existing)=="table" and existing.Version=="3.2.2-grid-scroll-no-assist" then
+            return existing
+        end
+        error("PC Movement is already running. Rejoin before the no-Assist test.",0)
+    end
     if env.__PCMovementV31PreservedInstall then
         return nil,"A instalação anterior de PC Movement ainda está em andamento."
     end
 
     local players=game:GetService("Players")
-    local api={Version="3.2.2-grid-scroll-experimental"}
+    local api={Version="3.2.2-grid-scroll-no-assist"}
     local state="starting"
     local phaseBusy=true
     local stopRequested=false
@@ -15,7 +22,7 @@ return function(modules)
     local stopSlots={}
     local playerGui,overlay,joystick,knob,jump,repairJob,repairConnection
     local repairs,repairFailures=0,0
-    local assistMode="starting"
+    local assistMode="disabled"
     local cursorError
     local LEGACY_OWNERS={"PCMovementAssistV31Preserved","PCMovementAssistV31","PCMovementAssistV3",
         "PCMovementAssistV2","PCMovementRebuild"}
@@ -89,12 +96,6 @@ return function(modules)
         jump=assert(overlay:FindFirstChild("PCJump"))
     end
 
-    local function installAssist(target)
-        disconnectSlot(ASSIST)
-        install(ASSIST,target=="original" and modules.originalAssist or modules.assist)
-        assistMode=target
-    end
-
     local function callComponent(slot,name,method,...)
         if not stopSlots[slot] or env[slot]~=stopSlots[slot] then return nil end
         local object=env[name]
@@ -115,31 +116,14 @@ return function(modules)
         return callComponent(CURSOR,"PCCursorVisualV31","SetEnabled",value)
     end
     function api.SetDiagnostics(value)
-        return callComponent(ASSIST,"LegacyGridContactAssistV1","SetDiagnostics",value)
+        return false,"Grid Assist is not installed in this test build"
     end
     function api.ExportDiagnostics(filename)
-        return callComponent(ASSIST,"LegacyGridContactAssistV1","ExportDiagnostics",filename or "PCMovement_V32_Log.json")
+        return false,"Grid Assist is not installed in this test build"
     end
     function api.SetAssistMode(target)
-        if state~="running" or phaseBusy or game.GameId~=3647333358 then return false,"assist unavailable" end
-        if target~="light" and target~="original" then return false,"use light or original" end
-        if target==assistMode then return true end
-        phaseBusy=true
-        env.__PCMovementV31PreservedInstall=lease
-        local previous=assistMode
-        local ok,message=pcall(installAssist,target)
-        if not ok and not stopRequested then
-            local restored,reason=pcall(installAssist,previous)
-            if not restored then
-                disconnectSlot(ASSIST)
-                assistMode="failed"
-                warn("[PC Movement V3.2] Assist rollback: "..tostring(reason))
-            end
-        end
-        phaseBusy=false
-        freeLease()
-        if stopRequested then teardown() end
-        return ok,message
+        -- Do not permit Assist to be re-enabled in this controlled comparison.
+        return false,"Grid Assist intentionally disabled for A/B test"
     end
 
     local function scheduleRepair(delay)
@@ -202,11 +186,9 @@ return function(modules)
         install(CAMERA,modules.camera)
         install(WAKE,modules.wake)
         installOverlay()
-        if game.GameId==3647333358 then
-            installAssist("light")
-        else
-            assistMode="not-applicable"
-        end
+        -- A/B control: intentionally do not install light or original Grid Assist.
+        -- No rail raycasts, overlap scans, artificial velocity writes or facing edits.
+        assistMode="disabled"
         local cursorOK,reason=pcall(install,CURSOR,modules.cursor)
         if not cursorOK then
             checkActive()

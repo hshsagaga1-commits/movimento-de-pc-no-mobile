@@ -122,6 +122,10 @@ return function(watchPosture)
     local JUMP_FAST_INTERVAL=1/60
     local JUMP_SLOW_INTERVAL=1/30
     local knobTarget,knobOffset=Vector2.zero,Vector2.zero
+    local knobSize=joystick.AbsoluteSize
+    local knobReach=math.max(1,math.min(knobSize.X,knobSize.Y)/2)
+    local lastKnobX,lastKnobY
+    local visualDebt,visualSlowScore,knobSkipped=0,0,0
     local movementCaptures,movementUpdates,keyEvents,jumpRequests,jumpPulses=0,0,0,0,0
     local evaluations,knobWrites,keyErrors=0,0,0
 
@@ -252,14 +256,16 @@ return function(watchPosture)
     end
 
     local function writeKnob()
-        local size=joystick.AbsoluteSize
-        knob.Position=UDim2.fromOffset(size.X/2+knobOffset.X,size.Y/2+knobOffset.Y)
+        local px=math.floor(knobSize.X/2+knobOffset.X+0.5)
+        local py=math.floor(knobSize.Y/2+knobOffset.Y+0.5)
+        if px==lastKnobX and py==lastKnobY then knobSkipped+=1 return end
+        lastKnobX,lastKnobY=px,py
+        knob.Position=UDim2.fromOffset(px,py)
         knobWrites+=1
     end
 
     local function updateKnobTarget(dx,dy)
-        local size=joystick.AbsoluteSize
-        local reach=math.max(1,math.min(size.X,size.Y)/2)
+        local reach=knobReach
         local distanceSquared=dx*dx+dy*dy
         local scale=distanceSquared>reach*reach and reach/math.sqrt(distanceSquared) or 1
         knobTarget=Vector2.new(dx*scale,dy*scale)
@@ -274,6 +280,7 @@ return function(watchPosture)
         updateKnobTarget(dx,dy)
         if begin then
             knobOffset=knobTarget
+            visualDebt=0
             writeKnob()
         end
         refreshKeys(os.clock(),false)
@@ -290,6 +297,8 @@ return function(watchPosture)
         applyChord("-",now)
         if owned then
             knobTarget,knobOffset=Vector2.zero,Vector2.zero
+            lastKnobX,lastKnobY=nil,nil
+            visualDebt=0
             knob.Position=UDim2.fromScale(0.5,0.5)
             knobWrites+=1
         end
@@ -403,6 +412,9 @@ return function(watchPosture)
     connections[#connections+1]=inputService.WindowFocusReleased:Connect(resetInput)
     connections[#connections+1]=player.CharacterRemoving:Connect(resetInput)
     connections[#connections+1]=joystick:GetPropertyChangedSignal("AbsoluteSize"):Connect(function()
+        knobSize=joystick.AbsoluteSize
+        knobReach=math.max(1,math.min(knobSize.X,knobSize.Y)/2)
+        lastKnobX,lastKnobY=nil,nil
         if touch then
             updateKnobTarget(x*radius,z*radius)
             writeKnob()
@@ -460,11 +472,27 @@ return function(watchPosture)
             end
             if retryAt and now>=retryAt then applyChord(applied,now) end
         end
-        if touch and knobOffset~=knobTarget then
-            local step=math.clamp(dt or 1/60,0,0.05)
-            knobOffset=knobOffset:Lerp(knobTarget,1-math.exp(-step/0.040))
-            if (knobOffset-knobTarget).Magnitude<0.06 then knobOffset=knobTarget end
-            writeKnob()
+        -- Visual-only adaptive cadence. Never defer sector selection, key events or the 16ms sweep.
+        local visualDt=dt or 1/60
+        if visualDt>1/40 then
+            visualSlowScore=math.min(6,visualSlowScore+1)
+        elseif visualDt<1/52 then
+            visualSlowScore=math.max(0,visualSlowScore-1)
+        end
+        if touch and (knobOffset~=knobTarget or visualDebt>0) then
+            local step=math.clamp(visualDt,0,0.05)
+            if knobOffset~=knobTarget then
+                knobOffset=knobOffset:Lerp(knobTarget,1-math.exp(-step/0.040))
+                if (knobOffset-knobTarget).Magnitude<0.06 then knobOffset=knobTarget end
+            end
+            visualDebt+=math.max(0,visualDt)
+            local interval=visualSlowScore>=3 and 1/12 or 0
+            if visualDebt>=interval or knobOffset==knobTarget then
+                writeKnob()
+                visualDebt=0
+            else
+                knobSkipped+=1
+            end
         end
     end)
 
@@ -473,7 +501,7 @@ return function(watchPosture)
         acceptingInput=false
         resetInput()
     end
-    api.Version="3.2.3-original-16ms-sweep-reverse-hop"
+    api.Version="3.2.4-original-16ms-sweep-recording"
     api.SetJumpMacro=function(value)
         jumpMacroEnabled=value==true
         if jumpTouch then jumpNextAt=os.clock()+JUMP_FAST_INTERVAL end
@@ -494,7 +522,8 @@ return function(watchPosture)
             jumpRepeatFailures=jumpRepeatFailures,jumpMacroRateCap=jumpSlowScore>=2 and 30 or 60,
             directPlayerMove=false,visibleJoystick=true,movementHalf=0.80,
             mode=low and "crouch-or-emote" or "standing",postureSource=postureSource,
-            sectorEvaluations=evaluations,knobWrites=knobWrites}
+            sectorEvaluations=evaluations,knobWrites=knobWrites,knobSkipped=knobSkipped,
+            visualRateLimited=visualSlowScore>=3}
     end
     env.PCKeyboardTouchBridgeV52=api
     return api

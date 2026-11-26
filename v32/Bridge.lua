@@ -116,7 +116,7 @@ return function(watchPosture)
     -- MAS Auto Jump (MASJES): held-button adaptation; no repeated Space injection.
     local jumpMacroEnabled=true
     local jumpRepeatAttempts,jumpRepeatFailures=0,0
-    local SPEED_TRIGGER,JUMP_FORCE,COOLDOWN=33,19,0.15
+    local JUMP_FORCE,COOLDOWN=19,0.15
     local lastJump=-math.huge
     local manualReleaseAt
     local jumpCharacter,jumpHumanoid,jumpRoot
@@ -338,10 +338,8 @@ return function(watchPosture)
         jumpTouch=input
         jumpRequests+=1
         if touch then refreshKeys(os.clock(),false) end
-        local hum,root=jumpParts()
-        -- Preserve a normal manual jump from rest or with the macro disabled.
-        local v=root and root.AssemblyLinearVelocity
-        if not jumpMacroEnabled or not v or v.X*v.X+v.Z*v.Z<SPEED_TRIGGER*SPEED_TRIGGER then
+        -- Native one-shot jump only when the held-jump macro is disabled.
+        if not jumpMacroEnabled then
             if not spaceDown and sendKey(Enum.KeyCode.Space,true) then
                 spaceDown=true
                 jumpPulses+=1
@@ -350,7 +348,7 @@ return function(watchPosture)
         end
     end
 
-    -- MASJES's original grounded speed/impulse/cooldown logic.
+    -- Adapted from MASJES: grounded impulse/cooldown, without a speed threshold.
     -- Only active during our existing PCJump touch; no external UI or loader.
     connections[#connections+1]=RunService.Heartbeat:Connect(function()
         if not enabled or not acceptingInput or not jumpTouch or not jumpMacroEnabled or spaceDown then return end
@@ -360,7 +358,6 @@ return function(watchPosture)
         if not hum or not root or hum.Health<=0 or hum.Sit or root.Anchored then return end
         if hum.FloorMaterial==Enum.Material.Air then return end
         local v=root.AssemblyLinearVelocity
-        if v.X*v.X+v.Z*v.Z<SPEED_TRIGGER*SPEED_TRIGGER then return end
         jumpRepeatAttempts+=1
         local ok=pcall(function()
             root.AssemblyLinearVelocity=Vector3.new(v.X,JUMP_FORCE,v.Z)
@@ -508,7 +505,7 @@ return function(watchPosture)
         acceptingInput=false
         resetInput()
     end
-    api.Version="3.2.5-autojump-held"
+    api.Version="3.2.6-autojump-held-no-speed"
     api.SetJumpMacro=function(value)
         jumpMacroEnabled=value==true
         return jumpMacroEnabled
@@ -525,7 +522,7 @@ return function(watchPosture)
             movementUpdates=movementUpdates,keyEvents=keyEvents,keyErrors=keyErrors,jumpRequests=jumpRequests,
             jumpPulses=jumpPulses,bufferedJumpCount=0,jumpActive=jumpTouch~=nil,
             jumpMacroEnabled=jumpMacroEnabled,jumpRepeatAttempts=jumpRepeatAttempts,
-            jumpRepeatFailures=jumpRepeatFailures,jumpMacroRateCap=1/COOLDOWN,jumpMode="mas-grounded-held",jumpSpeedTrigger=SPEED_TRIGGER,jumpVerticalVelocity=JUMP_FORCE,
+            jumpRepeatFailures=jumpRepeatFailures,jumpMacroRateCap=1/COOLDOWN,jumpMode="mas-grounded-held-no-speed",jumpSpeedTrigger=0,jumpVerticalVelocity=JUMP_FORCE,
             directPlayerMove=false,visibleJoystick=true,movementHalf=0.80,
             mode=low and "crouch-or-emote" or "standing",postureSource=postureSource,
             sectorEvaluations=evaluations,knobWrites=knobWrites,knobSkipped=knobSkipped,

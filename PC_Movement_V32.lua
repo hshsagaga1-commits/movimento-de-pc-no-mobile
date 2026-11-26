@@ -1714,14 +1714,13 @@ return function(watchPosture)
     local sweepTarget,sweepAt
     local jumpTouch
     local spaceDown=false
-    -- One Space Up/Down pair per frame maximum; never flood the input queue.
+    -- MAS Auto Jump (MASJES): held-button adaptation; no repeated Space injection.
     local jumpMacroEnabled=true
-    local jumpNextAt=0
-    local jumpSlowScore=0
-    local jumpRepeatAttempts=0
-    local jumpRepeatFailures=0
-    local JUMP_FAST_INTERVAL=1/60
-    local JUMP_SLOW_INTERVAL=1/30
+    local jumpRepeatAttempts,jumpRepeatFailures=0,0
+    local SPEED_TRIGGER,JUMP_FORCE,COOLDOWN=33,19,0.15
+    local lastJump=-math.huge
+    local manualReleaseAt
+    local jumpCharacter,jumpHumanoid,jumpRoot
     local knobTarget,knobOffset=Vector2.zero,Vector2.zero
     local knobSize=joystick.AbsoluteSize
     local knobReach=math.max(1,math.min(knobSize.X,knobSize.Y)/2)
@@ -1905,32 +1904,34 @@ return function(watchPosture)
         end
     end
 
-    -- Scroll-like repeated jump, without extra Heartbeat or task loops.
-    -- Event delivery/actual jumps depend on the game and executor.
-    local function pulseJump()
-        if spaceDown then
-            if not sendKey(Enum.KeyCode.Space,false) then
-                jumpRepeatFailures+=1
-                return false
-            end
+    local function jumpParts()
+        local char=player.Character
+        if char~=jumpCharacter then
+            jumpCharacter,jumpHumanoid,jumpRoot=char,nil,nil
+            lastJump=-math.huge
+        end
+        if not char then return nil,nil end
+        if not jumpHumanoid or jumpHumanoid.Parent~=char then
+            jumpHumanoid=char:FindFirstChildOfClass("Humanoid")
+        end
+        if not jumpRoot or jumpRoot.Parent~=char then
+            jumpRoot=char:FindFirstChild("HumanoidRootPart")
+        end
+        return jumpHumanoid,jumpRoot
+    end
+
+    local function releaseSpace()
+        if spaceDown and sendKey(Enum.KeyCode.Space,false) then
             spaceDown=false
         end
-        if sendKey(Enum.KeyCode.Space,true) then
-            spaceDown=true
-            jumpPulses+=1
-            return true
-        end
-        jumpRepeatFailures+=1
-        return false
+        if not spaceDown then manualReleaseAt=nil end
     end
 
     local function stopJump()
         jumpTouch=nil
-        jumpNextAt=0
-        jumpSlowScore=0
         reverseStrafeSide=nil
         if touch then refreshKeys(os.clock(),false) end
-        if spaceDown and sendKey(Enum.KeyCode.Space,false) then spaceDown=false end
+        releaseSpace()
     end
 
     local function requestJump(input)
@@ -1938,9 +1939,41 @@ return function(watchPosture)
         jumpTouch=input
         jumpRequests+=1
         if touch then refreshKeys(os.clock(),false) end
-        pulseJump() -- immediate first press; then repeat only while finger is held
-        jumpNextAt=os.clock()+JUMP_FAST_INTERVAL
+        local hum,root=jumpParts()
+        -- Preserve a normal manual jump from rest or with the macro disabled.
+        local v=root and root.AssemblyLinearVelocity
+        if not jumpMacroEnabled or not v or v.X*v.X+v.Z*v.Z<SPEED_TRIGGER*SPEED_TRIGGER then
+            if not spaceDown and sendKey(Enum.KeyCode.Space,true) then
+                spaceDown=true
+                jumpPulses+=1
+                manualReleaseAt=os.clock()+0.035
+            end
+        end
     end
+
+    -- MASJES's original grounded speed/impulse/cooldown logic.
+    -- Only active during our existing PCJump touch; no external UI or loader.
+    connections[#connections+1]=RunService.Heartbeat:Connect(function()
+        if not enabled or not acceptingInput or not jumpTouch or not jumpMacroEnabled or spaceDown then return end
+        local now=os.clock()
+        if now-lastJump<COOLDOWN then return end
+        local hum,root=jumpParts()
+        if not hum or not root or hum.Health<=0 or hum.Sit or root.Anchored then return end
+        if hum.FloorMaterial==Enum.Material.Air then return end
+        local v=root.AssemblyLinearVelocity
+        if v.X*v.X+v.Z*v.Z<SPEED_TRIGGER*SPEED_TRIGGER then return end
+        jumpRepeatAttempts+=1
+        local ok=pcall(function()
+            root.AssemblyLinearVelocity=Vector3.new(v.X,JUMP_FORCE,v.Z)
+        end)
+        if ok then
+            lastJump=now
+            jumpPulses+=1
+        else
+            jumpRepeatFailures+=1
+            lastJump=now
+        end
+    end)
 
     local function resetInput()
         releaseMovement(os.clock())
@@ -2033,35 +2066,9 @@ return function(watchPosture)
 
     RunService:BindToRenderStep(BIND_NAME,Enum.RenderPriority.Input.Value+8,function(dt)
         if not enabled then return end
-        -- Adaptive 60/30 Hz cap; no catch-up burst after a slow frame.
-        if jumpTouch and jumpMacroEnabled then
-            local step=dt or 1/60
-            if step>1/40 then
-                jumpSlowScore=math.min(4,jumpSlowScore+1)
-            elseif step<1/52 then
-                jumpSlowScore=math.max(0,jumpSlowScore-1)
-            end
-            local interval=jumpSlowScore>=2 and JUMP_SLOW_INTERVAL or JUMP_FAST_INTERVAL
-            local now=os.clock()
-            if now>=jumpNextAt then
-                if step<=1/26 then
-                    if touch and z>0.22 then
-                        -- Reverse hop uses separate frames for Space-up and Space-down.
-                        -- The game gets a real release interval instead of two events
-                        -- compressed into one frame. At 60fps this means up to 30 Hz.
-                        if spaceDown then
-                            if sendKey(Enum.KeyCode.Space,false) then spaceDown=false end
-                        else
-                            jumpRepeatAttempts+=1
-                            pulseJump()
-                        end
-                    else
-                        jumpRepeatAttempts+=1
-                        pulseJump()
-                    end
-                end
-                jumpNextAt=now+interval
-            end
+        -- Release only the one-shot native tap; never repeat synthetic Space.
+        if spaceDown and (not jumpTouch or (manualReleaseAt and os.clock()>=manualReleaseAt)) then
+            releaseSpace()
         end
         if sweepAt or centerExpires or retryAt then
             local now=os.clock()
@@ -2102,10 +2109,9 @@ return function(watchPosture)
         acceptingInput=false
         resetInput()
     end
-    api.Version="3.2.4-original-16ms-sweep-recording"
+    api.Version="3.2.5-autojump-held"
     api.SetJumpMacro=function(value)
         jumpMacroEnabled=value==true
-        if jumpTouch then jumpNextAt=os.clock()+JUMP_FAST_INTERVAL end
         return jumpMacroEnabled
     end
     api.OwnsTouch=function(input) return (touch~=nil and touch==input) or (jumpTouch~=nil and jumpTouch==input) end
@@ -2118,9 +2124,9 @@ return function(watchPosture)
             reverseStrafeSide=reverseStrafeSide,originalSideSweep16ms=true,
             movementTouchActive=touch~=nil,movementTouch=touch,movementCaptures=movementCaptures,
             movementUpdates=movementUpdates,keyEvents=keyEvents,keyErrors=keyErrors,jumpRequests=jumpRequests,
-            jumpPulses=jumpPulses,bufferedJumpCount=0,jumpActive=spaceDown,
+            jumpPulses=jumpPulses,bufferedJumpCount=0,jumpActive=jumpTouch~=nil,
             jumpMacroEnabled=jumpMacroEnabled,jumpRepeatAttempts=jumpRepeatAttempts,
-            jumpRepeatFailures=jumpRepeatFailures,jumpMacroRateCap=jumpSlowScore>=2 and 30 or 60,
+            jumpRepeatFailures=jumpRepeatFailures,jumpMacroRateCap=1/COOLDOWN,jumpMode="mas-grounded-held",jumpSpeedTrigger=SPEED_TRIGGER,jumpVerticalVelocity=JUMP_FORCE,
             directPlayerMove=false,visibleJoystick=true,movementHalf=0.80,
             mode=low and "crouch-or-emote" or "standing",postureSource=postureSource,
             sectorEvaluations=evaluations,knobWrites=knobWrites,knobSkipped=knobSkipped,
@@ -3346,7 +3352,7 @@ return function(modules)
     -- Do not silently reuse a running Assist build: that invalidates this A/B test.
     if env.PCMovementV32 then
         local existing=env.PCMovementV32
-        if type(existing)=="table" and existing.Version=="3.2.4-recording-no-assist" then
+        if type(existing)=="table" and existing.Version=="3.2.5-autojump-no-assist" then
             return existing
         end
         error("PC Movement is already running. Rejoin before the no-Assist test.",0)
@@ -3356,7 +3362,7 @@ return function(modules)
     end
 
     local players=game:GetService("Players")
-    local api={Version="3.2.4-recording-no-assist"}
+    local api={Version="3.2.5-autojump-no-assist"}
     local state="starting"
     local phaseBusy=true
     local stopRequested=false

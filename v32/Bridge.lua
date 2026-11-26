@@ -112,13 +112,11 @@ return function(watchPosture)
     local retryAt
     local sweepTarget,sweepAt
     local jumpTouch
-    local spaceDown=false
     -- MAS Auto Jump (MASJES): held-button adaptation; no repeated Space injection.
     local jumpMacroEnabled=true
     local jumpRepeatAttempts,jumpRepeatFailures=0,0
     local JUMP_FORCE,COOLDOWN=19,0.15
-    local lastJump=-math.huge
-    local manualReleaseAt
+    local lastJump=0
     local jumpCharacter,jumpHumanoid,jumpRoot
     local knobTarget,knobOffset=Vector2.zero,Vector2.zero
     local knobSize=joystick.AbsoluteSize
@@ -307,7 +305,7 @@ return function(watchPosture)
         local char=player.Character
         if char~=jumpCharacter then
             jumpCharacter,jumpHumanoid,jumpRoot=char,nil,nil
-            lastJump=-math.huge
+            lastJump=0
         end
         if not char then return nil,nil end
         if not jumpHumanoid or jumpHumanoid.Parent~=char then
@@ -319,18 +317,10 @@ return function(watchPosture)
         return jumpHumanoid,jumpRoot
     end
 
-    local function releaseSpace()
-        if spaceDown and sendKey(Enum.KeyCode.Space,false) then
-            spaceDown=false
-        end
-        if not spaceDown then manualReleaseAt=nil end
-    end
-
     local function stopJump()
         jumpTouch=nil
         reverseStrafeSide=nil
         if touch then refreshKeys(os.clock(),false) end
-        releaseSpace()
     end
 
     local function requestJump(input)
@@ -338,36 +328,21 @@ return function(watchPosture)
         jumpTouch=input
         jumpRequests+=1
         if touch then refreshKeys(os.clock(),false) end
-        -- Native one-shot jump only when the held-jump macro is disabled.
-        if not jumpMacroEnabled then
-            if not spaceDown and sendKey(Enum.KeyCode.Space,true) then
-                spaceDown=true
-                jumpPulses+=1
-                manualReleaseAt=os.clock()+0.035
-            end
-        end
     end
 
-    -- Adapted from MASJES: grounded impulse/cooldown, without a speed threshold.
-    -- Only active during our existing PCJump touch; no external UI or loader.
+    -- MASJES original timing and vertical velocity, with only the requested
+    -- held-button gate and removal of the speed threshold.
     connections[#connections+1]=RunService.Heartbeat:Connect(function()
-        if not enabled or not acceptingInput or not jumpTouch or not jumpMacroEnabled or spaceDown then return end
-        local now=os.clock()
-        if now-lastJump<COOLDOWN then return end
+        if not enabled or not acceptingInput or not jumpTouch or not jumpMacroEnabled then return end
         local hum,root=jumpParts()
-        if not hum or not root or hum.Health<=0 or hum.Sit or root.Anchored then return end
+        if not hum or not root or hum.Health<=0 then return end
         if hum.FloorMaterial==Enum.Material.Air then return end
-        local v=root.AssemblyLinearVelocity
-        jumpRepeatAttempts+=1
-        local ok=pcall(function()
-            root.AssemblyLinearVelocity=Vector3.new(v.X,JUMP_FORCE,v.Z)
-        end)
-        if ok then
-            lastJump=now
+        local vel=root.AssemblyLinearVelocity
+        if tick()-lastJump>=COOLDOWN then
+            lastJump=tick()
+            jumpRepeatAttempts+=1
+            root.AssemblyLinearVelocity=Vector3.new(vel.X,JUMP_FORCE,vel.Z)
             jumpPulses+=1
-        else
-            jumpRepeatFailures+=1
-            lastJump=now
         end
     end)
 
@@ -394,7 +369,6 @@ return function(watchPosture)
         resetInput()
         -- Give a transient injection failure one last chance before releasing ownership.
         if pressed~=0 then applyChord("-",os.clock()) end
-        if spaceDown then stopJump() end
         gui:Destroy()
         if env.PCKeyboardTouchBridgeV52==api then env.PCKeyboardTouchBridgeV52=nil end
         if env.__PCKeyboardTouchBridgeV52Cleanup==cleanup then env.__PCKeyboardTouchBridgeV52Cleanup=nil end
@@ -462,10 +436,6 @@ return function(watchPosture)
 
     RunService:BindToRenderStep(BIND_NAME,Enum.RenderPriority.Input.Value+8,function(dt)
         if not enabled then return end
-        -- Release only the one-shot native tap; never repeat synthetic Space.
-        if spaceDown and (not jumpTouch or (manualReleaseAt and os.clock()>=manualReleaseAt)) then
-            releaseSpace()
-        end
         if sweepAt or centerExpires or retryAt then
             local now=os.clock()
             if centerExpires and now>centerExpires then refreshKeys(now,false) end
@@ -505,7 +475,7 @@ return function(watchPosture)
         acceptingInput=false
         resetInput()
     end
-    api.Version="3.2.6-autojump-held-no-speed"
+    api.Version="3.2.7-mas-timing-held"
     api.SetJumpMacro=function(value)
         jumpMacroEnabled=value==true
         return jumpMacroEnabled
@@ -522,7 +492,7 @@ return function(watchPosture)
             movementUpdates=movementUpdates,keyEvents=keyEvents,keyErrors=keyErrors,jumpRequests=jumpRequests,
             jumpPulses=jumpPulses,bufferedJumpCount=0,jumpActive=jumpTouch~=nil,
             jumpMacroEnabled=jumpMacroEnabled,jumpRepeatAttempts=jumpRepeatAttempts,
-            jumpRepeatFailures=jumpRepeatFailures,jumpMacroRateCap=1/COOLDOWN,jumpMode="mas-grounded-held-no-speed",jumpSpeedTrigger=0,jumpVerticalVelocity=JUMP_FORCE,
+            jumpRepeatFailures=jumpRepeatFailures,jumpMacroRateCap=1/COOLDOWN,jumpMode="mas-original-timing-held-no-speed",jumpSpeedTrigger=0,jumpVerticalVelocity=JUMP_FORCE,
             directPlayerMove=false,visibleJoystick=true,movementHalf=0.80,
             mode=low and "crouch-or-emote" or "standing",postureSource=postureSource,
             sectorEvaluations=evaluations,knobWrites=knobWrites,knobSkipped=knobSkipped,

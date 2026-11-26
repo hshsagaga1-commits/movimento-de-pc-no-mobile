@@ -4,7 +4,7 @@ return function(modules)
     -- Do not silently reuse a running Assist build: that invalidates this A/B test.
     if env.PCMovementV32 then
         local existing=env.PCMovementV32
-        if type(existing)=="table" and existing.Version=="3.2.4-recording-no-assist" then
+        if type(existing)=="table" and existing.Version=="3.2.5-autojump-no-assist" then
             return existing
         end
         error("PC Movement is already running. Rejoin before the no-Assist test.",0)
@@ -14,7 +14,7 @@ return function(modules)
     end
 
     local players=game:GetService("Players")
-    local api={Version="3.2.4-recording-no-assist"}
+    local api={Version="3.2.5-autojump-no-assist"}
     local state="starting"
     local phaseBusy=true
     local stopRequested=false
